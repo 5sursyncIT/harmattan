@@ -1,0 +1,205 @@
+.product-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  transition: var(--transition);
+  height: 100%;
+}
+
+.product-card:hover {
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
+  transform: translateY(-4px);
+  border-color: rgba(5, 150, 105, 0.25);
+}
+
+.product-card-image {
+  position: relative;
+  aspect-ratio: 2/3;
+  background: var(--color-light-bg);
+  overflow: hidden;
+}
+
+.product-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.5s ease;
+}
+
+.product-card:hover .product-card-image img {
+  transform: scale(1.08);
+}
+
+/* Overlay buttons (quick preview + add to cart) */
+.product-card-overlay-btns {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
+}
+
+.product-card-cart-btn-desktop,
+.product-card-quick-btn {
+  background: var(--color-green);
+  color: var(--color-white);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translateY(15px);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: var(--shadow-md);
+}
+
+.product-card-quick-btn {
+  background: var(--color-dark);
+  transition-delay: 0.05s;
+}
+
+.product-card:hover .product-card-cart-btn-desktop,
+.product-card:hover .product-card-quick-btn {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.product-card-cart-btn-desktop:hover {
+  background: var(--color-orange);
+  transform: scale(1.1);
+}
+
+.product-card-quick-btn:hover {
+  background: var(--color-green);
+  transform: scale(1.1);
+}
+
+/* Mobile always-visible cart button */
+.product-card-cart-btn-mobile {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 10px;
+  margin-top: 10px;
+  background: var(--color-green);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  transition: background 0.2s;
+}
+
+.product-card-cart-btn-mobile:hover {
+  background: var(--color-orange);
+}
+
+.product-card-info {
+  padding: 12px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-white);
+}
+
+.product-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--color-dark);
+  line-height: 1.4;
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  transition: color 0.2s ease;
+}
+
+.product-card:hover .product-card-title {
+  color: var(--color-green);
+}
+
+.product-card-author {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-light);
+  margin-bottom: 8px;
+}
+
+.product-card-desc {
+  display: none;
+}
+
+.product-card-footer {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  border-top: 1px solid var(--color-light-bg);
+  padding-top: 12px;
+}
+
+.product-card-ref {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-family: monospace;
+}
+
+.product-card-price {
+  font-size: 16px;
+  font-weight: 900;
+  color: var(--color-orange);
+}
+
+/* ── Image fallback ─────────────────────── */
+.product-card-img-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  transition: var(--transition);
+}
+
+.product-card-img-initials {
+  font-size: 48px;
+  font-weight: 900;
+  line-height: 1;
+  opacity: 0.9;
+  letter-spacing: -2px;
+}
+
+.product-card-img-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.4;
+  opacity: 0.75;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  max-width: 120px;
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+  .product-card-cart-btn-desktop,
+  .product-card-quick-btn {
+    display: none;
+  }
+
+  .product-card-cart-btn-mobile {
+    display: flex;
+  }
+}

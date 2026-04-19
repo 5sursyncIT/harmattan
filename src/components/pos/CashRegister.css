@@ -1,0 +1,170 @@
+.pos-cr-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.pos-cr-panel {
+  background: #fff;
+  border-radius: 14px;
+  width: 90%;
+  max-width: 420px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.pos-cr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+}
+
+.pos-cr-header h3 { margin: 0; font-size: 1rem; }
+.pos-cr-header button { background: none; border: none; color: #888; cursor: pointer; }
+
+.pos-cr-tab-content {
+  padding: 20px;
+}
+
+.pos-cr-info {
+  font-size: 0.85rem;
+  color: #666;
+  margin: 0 0 14px;
+}
+
+.pos-cr-field {
+  margin-bottom: 12px;
+}
+
+.pos-cr-field label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #555;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.pos-cr-field input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 1rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  outline: none;
+}
+
+.pos-cr-field input:focus {
+  border-color: #10531a;
+}
+
+.pos-cr-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.pos-cr-tabs button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: #f8f8f8;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.pos-cr-tabs button.active {
+  background: #10531a;
+  color: #fff;
+  border-color: #10531a;
+}
+
+.pos-cr-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.pos-cr-btn.primary {
+  background: #10531a;
+  color: #fff;
+}
+
+.pos-cr-btn.danger {
+  background: #c0392b;
+  color: #fff;
+}
+
+.pos-cr-btn.secondary {
+  background: #f5f5f5;
+  color: #555;
+  border: 1px solid #ddd;
+}
+
+.pos-cr-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pos-cr-error {
+  color: #c0392b;
+  font-size: 0.8rem;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.pos-cr-result-grid {
+  margin: 12px 0;
+  font-size: 0.8rem;
+}
+
+.pos-cr-result-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.pos-cr-result-row.header {
+  font-weight: 700;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #888;
+}
+
+.pos-cr-result-row .ok { color: #10531a; font-weight: 700; }
+.pos-cr-result-row .diff { color: #c0392b; font-weight: 700; }
+
+.pos-cr-tab-content hr {
+  border: none;
+  border-top: 1px solid #eee;
+  margin: 16px 0;
+}
+
+.pos-cr-tab-content h4 {
+  text-align: center;
+  margin: 0 0 12px;
+  color: #10531a;
+}

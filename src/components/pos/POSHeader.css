@@ -1,0 +1,203 @@
+.pos-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  min-height: 72px;
+  background: #ffffff;
+  color: #0f172a;
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.03);
+}
+
+.pos-header-left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.pos-header-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 800;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  color: #0f172a;
+}
+
+.pos-header-logo {
+  height: 32px;
+  width: auto;
+  border-radius: 4px;
+}
+
+.pos-header-terminal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.04);
+  padding: 8px 14px;
+  min-height: 44px;
+  border-radius: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pos-header-terminal:hover {
+  background: rgba(15, 23, 42, 0.08);
+  color: #0f172a;
+}
+
+.pos-terminal-picker {
+  display: flex;
+  gap: 8px;
+}
+
+.pos-terminal-opt {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: 12px;
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pos-terminal-opt:hover {
+  background: rgba(15, 23, 42, 0.04);
+  color: #0f172a;
+}
+
+.pos-terminal-opt.active {
+  background: #10531a;
+  border-color: #10531a;
+  color: #ffffff;
+}
+
+.pos-header-center {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 10px 20px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.03);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  color: #334155;
+}
+
+.pos-header-separator { color: rgba(148, 163, 184, 0.4); margin: 0 4px; }
+.pos-header-sales { font-size: 0.85rem; font-weight: 700; color: #0f172a; }
+
+.pos-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pos-header-staff {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #0f172a;
+  padding: 0 8px;
+}
+
+.pos-header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  background: #ffffff;
+  color: #475569;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pos-header-btn:hover {
+  background: rgba(15, 23, 42, 0.04);
+  color: #0f172a;
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.pos-header-caisse {
+  width: auto;
+  padding: 0 16px;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.pos-header-caisse.open {
+  background: rgba(16, 185, 129, 0.1);
+  color: #059669;
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+.pos-header-caisse.closed {
+  background: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.pos-header-logout {
+  color: #dc2626;
+}
+
+.pos-header-logout:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #b91c1c;
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+@media (max-width: 1024px) {
+  .pos-header {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 14px;
+  }
+
+  .pos-header-center {
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 640px) {
+  .pos-header {
+    min-height: auto;
+  }
+
+  .pos-header-left,
+  .pos-header-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .pos-header-right {
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .pos-header-staff {
+    order: -1;
+    width: 100%;
+    padding: 0;
+  }
+}

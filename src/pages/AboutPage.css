@@ -1,0 +1,101 @@
+.about-hero {
+  background: linear-gradient(135deg, var(--color-dark) 0%, var(--color-green) 100%);
+  padding: 60px 0;
+  text-align: center;
+  color: var(--color-white);
+}
+
+.about-hero h1 {
+  font-size: 36px;
+  font-weight: 900;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.about-hero p {
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+.about-section {
+  padding: 40px 0;
+}
+
+.about-section p {
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--color-text-light);
+  max-width: 800px;
+}
+
+.about-values {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+  padding: 40px 0;
+}
+
+.value-card {
+  text-align: center;
+  padding: 32px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  transition: all 0.3s;
+}
+
+.value-card:hover {
+  border-color: var(--color-green);
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.value-card svg {
+  color: var(--color-green);
+  margin-bottom: 16px;
+}
+
+.value-card h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-dark);
+  margin-bottom: 8px;
+}
+
+.value-card p {
+  font-size: 13px;
+  color: var(--color-text-light);
+  line-height: 1.6;
+}
+
+.about-list {
+  max-width: 600px;
+}
+
+.about-list li {
+  position: relative;
+  padding: 8px 0 8px 24px;
+  font-size: 15px;
+  color: var(--color-text-light);
+  line-height: 1.6;
+}
+
+.about-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 16px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-green);
+}
+
+@media (max-width: 768px) {
+  .about-hero h1 {
+    font-size: 26px;
+  }
+
+  .about-values {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

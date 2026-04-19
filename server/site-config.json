@@ -1,0 +1,220 @@
+{
+  "contact": {
+    "address": "Dakar, 10, VDN après le pont de Fann, à côté de la Pédiatrie 24, Sicap Karak 45034",
+    "address_short": "10, VDN, Sicap Karak 45034, Dakar",
+    "phones": [
+      "+221 33 825 98 58",
+      "+221 70 953 02 40",
+      "+221 77 545 23 00"
+    ],
+    "emails": [
+      "commandes@senharmattan.com",
+      "bachir.coly@senharmattan.com",
+      "direction@senharmattan.com"
+    ],
+    "hours": "Lun - Ven: 8h - 18h30 | Sam: 9h - 18h30",
+    "hours_detail": {
+      "weekdays": "Lundi - Vendredi : 8h - 18h30",
+      "saturday": "Samedi : 9h - 18h30",
+      "sunday": "Dimanche : Fermé"
+    },
+    "departments": [
+      {
+        "value": "edition",
+        "label": "Édition",
+        "email": "bachir.coly@senharmattan.com"
+      },
+      {
+        "value": "librairie",
+        "label": "Librairie",
+        "email": "commandes@senharmattan.com"
+      },
+      {
+        "value": "direction",
+        "label": "Direction",
+        "email": "direction@senharmattan.com"
+      },
+      {
+        "value": "promotion",
+        "label": "Promotion",
+        "email": "seingane.harmattan@senharmattan.com"
+      }
+    ]
+  },
+  "social": {
+    "facebook": "https://www.facebook.com/harmattan.sn",
+    "youtube": "https://www.youtube.com/@EditionsLHarmattanS%C3%A9n%C3%A9gal",
+    "twitter": "https://x.com/HARMATTANSN",
+    "linkedin": "https://www.linkedin.com/company/l-harmattan-s%C3%A9n%C3%A9gal/"
+  },
+  "youtube_channel_id": "UCnXwbe8yIv7sBohERVNB-ZA",
+  "hero_slides": [
+    {
+      "id": 1,
+      "image": "/images/slider/slide3.jpg",
+      "title": "Bienvenue chez L'Harmattan Sénégal",
+      "subtitle": "Plus de 6 000 ouvrages africains et internationaux à Dakar",
+      "link": "/catalogue",
+      "btnPrimary": "Découvrir le catalogue",
+      "isBanner": false
+    },
+    {
+      "id": 2,
+      "image": "/images/slider/slide-tissou.jpg",
+      "title": "Prix KEN BUGUL",
+      "link": "/catalogue",
+      "isBanner": true
+    },
+    {
+      "id": 3,
+      "image": "/images/slider/slide-helene.jpg",
+      "title": "Prix des lycéennes",
+      "link": "/catalogue",
+      "isBanner": true
+    }
+  ],
+  "upcoming_books": [
+    {
+      "title": "Les mémoires du baobab",
+      "author": "Aminata Diop",
+      "release_date": "2026-05-15",
+      "summary": "Un roman de transmission entre Dakar et Saint-Louis, porté par une voix féminine contemporaine et une mémoire familiale vibrante.",
+      "cover": "",
+      "product_id": "",
+      "preorder_discount_pct": 0,
+      "link": "/catalogue"
+    },
+    {
+      "title": "Repenser la cité africaine",
+      "author": "Mamadou Ndiaye",
+      "release_date": "2026-06-03",
+      "summary": "Un essai sur les nouvelles dynamiques urbaines, l’habitat, la mobilité et les imaginaires politiques des métropoles africaines.",
+      "cover": "",
+      "product_id": "",
+      "preorder_discount_pct": 0,
+      "link": "/catalogue"
+    },
+    {
+      "title": "Paroles de mangrove",
+      "author": "Seynabou Faye",
+      "release_date": "2026-06-24",
+      "summary": "Un recueil poétique qui explore les paysages du littoral, les gestes du quotidien et les voix intérieures d’une génération en mouvement.",
+      "cover": "",
+      "product_id": "",
+      "preorder_discount_pct": 0,
+      "link": "/catalogue"
+    }
+  ],
+  "faq": [
+    {
+      "category": "Commandes",
+      "questions": [
+        {
+          "q": "Comment passer une commande ?",
+          "a": "Parcourez notre catalogue, ajoutez les livres souhaités à votre panier, puis cliquez sur « Passer la commande ». Renseignez vos informations de livraison et choisissez votre moyen de paiement."
+        },
+        {
+          "q": "Puis-je modifier ou annuler ma commande ?",
+          "a": "Vous pouvez modifier ou annuler votre commande tant qu'elle n'a pas été expédiée. Contactez-nous rapidement par email à direction@senharmattan.com ou par téléphone."
+        },
+        {
+          "q": "Comment suivre ma commande ?",
+          "a": "Un email de confirmation vous est envoyé à chaque étape. Vous pouvez également nous contacter pour connaître l'état de votre commande."
+        }
+      ]
+    },
+    {
+      "category": "Paiement",
+      "questions": [
+        {
+          "q": "Quels moyens de paiement acceptez-vous ?",
+          "a": "Nous acceptons Orange Money, Wave, les cartes bancaires (Visa/Mastercard) et les virements bancaires."
+        },
+        {
+          "q": "Le paiement est-il sécurisé ?",
+          "a": "Oui, tous les paiements sont sécurisés. Les paiements par carte bancaire sont traités via des plateformes certifiées."
+        },
+        {
+          "q": "Comment payer par Orange Money ou Wave ?",
+          "a": "Sélectionnez le moyen de paiement lors de la commande. Les instructions de transfert vous seront communiquées avec le numéro de compte à créditer."
+        }
+      ]
+    },
+    {
+      "category": "Livraison",
+      "questions": [
+        {
+          "q": "Quels sont les délais de livraison ?",
+          "a": "Pour Dakar : 24 à 48 heures. Pour les régions du Sénégal : 3 à 5 jours. Pour l'international : 7 à 15 jours selon la destination."
+        },
+        {
+          "q": "Quels sont les frais de livraison ?",
+          "a": "Les frais de livraison dépendent de la destination et du poids de la commande. Ils sont calculés et affichés avant la validation du paiement."
+        },
+        {
+          "q": "Livrez-vous en dehors du Sénégal ?",
+          "a": "Oui, nous livrons dans toute l'Afrique de l'Ouest et à l'international. Les délais et frais varient selon la destination."
+        }
+      ]
+    },
+    {
+      "category": "Retours",
+      "questions": [
+        {
+          "q": "Puis-je retourner un livre ?",
+          "a": "Vous disposez de 14 jours après réception pour retourner un produit. Le livre doit être en parfait état, non ouvert et dans son emballage d'origine."
+        },
+        {
+          "q": "Comment effectuer un retour ?",
+          "a": "Contactez-nous à direction@senharmattan.com en indiquant votre numéro de commande et le motif du retour. Nous vous communiquerons la procédure à suivre."
+        }
+      ]
+    }
+  ],
+  "smtp": {
+    "host": "127.0.0.1",
+    "port": 1025,
+    "secure": false,
+    "user": "",
+    "pass": ""
+  },
+  "manuscript_genres": [
+    "Roman",
+    "Essai",
+    "Poésie",
+    "Théâtre",
+    "Conte",
+    "Mémoire / Thèse",
+    "Autre"
+  ],
+  "payment_methods": [
+    {
+      "id": "orange_money",
+      "label": "Orange Money",
+      "icon": "📱",
+      "enabled": true,
+      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nCode marchand OM : **413513**\nMentionnez votre nom comme référence"
+    },
+    {
+      "id": "wave",
+      "label": "Wave",
+      "icon": "📱",
+      "enabled": true,
+      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nMentionnez votre nom comme référence"
+    },
+    {
+      "id": "virement",
+      "label": "Virement bancaire",
+      "icon": "🏦",
+      "enabled": true,
+      "instructions": "Banque : CBAO CLAIR DE LUNE\nIBAN : **SN08 SN012 01212 036199352101 46**\nSWIFT : CBAOSNDA\nRéférence : votre nom"
+    },
+    {
+      "id": "cb",
+      "label": "Carte bancaire",
+      "icon": "💳",
+      "enabled": false,
+      "instructions": "Le paiement par carte sera bientôt disponible"
+    }
+  ]
+}

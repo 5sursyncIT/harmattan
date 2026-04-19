@@ -1,0 +1,230 @@
+.pos-payment-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.pos-payment-panel {
+  background: #fff;
+  border-radius: 16px;
+  width: 90%;
+  max-width: 440px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 24px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+
+.pos-payment-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.pos-payment-header h2 {
+  margin: 0;
+  font-size: 1.3rem;
+  color: #0a1628;
+}
+
+.pos-payment-close {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.pos-payment-total {
+  display: flex;
+  justify-content: space-between;
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: #0a1628;
+  padding: 12px 16px;
+  background: #f5f5f5;
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+
+.pos-payment-methods {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.pos-pm-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 8px;
+  border: 2px solid #e0e0e0;
+  border-radius: 10px;
+  background: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  color: #555;
+}
+
+.pos-pm-btn:hover {
+  border-color: var(--pm-color);
+}
+
+.pos-pm-btn.active {
+  border-color: var(--pm-color);
+  background: color-mix(in srgb, var(--pm-color) 10%, #fff);
+  color: var(--pm-color);
+}
+
+.pos-pm-emoji {
+  font-size: 1.5rem;
+}
+
+.pos-payment-split {
+  background: #f8f8f8;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.pos-payment-split-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.pos-payment-split-header select {
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+
+.pos-payment-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pos-payment-amount-input {
+  flex: 1;
+  padding: 10px;
+  font-size: 1.2rem;
+  font-weight: 700;
+  text-align: right;
+  border: 2px solid #ddd;
+  border-radius: 8px;
+  outline: none;
+}
+
+.pos-payment-add-btn {
+  padding: 10px 16px;
+  background: #10531a;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pos-numpad-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.pos-numpad-key {
+  padding: 12px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.pos-numpad-key:active {
+  background: #10531a;
+  color: #fff;
+}
+
+.pos-payment-list {
+  margin-bottom: 12px;
+}
+
+.pos-payment-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #f0faf2;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.pos-payment-line button {
+  background: none;
+  border: none;
+  color: #c0392b;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.pos-payment-change {
+  text-align: center;
+  padding: 10px;
+  background: #fff3e0;
+  border-radius: 8px;
+  color: #e8772e;
+  font-size: 1rem;
+  margin-bottom: 12px;
+}
+
+.pos-payment-error {
+  text-align: center;
+  padding: 8px;
+  color: #c0392b;
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+}
+
+.pos-payment-validate {
+  width: 100%;
+  padding: 14px;
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #10531a;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pos-payment-validate:hover:not(:disabled) {
+  background: #0d4215;
+}
+
+.pos-payment-validate:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

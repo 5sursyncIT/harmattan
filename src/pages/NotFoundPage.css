@@ -1,0 +1,33 @@
+.notfound-page {
+  padding: 80px 0;
+}
+
+.notfound-content {
+  text-align: center;
+}
+
+.notfound-content h1 {
+  font-size: 120px;
+  font-weight: 900;
+  color: var(--color-border);
+  line-height: 1;
+  margin-bottom: 8px;
+}
+
+.notfound-content h2 {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--color-dark);
+  margin-bottom: 12px;
+}
+
+.notfound-content p {
+  color: var(--color-text-light);
+  margin-bottom: 32px;
+}
+
+.notfound-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}

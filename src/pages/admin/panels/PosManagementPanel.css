@@ -1,0 +1,346 @@
+/* ─── Tabs ──────────────────────────────────── */
+.pos-mgmt-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.pos-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.pos-tab:hover {
+  color: #111827;
+  background: #f9fafb;
+}
+
+.pos-tab.active {
+  color: #10531a;
+  border-bottom-color: #10531a;
+}
+
+.pos-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ─── Generate code card ────────────────────── */
+.pos-generate-card {
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border: 1px solid #bfdbfe;
+}
+
+.pos-generate-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  color: #1e40af;
+}
+
+.pos-hint {
+  margin: 0 0 14px;
+  color: #4b5563;
+  font-size: 0.88rem;
+}
+
+.pos-generate-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pos-generate-form input {
+  flex: 1;
+  min-width: 200px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.pos-code-display {
+  margin-top: 14px;
+  padding: 14px 18px;
+  background: #fff;
+  border: 2px dashed #10531a;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pos-code-label {
+  font-size: 0.82rem;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.pos-code-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: 4px;
+  color: #10531a;
+  cursor: pointer;
+  user-select: all;
+  background: #ecfdf5;
+  padding: 4px 14px;
+  border-radius: 6px;
+}
+
+.pos-code-value:hover {
+  background: #d1fae5;
+}
+
+.pos-code-expires {
+  font-size: 0.78rem;
+  color: #6b7280;
+  flex-basis: 100%;
+}
+
+.pos-pending-codes {
+  margin-top: 14px;
+  padding: 12px 16px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  font-size: 0.84rem;
+}
+
+.pos-pending-codes strong {
+  color: #92400e;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.pos-pending-codes ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pos-pending-codes li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pos-pending-codes code {
+  font-family: monospace;
+  font-weight: 800;
+  color: #92400e;
+  background: #fff;
+  padding: 2px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+
+.pos-pending-codes .pos-expire-small {
+  color: #9ca3af;
+  font-size: 0.72rem;
+  margin-left: auto;
+}
+
+/* ─── Staff form ────────────────────────────── */
+.pos-staff-form {
+  display: flex;
+  gap: 10px;
+  padding: 14px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.pos-staff-form input,
+.pos-staff-form select {
+  padding: 9px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  background: #fff;
+}
+
+.pos-staff-form input[type="text"]:first-child {
+  flex: 1;
+  min-width: 180px;
+}
+
+.pos-staff-form input[inputmode="numeric"] {
+  width: 140px;
+  font-family: monospace;
+  letter-spacing: 2px;
+}
+
+/* ─── Badges & roles ────────────────────────── */
+.pos-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.pos-badge-ok {
+  background: #d1fae5;
+  color: #059669;
+}
+
+.pos-badge-ko {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.pos-role-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.pos-role-badge.manager {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.pos-role-badge.cashier {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.pos-expired {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #dc2626;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.pos-ip {
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+/* ─── Table rows ────────────────────────────── */
+.admin-table tr.inactive {
+  opacity: 0.55;
+  background: #fafafa;
+}
+
+.pos-empty {
+  text-align: center;
+  padding: 30px;
+  color: #9ca3af;
+}
+
+.pos-actions-row {
+  display: flex;
+  gap: 4px;
+}
+
+.pos-actions-row .btn-icon.active-toggle {
+  color: #10531a;
+}
+
+/* ─── Modal PIN reset ───────────────────────── */
+.pos-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.pos-modal {
+  background: #fff;
+  border-radius: 14px;
+  padding: 28px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+}
+
+.pos-modal h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.pos-modal p {
+  margin: 0 0 14px;
+  color: #6b7280;
+  font-size: 0.88rem;
+}
+
+.pos-modal input {
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 1.3rem;
+  font-family: monospace;
+  letter-spacing: 8px;
+  text-align: center;
+  border: 2px solid #d1d5db;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.pos-modal input:focus {
+  outline: none;
+  border-color: #10531a;
+}
+
+.pos-modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.pos-modal-actions .btn {
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.pos-modal-actions .btn-primary {
+  background: #10531a;
+  color: #fff;
+}
+
+.pos-modal-actions .btn-outline {
+  background: #fff;
+  border-color: #d1d5db;
+  color: #374151;
+}

@@ -1,0 +1,435 @@
+/* ─── Dashboard header ──────────────────────────── */
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.dashboard-header h2 {
+  margin: 0;
+  font-size: 1.4rem;
+  color: #0f172a;
+}
+
+.dashboard-header p {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  color: #6b7280;
+}
+
+.dashboard-refresh {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.82rem;
+  color: #6b7280;
+}
+
+.dashboard-refresh button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #374151;
+  transition: all 0.15s;
+}
+
+.dashboard-refresh button:hover {
+  background: #f9fafb;
+  border-color: #9ca3af;
+}
+
+.dashboard-refresh button.loading svg {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Sections ──────────────────────────────────── */
+.dashboard-section {
+  margin-bottom: 28px;
+}
+
+.dashboard-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 12px;
+}
+
+.dashboard-section-title svg {
+  color: #9ca3af;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.kpi-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.kpi-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.kpi-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+/* ─── KPI Card ─────────────────────────────────── */
+.kpi-card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 108px;
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+  border-color: #d1d5db;
+}
+
+.kpi-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kpi-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 16px;
+}
+
+.kpi-label {
+  font-size: 0.8rem;
+  color: #6b7280;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.kpi-value-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kpi-value {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1;
+}
+
+.kpi-suffix {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+.kpi-trend {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.kpi-trend.up {
+  background: #d1fae5;
+  color: #059669;
+}
+
+.kpi-trend.down {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.kpi-trend.neutral {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.kpi-sub {
+  font-size: 0.72rem;
+  color: #9ca3af;
+  margin-top: auto;
+}
+
+.kpi-trend-label {
+  font-style: italic;
+}
+
+/* Color variants */
+.kpi-green .kpi-icon   { background: #d1fae5; color: #059669; }
+.kpi-blue .kpi-icon    { background: #dbeafe; color: #2563eb; }
+.kpi-orange .kpi-icon  { background: #ffedd5; color: #ea580c; }
+.kpi-purple .kpi-icon  { background: #ede9fe; color: #7c3aed; }
+.kpi-red .kpi-icon     { background: #fee2e2; color: #dc2626; }
+.kpi-amber .kpi-icon   { background: #fef3c7; color: #d97706; }
+.kpi-teal .kpi-icon    { background: #ccfbf1; color: #0d9488; }
+.kpi-pink .kpi-icon    { background: #fce7f3; color: #db2777; }
+
+/* ─── Chart cards ──────────────────────────────── */
+.chart-card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+.chart-card-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0 0 14px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.chart-card-subtitle {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+.chart-tooltip {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px 14px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
+  font-size: 0.82rem;
+}
+
+.chart-tooltip strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #0f172a;
+}
+
+.chart-tooltip div {
+  color: #6b7280;
+  margin-top: 2px;
+}
+
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: #9ca3af;
+  font-size: 0.88rem;
+  font-style: italic;
+}
+
+/* ─── Top lists ────────────────────────────────── */
+.top-list {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.top-list h4 {
+  margin: 0 0 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #0f172a;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.top-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.top-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.top-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+}
+
+.top-rank {
+  flex-shrink: 0;
+  width: 20px;
+  font-weight: 700;
+  color: #9ca3af;
+  font-size: 0.72rem;
+}
+
+.top-label {
+  flex: 1;
+  min-width: 0;
+  color: #0f172a;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-value {
+  flex-shrink: 0;
+  color: #f97316;
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+
+.top-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 28px;
+}
+
+.top-bar {
+  height: 4px;
+  background: linear-gradient(90deg, #10531a, #16a34a);
+  border-radius: 2px;
+  min-width: 4px;
+}
+
+.top-units {
+  font-size: 0.68rem;
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.top-empty {
+  font-size: 0.82rem;
+  color: #9ca3af;
+  font-style: italic;
+  text-align: center;
+  padding: 20px 0;
+}
+
+/* ─── Tables compactes ─────────────────────────── */
+.dashboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.dashboard-table th {
+  text-align: left;
+  padding: 8px 10px;
+  background: #f9fafb;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.dashboard-table td {
+  padding: 10px;
+  border-bottom: 1px solid #f3f4f6;
+  color: #374151;
+}
+
+.dashboard-table tr:last-child td {
+  border-bottom: none;
+}
+
+.dashboard-table .amount {
+  text-align: right;
+  font-weight: 700;
+  color: #f97316;
+  white-space: nowrap;
+}
+
+.dashboard-table .ref {
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+/* ─── Error banner ─────────────────────────────── */
+.dashboard-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  color: #92400e;
+  font-size: 0.82rem;
+  margin-bottom: 14px;
+}
+
+/* ─── Skeleton ─────────────────────────────────── */
+.kpi-skeleton {
+  background: linear-gradient(90deg, #f3f4f6 25%, #e5e7eb 50%, #f3f4f6 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border-radius: 12px;
+  min-height: 108px;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (max-width: 768px) {
+  .kpi-value { font-size: 1.4rem; }
+  .kpi-card { padding: 14px; min-height: 92px; }
+}

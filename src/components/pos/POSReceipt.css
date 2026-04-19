@@ -1,0 +1,242 @@
+.pos-receipt-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.pos-receipt-panel {
+  background: #fff;
+  border-radius: 16px;
+  padding: 24px;
+  width: 90%;
+  max-width: 380px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.pos-receipt-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.pos-receipt-print {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  background: #10531a;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pos-receipt-close {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* ─── Ticket ──────────────────────────────────────────── */
+.pos-receipt-ticket {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #111;
+}
+
+.pos-receipt-header-section {
+  text-align: center;
+  margin-bottom: 6px;
+}
+
+.pos-receipt-header-section h2 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 1.5px;
+}
+
+.pos-receipt-header-section p {
+  margin: 1px 0;
+  font-size: 10px;
+  color: #333;
+}
+
+.pos-receipt-divider {
+  border-bottom: 1px dashed #999;
+  margin: 5px 0;
+}
+
+.pos-receipt-divider.double {
+  border-bottom-width: 2px;
+  border-bottom-style: double;
+  border-color: #333;
+}
+
+/* ─── Meta ────────────────────────────────────────────── */
+.pos-receipt-meta {
+  font-size: 11px;
+}
+
+.pos-receipt-meta-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+
+/* ─── Items table ─────────────────────────────────────── */
+.pos-receipt-items {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.pos-receipt-items th {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 0;
+  border-bottom: 1px solid #ccc;
+}
+
+.pos-receipt-th-label { text-align: left; }
+.pos-receipt-th-qty { text-align: center; width: 30px; }
+.pos-receipt-th-pu { text-align: right; width: 55px; }
+.pos-receipt-th-total { text-align: right; width: 55px; }
+
+.pos-receipt-items td { padding: 1px 0; font-size: 11px; }
+
+.pos-receipt-item-label {
+  font-weight: 600;
+  font-size: 11px;
+  padding-top: 4px !important;
+  word-break: break-word;
+}
+
+.pos-receipt-discount {
+  font-weight: 400;
+  font-size: 10px;
+  color: #666;
+}
+
+.pos-receipt-item-detail td {
+  font-size: 11px;
+  padding-bottom: 3px !important;
+}
+
+.pos-receipt-item-qty { text-align: center; }
+.pos-receipt-item-pu { text-align: right; color: #555; }
+.pos-receipt-item-price { text-align: right; font-weight: 700; }
+
+.pos-receipt-item-count {
+  text-align: center;
+  font-size: 10px;
+  color: #666;
+  padding: 2px 0;
+}
+
+/* ─── Total ───────────────────────────────────────────── */
+.pos-receipt-total-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 900;
+  padding: 4px 0;
+}
+
+/* ─── Payments ────────────────────────────────────────── */
+.pos-receipt-payments-section {
+  font-size: 11px;
+}
+
+.pos-receipt-payment-line {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+
+.pos-receipt-change {
+  font-weight: 700;
+  border-top: 1px dashed #ccc;
+  margin-top: 2px;
+  padding-top: 3px;
+}
+
+/* ─── Footer ──────────────────────────────────────────── */
+.pos-receipt-footer {
+  text-align: center;
+  margin-top: 8px;
+  font-size: 9px;
+  color: #666;
+}
+
+.pos-receipt-footer p { margin: 1px 0; }
+
+.pos-receipt-thanks {
+  font-size: 11px;
+  font-weight: 700;
+  color: #333;
+  margin-top: 6px !important;
+}
+
+/* ─── Print — thermal receipt 80mm ────────────────────── */
+@media print {
+  /* Hide everything except the receipt */
+  .no-print,
+  .pos-header,
+  .pos-body,
+  .pos-page > *:not(.pos-receipt-overlay) {
+    display: none !important;
+  }
+
+  html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    width: 80mm !important;
+  }
+
+  .pos-receipt-overlay {
+    position: static !important;
+    display: block !important;
+    background: none !important;
+    padding: 0 !important;
+  }
+
+  .pos-receipt-panel {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+  }
+
+  .pos-receipt-ticket {
+    width: 100% !important;
+    font-size: 11px !important;
+  }
+
+  .pos-receipt-header-section h2 { font-size: 14px !important; }
+  .pos-receipt-header-section p { font-size: 9px !important; }
+  .pos-receipt-total-line { font-size: 13px !important; }
+
+  @page {
+    size: 80mm auto;
+    margin: 2mm;
+  }
+}

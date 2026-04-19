@@ -1,0 +1,219 @@
+.pos-product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 14px;
+  padding: 16px 18px 18px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.pos-product-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.6);
+  border-radius: 20px;
+  background: #ffffff;
+  cursor: pointer;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s ease;
+  text-align: left;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
+}
+
+.pos-product-card:hover:not(:disabled) {
+  border-color: rgba(16, 83, 26, 0.3);
+  box-shadow: 0 12px 24px rgba(16, 83, 26, 0.08);
+  transform: translateY(-4px);
+}
+
+.pos-product-card:active:not(:disabled) {
+  transform: scale(0.96);
+  box-shadow: 0 4px 8px rgba(16, 83, 26, 0.04);
+}
+
+.pos-product-card.out-of-stock {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: grayscale(0.8);
+}
+
+.pos-product-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 140px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #f8fafc, #f1f5f9);
+  overflow: hidden;
+  position: relative;
+}
+
+.pos-product-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 8px;
+  mix-blend-mode: multiply;
+  transition: transform 0.3s ease;
+}
+
+.pos-product-card:hover:not(:disabled) .pos-product-img {
+  transform: scale(1.05);
+}
+
+.pos-product-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.pos-product-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.pos-product-ref {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.05);
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pos-product-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pos-product-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pos-product-price {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #e8772e;
+}
+
+.pos-product-stock {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.pos-product-stock.in {
+  background: rgba(16, 83, 26, 0.1);
+  color: #10531a;
+}
+
+.pos-product-stock.out {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+.pos-product-badge-out,
+.pos-product-badge-low {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 4px 7px;
+  border-radius: 999px;
+}
+
+.pos-product-badge-out {
+  background: #c0392b;
+  color: #fff;
+}
+
+.pos-product-badge-low {
+  background: #f39c12;
+  color: #fff;
+}
+
+.pos-grid-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px;
+  color: #64748b;
+  flex: 1;
+}
+
+.pos-grid-spinner {
+  width: 30px;
+  height: 30px;
+  border: 3px solid #e0e0e0;
+  border-top-color: #10531a;
+  border-radius: 50%;
+  animation: pos-spin 0.6s linear infinite;
+}
+
+.pos-grid-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #64748b;
+  font-size: 0.95rem;
+}
+
+@media (max-width: 900px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+    padding: 14px;
+  }
+}
+
+@media (max-width: 560px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .pos-product-card {
+    border-radius: 16px;
+    padding: 8px;
+  }
+
+  .pos-product-media {
+    min-height: 120px;
+  }
+
+  .pos-product-img {
+    width: 78px;
+    height: 100px;
+  }
+}
