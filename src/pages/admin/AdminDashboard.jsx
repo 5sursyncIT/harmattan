@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { FiSettings, FiMail, FiFileText, FiUsers, FiLogOut, FiHome, FiImage, FiHelpCircle, FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck, FiDollarSign } from 'react-icons/fi';
-import { adminLogout, adminMe } from '../../api/admin';
+import { FiSettings, FiMail, FiFileText, FiUsers, FiLogOut, FiHome, FiImage, FiHelpCircle, FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck, FiDollarSign, FiBriefcase } from 'react-icons/fi';
+import { adminLogout, adminMe, getNotificationCounts } from '../../api/admin';
 import AdminLogin from './AdminLogin';
 import Loader from '../../components/common/Loader';
 import toast from 'react-hot-toast';
@@ -19,6 +19,7 @@ const TABS = [
   { path: 'manuscripts', label: 'Manuscrits', icon: <FiFileText />, roles: ['super_admin', 'admin', 'editor'] },
   { path: 'contracts', label: 'Contrats', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor'] },
   { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin'] },
+  { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin'] },
   { path: 'stock', label: 'Stock', icon: <FiPackage />, roles: ['super_admin', 'admin', 'librarian'] },
   { path: 'suppliers', label: 'Fournisseurs', icon: <FiTruck />, roles: ['super_admin', 'admin'] },
   { path: 'newsletter', label: 'Newsletter', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support'] },
@@ -27,10 +28,14 @@ const TABS = [
   { path: 'profile', label: 'Mon profil', icon: <FiUser />, roles: ALL_ROLES },
 ];
 
+// Mapping onglet → clé de compteur notification
+const BADGE_KEYS = { contacts: 'messages', payments: 'payments', stock: 'stock_alerts', manuscripts: 'manuscripts' };
+
 export default function AdminDashboard() {
   const [admin, setAdmin] = useState(null);
   const [role, setRole] = useState(null);
   const [checking, setChecking] = useState(true);
+  const [badges, setBadges] = useState({});
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -51,6 +56,15 @@ export default function AdminDashboard() {
     window.addEventListener('admin-unauthorized', handleUnauthorized);
     return () => window.removeEventListener('admin-unauthorized', handleUnauthorized);
   }, []);
+
+  // Polling des badges de notification (toutes les 30s)
+  useEffect(() => {
+    if (!admin) return;
+    const fetchBadges = () => getNotificationCounts().then(r => setBadges(r.data)).catch(() => {});
+    fetchBadges();
+    const interval = setInterval(fetchBadges, 30000);
+    return () => clearInterval(interval);
+  }, [admin]);
 
   // Rediriger vers le premier onglet autorisé si la page courante n'est pas accessible
   useEffect(() => {
@@ -98,6 +112,9 @@ export default function AdminDashboard() {
               aria-current={({ isActive }) => isActive ? 'page' : undefined}
             >
               {tab.icon} <span>{tab.label}</span>
+              {BADGE_KEYS[tab.path] && badges[BADGE_KEYS[tab.path]] > 0 && (
+                <span className="admin-nav-badge">{badges[BADGE_KEYS[tab.path]]}</span>
+              )}
             </NavLink>
           ))}
         </nav>

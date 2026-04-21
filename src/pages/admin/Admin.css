@@ -13,11 +13,12 @@
 .admin-sidebar-header { padding: 20px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid rgba(255,255,255,.1); }
 .admin-sidebar-header img { height: 36px; }
 .admin-sidebar-header span { font-weight: 700; font-size: 16px; }
-.admin-sidebar nav { flex: 1; padding: 12px 0; }
+.admin-sidebar nav { flex: 1; padding: 12px 0; overflow-y: auto; min-height: 0; }
 .admin-nav-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 20px; border: none; background: none; color: rgba(255,255,255,.7); font-size: 14px; cursor: pointer; text-align: left; transition: all .15s; }
 .admin-nav-btn:hover { background: rgba(255,255,255,.08); color: #fff; }
 .admin-nav-btn.active { background: rgba(255,255,255,.15); color: #fff; font-weight: 600; }
-.admin-sidebar-footer { padding: 16px 20px; border-top: 1px solid rgba(255,255,255,.1); font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
+.admin-nav-badge { margin-left: auto; background: #ef4444; color: #fff; font-size: 11px; font-weight: 700; min-width: 20px; height: 20px; border-radius: 10px; display: flex; align-items: center; justify-content: center; padding: 0 5px; line-height: 1; }
+.admin-sidebar-footer { padding: 16px 20px; border-top: 1px solid rgba(255,255,255,.1); font-size: 13px; display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
 .admin-logout-btn { display: flex; align-items: center; gap: 6px; background: none; border: none; color: rgba(255,255,255,.7); font-size: 13px; cursor: pointer; padding: 0; }
 .admin-logout-btn:hover { color: #fff; }
 

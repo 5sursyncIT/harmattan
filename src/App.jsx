@@ -48,6 +48,12 @@ const ContractCreate = lazy(() => import('./pages/admin/panels/ContractCreate'))
 const BooksPanel = lazy(() => import('./pages/admin/panels/BooksPanel'));
 const PosManagementPanel = lazy(() => import('./pages/admin/panels/PosManagementPanel'));
 const PaymentsPanel = lazy(() => import('./pages/admin/panels/PaymentsPanel'));
+const AccountingPanel = lazy(() => import('./pages/admin/panels/AccountingPanel'));
+const AccountingSales = lazy(() => import('./pages/admin/panels/AccountingSales'));
+const AccountingPayments = lazy(() => import('./pages/admin/panels/AccountingPayments'));
+const AccountingReceivables = lazy(() => import('./pages/admin/panels/AccountingReceivables'));
+const AccountingTreasury = lazy(() => import('./pages/admin/panels/AccountingTreasury'));
+const AccountingRoyalties = lazy(() => import('./pages/admin/panels/AccountingRoyalties'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
@@ -90,6 +96,12 @@ export default function App() {
             <Route path="users" element={<AdminUsersPanel />} />
             <Route path="activity" element={<ActivityLogPanel />} />
             <Route path="payments" element={<PaymentsPanel />} />
+            <Route path="accounting" element={<AccountingPanel />} />
+            <Route path="accounting/sales" element={<AccountingSales />} />
+            <Route path="accounting/payments" element={<AccountingPayments />} />
+            <Route path="accounting/receivables" element={<AccountingReceivables />} />
+            <Route path="accounting/treasury" element={<AccountingTreasury />} />
+            <Route path="accounting/royalties" element={<AccountingRoyalties />} />
             <Route path="stock" element={<StockDashboardPanel />} />
             <Route path="stock/alerts" element={<StockAlertsPanel />} />
             <Route path="stock/products" element={<StockProductsPanel />} />

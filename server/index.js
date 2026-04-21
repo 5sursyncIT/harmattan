@@ -185,11 +185,45 @@ for (const col of [
 // Cleanup expired customer sessions on startup
 db.prepare("DELETE FROM customer_sessions WHERE expires_at < datetime('now')").run();
 
-const transporter = nodemailer.createTransport({
-  host: '127.0.0.1',
-  port: 1025,
-  ignoreTLS: true
-});
+// ─── EMAIL TRANSPORTER (SMTP) ─────────────────────────────
+// Priorité : variables d'environnement > site-config.json > fallback localhost
+function createMailTransporter() {
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = process.env.SMTP_PORT;
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+
+  if (smtpHost && smtpUser) {
+    console.log(`[MAIL] SMTP configuré via .env : ${smtpHost}:${smtpPort || 587}`);
+    return nodemailer.createTransport({
+      host: smtpHost,
+      port: parseInt(smtpPort) || 587,
+      secure: (parseInt(smtpPort) || 587) === 465,
+      auth: { user: smtpUser, pass: smtpPass },
+    });
+  }
+
+  // Fallback sur site-config.json
+  try {
+    const config = JSON.parse(readFileSync(join(__dirname, 'site-config.json'), 'utf-8'));
+    const smtp = config.smtp || {};
+    if (smtp.host && smtp.host !== '127.0.0.1' && smtp.user) {
+      console.log(`[MAIL] SMTP configuré via site-config.json : ${smtp.host}:${smtp.port || 587}`);
+      return nodemailer.createTransport({
+        host: smtp.host,
+        port: parseInt(smtp.port) || 587,
+        secure: smtp.secure || false,
+        auth: { user: smtp.user, pass: smtp.pass },
+      });
+    }
+  } catch { /* pas de config */ }
+
+  console.warn('[MAIL] SMTP non configuré — les emails ne seront pas envoyés. Définir SMTP_HOST, SMTP_USER, SMTP_PASS dans .env');
+  return nodemailer.createTransport({ host: '127.0.0.1', port: 1025, ignoreTLS: true });
+}
+const transporter = createMailTransporter();
+// SITE_URL pour les liens dans les emails (newsletter, reset password, etc.)
+const SITE_URL = process.env.SITE_URL || `http://38.242.229.122:${PORT}`;
 // ---------------------------
 
 // ─── SECURITY MIDDLEWARE ─────────────────────────────────────
@@ -908,6 +942,16 @@ try {
   console.error('[ADMIN-POS] Failed to mount POS management routes:', err);
 }
 
+// ─── COMPTABILITÉ MODULE ───────────────────────────────────
+import { createAccountingRouter } from './accounting-routes.js';
+try {
+  const accountingAuth = adminAuth(db);
+  app.use('/api/admin/accounting', createAccountingRouter({ db, dolibarrPool, cache, auth: accountingAuth }));
+  console.log('[ACCOUNTING] Accounting routes mounted');
+} catch (err) {
+  console.error('[ACCOUNTING] Failed to mount accounting routes:', err);
+}
+
 // ─── STOCK & REAPPROVISIONNEMENT MODULE ─────────────────────
 import { createStockRouter, createSuppliersRouter } from './stock-routes.js';
 import { runDailyBatch, runClassificationBatch } from './stock-engine.js';
@@ -1002,7 +1046,7 @@ app.get('/api/newsletter/confirm', (req, res) => {
 });
 
 function sendConfirmationEmail(email, token) {
-  const confirmLink = `http://localhost:3000/api/newsletter/confirm?token=${token}`;
+  const confirmLink = `${SITE_URL}/api/newsletter/confirm?token=${token}`;
   console.log(`[NEWSLETTER] Envoyer email à ${email} avec lien: ${confirmLink}`);
   // Mock email send
   transporter.sendMail({

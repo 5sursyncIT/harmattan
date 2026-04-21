@@ -131,5 +131,8 @@ export const createSupplier = (data) => api.post('/admin/suppliers', data);
 export const updateSupplier = (id, data) => api.put(`/admin/suppliers/${id}`, data);
 export const deleteSupplier = (id) => api.delete(`/admin/suppliers/${id}`);
 
+// Notification badges
+export const getNotificationCounts = () => api.get('/admin/notifications/counts');
+
 // Stats
 export const getAdminStats = () => api.get('/admin/stats');
