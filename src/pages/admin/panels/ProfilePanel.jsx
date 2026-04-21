@@ -9,6 +9,8 @@ const ROLE_LABELS = {
   editor: 'Éditeur',
   support: 'Support',
   librarian: 'Libraire',
+  comptable: 'Comptable',
+  vendeur: 'Vendeur POS',
 };
 
 export default function ProfilePanel() {
@@ -39,6 +41,18 @@ export default function ProfilePanel() {
 
   return (
     <div className="admin-panel">
+      {adminRole === 'vendeur' && (
+        <div className="admin-card" style={{ background: '#fef3c7', border: '1px solid #fcd34d', marginBottom: 16 }}>
+          <h3 style={{ margin: '0 0 8px', color: '#92400e' }}>Profil Vendeur POS</h3>
+          <p style={{ margin: 0, color: '#78350f', fontSize: '0.9rem' }}>
+            Votre compte est dédié à la caisse. Pour vendre, utilisez l'interface POS avec votre code PIN :
+            <br />
+            <a href="/pos/connexion" style={{ color: '#92400e', fontWeight: 700, textDecoration: 'underline' }}>
+              → Accéder au POS
+            </a>
+          </p>
+        </div>
+      )}
       <div className="admin-card">
         <h3>Informations du compte</h3>
         <div className="admin-profile-info">

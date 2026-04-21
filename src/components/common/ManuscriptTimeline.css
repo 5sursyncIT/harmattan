@@ -1,0 +1,80 @@
+.mt-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  position: relative;
+}
+.mt-list::before {
+  content: '';
+  position: absolute;
+  left: 17px;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  background: #e5e7eb;
+}
+.mt-item {
+  position: relative;
+  display: flex;
+  gap: 14px;
+  padding: 10px 0;
+  align-items: flex-start;
+}
+.mt-icon {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  z-index: 1;
+}
+.mt-item-current .mt-icon {
+  background: #10531a;
+  color: #fff;
+  border-color: #10531a;
+  box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.12);
+}
+.mt-body {
+  flex: 1;
+  padding-top: 4px;
+}
+.mt-stage {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #111827;
+}
+.mt-item-current .mt-stage {
+  color: #10531a;
+}
+.mt-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+.mt-role {
+  background: #f3f4f6;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.mt-date::before { content: '·'; margin-right: 8px; color: #d1d5db; }
+.mt-note {
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: #4b5563;
+  background: #f9fafb;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border-left: 3px solid #10531a;
+}
+.mt-empty { color: #6b7280; font-style: italic; }

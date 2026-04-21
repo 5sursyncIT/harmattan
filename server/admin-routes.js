@@ -126,6 +126,13 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     /^\/api\/admin\/login$/,
     /^\/api\/admin\/config$/, // GET lecture seule pour le front
   ];
+  const WORKFLOW_READ_PATHS = [
+    /^\/api\/admin\/manuscripts\/assigned(\/.*)?$/,
+    /^\/api\/admin\/manuscripts\/v2\/\d+$/,
+    /^\/api\/admin\/manuscripts\/v2\/\d+\/files(\/.*)?$/,
+    /^\/api\/admin\/notifications(\/.*)?$/,
+    /^\/api\/admin\/activity-log$/,
+  ];
   const ROLE_ALLOWED_PATHS = {
     editor: [
       ...COMMON_PATHS,
@@ -133,6 +140,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       /^\/api\/admin\/stats(\/.*)?$/,
       /^\/api\/admin\/slides(\/.*)?$/,
       /^\/api\/admin\/manuscripts(\/.*)?$/,
+      /^\/api\/admin\/editorial(\/.*)?$/,
+      /^\/api\/admin\/covers(\/.*)?$/,
+      /^\/api\/admin\/notifications(\/.*)?$/,
     ],
     support: [
       ...COMMON_PATHS,
@@ -140,11 +150,44 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       /^\/api\/admin\/contact(\/.*)?$/,
       /^\/api\/admin\/faq(\/.*)?$/,
       /^\/api\/admin\/newsletter(\/.*)?$/,
+      /^\/api\/admin\/notifications(\/.*)?$/,
     ],
     librarian: [
       ...COMMON_PATHS,
       /^\/api\/admin\/books(\/.*)?$/,
       /^\/api\/admin\/stock(\/.*)?$/,
+      /^\/api\/admin\/notifications(\/.*)?$/,
+    ],
+    comptable: [
+      ...COMMON_PATHS,
+      /^\/api\/admin\/accounting(\/.*)?$/,
+      /^\/api\/admin\/stats(\/.*)?$/,
+      /^\/api\/admin\/payments(\/.*)?$/,
+      /^\/api\/admin\/notifications(\/.*)?$/,
+    ],
+    vendeur: [
+      ...COMMON_PATHS,
+      // Vendeur = POS uniquement (via /api/pos/* qui a son propre système d'auth par PIN)
+    ],
+    evaluateur: [
+      ...COMMON_PATHS,
+      ...WORKFLOW_READ_PATHS,
+      /^\/api\/admin\/evaluations(\/.*)?$/,
+    ],
+    correcteur: [
+      ...COMMON_PATHS,
+      ...WORKFLOW_READ_PATHS,
+      /^\/api\/admin\/corrections(\/.*)?$/,
+    ],
+    infographiste: [
+      ...COMMON_PATHS,
+      ...WORKFLOW_READ_PATHS,
+      /^\/api\/admin\/covers(\/.*)?$/,
+    ],
+    imprimeur: [
+      ...COMMON_PATHS,
+      ...WORKFLOW_READ_PATHS,
+      /^\/api\/admin\/printing(\/.*)?$/,
     ],
   };
   app.use('/api/admin', (req, res, next) => {
@@ -216,6 +259,168 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     status TEXT DEFAULT 'reçu',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // ─── WORKFLOW ÉDITORIAL ─────────────────────────────────────
+  // Portail auteur
+  db.exec(`CREATE TABLE IF NOT EXISTS authors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT,
+    firstname TEXT NOT NULL,
+    lastname TEXT NOT NULL,
+    phone TEXT,
+    dolibarr_thirdparty_id INTEGER,
+    email_verified INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS author_sessions (
+    token TEXT PRIMARY KEY,
+    author_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+  )`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS author_password_resets (
+    email TEXT PRIMARY KEY,
+    token TEXT NOT NULL,
+    expires_at DATETIME NOT NULL
+  )`);
+
+  // Table canonique des manuscrits (machine à états)
+  db.exec(`CREATE TABLE IF NOT EXISTS manuscripts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref TEXT UNIQUE NOT NULL,
+    author_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    genre TEXT,
+    synopsis TEXT,
+    message TEXT,
+    current_stage TEXT NOT NULL DEFAULT 'submitted',
+    assigned_evaluator_id INTEGER,
+    assigned_corrector_id INTEGER,
+    assigned_editor_id INTEGER,
+    assigned_infographist_id INTEGER,
+    assigned_printer_id INTEGER,
+    contract_id INTEGER,
+    dolibarr_product_id INTEGER,
+    dolibarr_mo_id INTEGER,
+    dolibarr_mo_ref TEXT,
+    isbn TEXT,
+    print_qty INTEGER,
+    rejection_reason TEXT,
+    legacy_submission_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_stage ON manuscripts(current_stage)'); } catch (e) { /* exists */ void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_author ON manuscripts(author_id)'); } catch (e) { void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_evaluator ON manuscripts(assigned_evaluator_id)'); } catch (e) { void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_corrector ON manuscripts(assigned_corrector_id)'); } catch (e) { void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_infographist ON manuscripts(assigned_infographist_id)'); } catch (e) { void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_printer ON manuscripts(assigned_printer_id)'); } catch (e) { void e; }
+
+  db.exec(`CREATE TABLE IF NOT EXISTS manuscript_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manuscript_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    version INTEGER DEFAULT 1,
+    file_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_size INTEGER,
+    mime_type TEXT,
+    uploaded_by_role TEXT NOT NULL,
+    uploaded_by_id INTEGER NOT NULL,
+    uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscript_files_ms ON manuscript_files(manuscript_id, kind)'); } catch (e) { void e; }
+
+  db.exec(`CREATE TABLE IF NOT EXISTS manuscript_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manuscript_id INTEGER NOT NULL,
+    from_stage TEXT,
+    to_stage TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    actor_id INTEGER,
+    actor_label TEXT,
+    note TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_stages_ms ON manuscript_stages(manuscript_id, created_at)'); } catch (e) { void e; }
+
+  db.exec(`CREATE TABLE IF NOT EXISTS manuscript_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manuscript_id INTEGER NOT NULL,
+    evaluator_id INTEGER NOT NULL,
+    verdict TEXT NOT NULL,
+    recommendation TEXT,
+    strengths TEXT,
+    weaknesses TEXT,
+    note TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS manuscript_validations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manuscript_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    comment TEXT,
+    author_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Migration one-shot : copier manuscript_submissions → authors + manuscripts
+  try {
+    const already = db.prepare('SELECT COUNT(*) AS c FROM manuscripts').get()?.c || 0;
+    if (already === 0) {
+      const legacyRows = db.prepare('SELECT * FROM manuscript_submissions ORDER BY id ASC').all();
+      const stageMap = {
+        'reçu': 'submitted',
+        'en lecture': 'in_evaluation',
+        'accepté': 'evaluation_positive',
+        'refusé': 'evaluation_negative',
+      };
+      const insertAuthor = db.prepare(`INSERT OR IGNORE INTO authors (email, firstname, lastname, phone) VALUES (?, ?, ?, ?)`);
+      const findAuthor = db.prepare('SELECT id FROM authors WHERE email = ?');
+      const insertManuscript = db.prepare(`INSERT INTO manuscripts
+        (ref, author_id, title, genre, synopsis, message, current_stage, legacy_submission_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertFile = db.prepare(`INSERT INTO manuscript_files
+        (manuscript_id, kind, version, file_path, file_name, uploaded_by_role, uploaded_by_id)
+        VALUES (?, 'original', 1, ?, ?, 'author', ?)`);
+      const insertStage = db.prepare(`INSERT INTO manuscript_stages
+        (manuscript_id, from_stage, to_stage, actor_role, note, created_at)
+        VALUES (?, NULL, 'submitted', 'system', 'Migration depuis manuscript_submissions', ?)`);
+
+      const now = new Date();
+      const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
+      let seq = 1;
+      const tx = db.transaction((rows) => {
+        for (const row of rows) {
+          insertAuthor.run(row.email, row.firstname, row.lastname, row.phone || null);
+          const author = findAuthor.get(row.email);
+          if (!author) continue;
+          const ref = `MS-${yymm}-${String(seq++).padStart(4, '0')}`;
+          const stage = stageMap[row.status] || 'submitted';
+          const result = insertManuscript.run(
+            ref, author.id, row.title, row.genre || null, row.synopsis || null,
+            row.message || null, stage, row.id, row.created_at || new Date().toISOString()
+          );
+          if (row.file_path) {
+            insertFile.run(result.lastInsertRowid, row.file_path, row.file_name || 'manuscrit', author.id);
+          }
+          insertStage.run(result.lastInsertRowid, row.created_at || new Date().toISOString());
+        }
+      });
+      if (legacyRows.length) {
+        tx(legacyRows);
+        console.log(`[MIGRATION] ${legacyRows.length} manuscrit(s) historique(s) migré(s) vers la table canonique manuscripts.`);
+      }
+    }
+  } catch (err) {
+    console.error('[MIGRATION manuscripts] erreur:', err.message);
+  }
 
   // Ensure default admin exists
   const existingAdmin = db.prepare('SELECT id FROM admin_users WHERE username = ?').get('admin');
@@ -662,7 +867,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
         return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères, une majuscule et un chiffre' });
       }
-      const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian'];
+      const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
       const safeRole = validRoles.includes(role) ? role : 'admin';
       const existing = db.prepare('SELECT id FROM admin_users WHERE username = ?').get(username);
       if (existing) return res.status(400).json({ error: 'Ce nom d\'utilisateur existe déjà' });
@@ -704,7 +909,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
       // Changement de rôle
       if (role) {
-        const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian'];
+        const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
         if (!validRoles.includes(role)) {
           return res.status(400).json({ error: 'Rôle invalide' });
         }
@@ -777,13 +982,61 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       let openAlerts = 0;
       try { openAlerts = db.prepare("SELECT COUNT(*) AS c FROM stock_alerts WHERE status = 'open' AND severity IN ('critique', 'haute')").get()?.c || 0; } catch { /* table may not exist */ }
 
+      // Manuscrits : nouveaux à traiter (stage = submitted dans la nouvelle table) + fallback legacy
       let pendingManuscripts = 0;
-      try { pendingManuscripts = db.prepare("SELECT COUNT(*) AS c FROM manuscript_submissions WHERE status = 'reçu'").get()?.c || 0; } catch { /* table may not exist */ }
+      try { pendingManuscripts = db.prepare("SELECT COUNT(*) AS c FROM manuscripts WHERE current_stage = 'submitted'").get()?.c || 0; } catch { /* table may not exist */ }
+      if (!pendingManuscripts) {
+        try { pendingManuscripts = db.prepare("SELECT COUNT(*) AS c FROM manuscript_submissions WHERE status = 'reçu'").get()?.c || 0; } catch { /* table may not exist */ }
+      }
 
-      res.json({ messages: unreadMessages, payments: pendingPayments, stock_alerts: openAlerts, manuscripts: pendingManuscripts });
+      // Badges par rôle métier (filtrés sur l'utilisateur connecté)
+      const adminId = req.admin.id;
+      const role = req.admin.role;
+      let evaluations = 0, corrections = 0, editorial = 0, covers = 0, printing = 0;
+      try {
+        if (role === 'evaluateur' || role === 'super_admin' || role === 'admin') {
+          evaluations = db.prepare(
+            `SELECT COUNT(*) AS c FROM manuscripts
+             WHERE current_stage = 'in_evaluation' AND (? IN ('super_admin','admin') OR assigned_evaluator_id = ?)`
+          ).get(role, adminId)?.c || 0;
+        }
+        if (role === 'correcteur' || role === 'super_admin' || role === 'admin') {
+          corrections = db.prepare(
+            `SELECT COUNT(*) AS c FROM manuscripts
+             WHERE current_stage = 'in_correction' AND (? IN ('super_admin','admin') OR assigned_corrector_id = ?)`
+          ).get(role, adminId)?.c || 0;
+        }
+        if (role === 'editor' || role === 'super_admin' || role === 'admin') {
+          editorial = db.prepare("SELECT COUNT(*) AS c FROM manuscripts WHERE current_stage = 'in_editorial'").get()?.c || 0;
+        }
+        if (role === 'infographiste' || role === 'super_admin' || role === 'admin') {
+          covers = db.prepare(
+            `SELECT COUNT(*) AS c FROM manuscripts
+             WHERE current_stage = 'cover_design' AND (? IN ('super_admin','admin') OR assigned_infographist_id = ?)`
+          ).get(role, adminId)?.c || 0;
+        }
+        if (role === 'imprimeur' || role === 'super_admin' || role === 'admin') {
+          printing = db.prepare(
+            `SELECT COUNT(*) AS c FROM manuscripts
+             WHERE current_stage IN ('print_preparation','printing') AND (? IN ('super_admin','admin') OR assigned_printer_id = ?)`
+          ).get(role, adminId)?.c || 0;
+        }
+      } catch (err) { console.error('Workflow counts error:', err.message); }
+
+      res.json({
+        messages: unreadMessages,
+        payments: pendingPayments,
+        stock_alerts: openAlerts,
+        manuscripts: pendingManuscripts,
+        evaluations,
+        corrections,
+        editorial,
+        covers,
+        printing,
+      });
     } catch (err) {
       console.error('Notification counts error:', err.message);
-      res.json({ messages: 0, payments: 0, stock_alerts: 0, manuscripts: 0 });
+      res.json({ messages: 0, payments: 0, stock_alerts: 0, manuscripts: 0, evaluations: 0, corrections: 0, editorial: 0, covers: 0, printing: 0 });
     }
   });
 

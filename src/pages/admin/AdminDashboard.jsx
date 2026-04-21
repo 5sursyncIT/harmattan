@@ -1,15 +1,15 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { FiSettings, FiMail, FiFileText, FiUsers, FiLogOut, FiHome, FiImage, FiHelpCircle, FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck, FiDollarSign, FiBriefcase } from 'react-icons/fi';
+import { FiSettings, FiMail, FiFileText, FiUsers, FiLogOut, FiHome, FiImage, FiHelpCircle, FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck, FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiCheckSquare, FiLayers, FiPrinter } from 'react-icons/fi';
 import { adminLogout, adminMe, getNotificationCounts } from '../../api/admin';
 import AdminLogin from './AdminLogin';
 import Loader from '../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Admin.css';
 
-const ALL_ROLES = ['super_admin', 'admin', 'editor', 'support', 'librarian'];
+const ALL_ROLES = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
 const TABS = [
-  { path: '', label: 'Tableau de bord', icon: <FiHome />, roles: ['super_admin', 'admin', 'editor', 'support'] },
+  { path: '', label: 'Tableau de bord', icon: <FiHome />, roles: ['super_admin', 'admin', 'editor', 'support', 'comptable'] },
   { path: 'books', label: 'Livres', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
   { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
   { path: 'config', label: 'Configuration', icon: <FiSettings />, roles: ['super_admin', 'admin'] },
@@ -17,19 +17,34 @@ const TABS = [
   { path: 'faq', label: 'FAQ', icon: <FiHelpCircle />, roles: ['super_admin', 'admin', 'support'] },
   { path: 'contacts', label: 'Messages', icon: <FiMail />, roles: ['super_admin', 'admin', 'support'] },
   { path: 'manuscripts', label: 'Manuscrits', icon: <FiFileText />, roles: ['super_admin', 'admin', 'editor'] },
+  { path: 'evaluations', label: 'Évaluations', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'evaluateur'] },
+  { path: 'corrections', label: 'Corrections', icon: <FiEdit3 />, roles: ['super_admin', 'admin', 'correcteur'] },
+  { path: 'editorial', label: 'Éditorial', icon: <FiCheckSquare />, roles: ['super_admin', 'admin', 'editor'] },
+  { path: 'covers', label: 'Couvertures', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor', 'infographiste'] },
+  { path: 'printing', label: 'Impression', icon: <FiPrinter />, roles: ['super_admin', 'admin', 'imprimeur'] },
   { path: 'contracts', label: 'Contrats', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor'] },
-  { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin'] },
-  { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin'] },
+  { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin', 'comptable'] },
+  { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin', 'comptable'] },
   { path: 'stock', label: 'Stock', icon: <FiPackage />, roles: ['super_admin', 'admin', 'librarian'] },
   { path: 'suppliers', label: 'Fournisseurs', icon: <FiTruck />, roles: ['super_admin', 'admin'] },
   { path: 'newsletter', label: 'Newsletter', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support'] },
-  { path: 'users', label: 'Administrateurs', icon: <FiShield />, roles: ['super_admin'] },
+  { path: 'users', label: 'Utilisateurs', icon: <FiShield />, roles: ['super_admin'] },
   { path: 'activity', label: 'Journal', icon: <FiActivity />, roles: ['super_admin', 'admin'] },
   { path: 'profile', label: 'Mon profil', icon: <FiUser />, roles: ALL_ROLES },
 ];
 
 // Mapping onglet → clé de compteur notification
-const BADGE_KEYS = { contacts: 'messages', payments: 'payments', stock: 'stock_alerts', manuscripts: 'manuscripts' };
+const BADGE_KEYS = {
+  contacts: 'messages',
+  payments: 'payments',
+  stock: 'stock_alerts',
+  manuscripts: 'manuscripts',
+  evaluations: 'evaluations',
+  corrections: 'corrections',
+  editorial: 'editorial',
+  covers: 'covers',
+  printing: 'printing',
+};
 
 export default function AdminDashboard() {
   const [admin, setAdmin] = useState(null);

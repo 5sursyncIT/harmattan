@@ -59,16 +59,16 @@ export default function ContractsList() {
       a.download = `contrats-${new Date().toISOString().split('T')[0]}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-      toast.success('Export CSV t\u00e9l\u00e9charg\u00e9');
+      toast.success('Export CSV téléchargé');
     } catch {
-      toast.error('Erreur lors de l\u2019export');
+      toast.error('Erreur lors de l’export');
     } finally {
       setExporting(false);
     }
   };
 
   const formatDate = (ts) => {
-    if (!ts) return '\u2014';
+    if (!ts) return '—';
     const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
     return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
   };
@@ -191,7 +191,7 @@ export default function ContractsList() {
                   </div>
                   <div className="ct-card-title">{c.title || 'Sans titre'}</div>
                   <div className="ct-card-meta">
-                    <span>{c.author?.name || '\u2014'}</span>
+                    <span>{c.author?.name || '—'}</span>
                     {c.isbn && <span style={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{c.isbn}</span>}
                   </div>
                 </div>

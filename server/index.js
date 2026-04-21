@@ -631,6 +631,16 @@ app.use('/api/auth', createAuthRouter({ db, csrfProtection, sanitizeBody, authLi
 import { createContractRouter } from './contract-routes.js';
 app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtection, sanitizeBody }));
 
+// ─── AUTHOR PORTAL (workflow éditorial) ────────────────────
+import { createAuthorRouter } from './author-routes.js';
+const { router: authorRouter, requireAuthorAuth } = createAuthorRouter({
+  db, csrfProtection, sanitizeBody, authLimiter, transporter,
+  cookieSecure: COOKIE_SECURE, siteUrl: SITE_URL,
+});
+app.use('/api/author', authorRouter);
+// eslint-disable-next-line no-unused-vars
+const _requireAuthorAuth = requireAuthorAuth;
+
 // ─── ADMIN MODULE ───────────────────────────────────────────
 const siteConfigPath = join(__dirname, 'site-config.json');
 function getSiteConfig() {
@@ -763,9 +773,201 @@ try {
   console.error('[ADMIN] Failed to mount admin routes:', err);
 }
 
+// ─── MANUSCRIPT WORKFLOW (admin) — monté APRÈS setupAdminRoutes
+// pour bénéficier du middleware RBAC global sur /api/admin
+import { createManuscriptRouter } from './manuscript-routes.js';
+import { generateSignatureUrl } from './contract-routes.js';
+import { transition as wfTransition } from './manuscript-workflow.js';
+import { sendTransitionEmail } from './manuscript-emails.js';
+
+// Hook 1 : créer un contrat Dolibarr draft quand une évaluation est positive
+async function createContractDraft(manuscript) {
+  const author = db.prepare('SELECT * FROM authors WHERE id = ?').get(manuscript.author_id);
+  if (!author) throw new Error('Auteur introuvable');
+
+  // Créer la thirdparty Dolibarr si nécessaire
+  let thirdpartyId = author.dolibarr_thirdparty_id;
+  if (!thirdpartyId) {
+    try {
+      const doliRes = await dolibarrApi.post('/thirdparties', {
+        name: `${author.firstname} ${author.lastname}`,
+        email: author.email,
+        phone: author.phone || '',
+        client: 1,
+        code_client: -1,
+      });
+      thirdpartyId = doliRes.data;
+      db.prepare('UPDATE authors SET dolibarr_thirdparty_id = ? WHERE id = ?').run(thirdpartyId, author.id);
+    } catch (err) {
+      console.error('[WORKFLOW] Thirdparty create error:', err.response?.data || err.message);
+      throw new Error('Échec création thirdparty Dolibarr');
+    }
+  }
+
+  // Créer le contrat brouillon via Dolibarr REST API
+  const TEMPLATE_FILE = 'template_harmattan_2024';
+  const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${TEMPLATE_FILE}.odt`;
+  try {
+    const contractRes = await dolibarrApi.post('/contracts', {
+      socid: parseInt(thirdpartyId, 10),
+      date_contrat: Math.floor(Date.now() / 1000),
+      model_pdf: modelPdf,
+      array_options: {
+        options_contract_type: 'harmattan_2024',
+        options_book_title: manuscript.title,
+        options_royalty_rate_print: 8,
+        options_royalty_rate_digital: 15,
+        options_royalty_threshold: 500,
+        options_free_author_copies: 10,
+      },
+    });
+    const contractId = contractRes.data;
+
+    // Lier manuscrit ↔ contrat
+    db.exec(`CREATE TABLE IF NOT EXISTS contract_manuscript_links (
+      contract_id INTEGER, manuscript_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (contract_id, manuscript_id)
+    )`);
+    db.prepare('INSERT OR IGNORE INTO contract_manuscript_links (contract_id, manuscript_id) VALUES (?, ?)')
+      .run(contractId, manuscript.id);
+
+    // Transition → contract_pending + stockage du contract_id
+    wfTransition(db, manuscript.id, 'contract_pending',
+      { role: 'system', label: 'workflow' },
+      { note: `Contrat Dolibarr #${contractId} créé`, updates: { contract_id: contractId } }
+    );
+
+    // Email auteur avec le lien de signature (best-effort)
+    try {
+      const [[contractRow]] = await dolibarrPool.query('SELECT ref FROM llx_contrat WHERE rowid = ?', [contractId]);
+      if (contractRow?.ref) {
+        const signatureUrl = generateSignatureUrl(contractRow.ref);
+        transporter?.sendMail({
+          from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+          to: author.email,
+          subject: `Contrat d'édition ${contractRow.ref} — signature en ligne`,
+          html: `<p>Bonjour ${author.firstname},</p><p>Votre contrat d'édition est prêt. Vous pouvez le signer en ligne via ce lien sécurisé :</p><p><a href="${signatureUrl}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Signer mon contrat</a></p><p>Référence : <strong>${contractRow.ref}</strong></p>`,
+        }).catch((err) => console.error('[WORKFLOW] Signature email error:', err.message));
+      }
+    } catch (err) { console.warn('[WORKFLOW] Signature link fetch warning:', err.message); }
+
+    return { contract_id: contractId, thirdparty_id: thirdpartyId };
+  } catch (err) {
+    console.error('[WORKFLOW] Contract create error:', err.response?.data || err.message);
+    throw new Error('Échec création contrat Dolibarr');
+  }
+}
+
+// Hook 2 : créer produit Dolibarr + MO d'impression à la préparation
+async function createPrintMO({ manuscript, qty, isbn }) {
+  let productId = manuscript.dolibarr_product_id;
+  if (!productId) {
+    try {
+      const prodRes = await dolibarrApi.post('/products', {
+        ref: manuscript.ref.replace(/[^A-Z0-9-]/g, ''),
+        label: manuscript.title,
+        type: 0, // produit
+        status: 1, // vendable
+        status_buy: 1,
+        barcode: isbn || null,
+      });
+      productId = prodRes.data;
+    } catch (err) {
+      console.error('[WORKFLOW] Product create error:', err.response?.data || err.message);
+      throw new Error('Échec création produit Dolibarr');
+    }
+  }
+
+  // Générer la référence MO et INSERT direct dans llx_mrp_mo
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const [[maxRef]] = await dolibarrPool.query(
+    `SELECT MAX(CAST(SUBSTRING(ref, 8) AS UNSIGNED)) AS max_seq FROM llx_mrp_mo WHERE ref LIKE 'MO${yymm}%'`
+  );
+  const seq = String((maxRef?.max_seq || 0) + 1).padStart(4, '0');
+  const moRef = `MO${yymm}-${seq}`;
+  const nowStr = now.toISOString().slice(0, 19).replace('T', ' ');
+  const endDate = new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  const [result] = await dolibarrPool.query(
+    `INSERT INTO llx_mrp_mo (ref, entity, label, qty, fk_warehouse, fk_product, status, date_start_planned, date_end_planned, date_creation, mrptype)
+     VALUES (?, 1, ?, ?, 4, ?, 0, ?, ?, ?, 0)`,
+    [moRef, `Impression initiale — ${manuscript.title}`, qty, productId, nowStr, endDate, nowStr]
+  );
+
+  db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+    .run('workflow', 'print_prepare', `Impression lancée : ${manuscript.ref} × ${qty} → ${moRef}`);
+
+  return { dolibarr_product_id: productId, dolibarr_mo_id: result.insertId, dolibarr_mo_ref: moRef };
+}
+
+try {
+  const manuscriptRouter = createManuscriptRouter({
+    db,
+    csrfProtection,
+    adminAuth: adminAuth(db),
+    transporter,
+    siteUrl: SITE_URL,
+    hooks: {
+      onEvaluationPositive: async (manuscript) => {
+        try {
+          await createContractDraft(manuscript);
+        } catch (err) {
+          console.error('[WORKFLOW] Contract auto-create failed (non-blocking):', err.message);
+        }
+      },
+      onPrintPrepare: createPrintMO,
+    },
+  });
+  app.use('/api/admin', manuscriptRouter);
+  console.log('[WORKFLOW] Manuscript workflow routes mounted');
+} catch (err) {
+  console.error('[WORKFLOW] Failed to mount manuscript routes:', err);
+}
+
+// ─── CRON : polling des signatures de contrat (5 min) ─────
+setInterval(async () => {
+  try {
+    const pending = db.prepare(
+      "SELECT id, contract_id, ref FROM manuscripts WHERE current_stage = 'contract_pending' AND contract_id IS NOT NULL"
+    ).all();
+    for (const m of pending) {
+      try {
+        const [[contract]] = await dolibarrPool.query(
+          'SELECT signed_status FROM llx_contrat WHERE rowid = ?', [m.contract_id]
+        );
+        if (contract && [2, 9].includes(contract.signed_status)) {
+          const updated = wfTransition(db, m.id, 'contract_signed',
+            { role: 'system', label: 'polling' },
+            { note: `Signature détectée (signed_status=${contract.signed_status})` }
+          );
+          console.log(`[WORKFLOW] ${m.ref} contrat signé détecté.`);
+          // Avancer automatiquement à payment_pending
+          wfTransition(db, m.id, 'payment_pending',
+            { role: 'system', label: 'polling' },
+            { note: 'Paiement attendu après signature' }
+          );
+          // Notifier l'auteur
+          const author = db.prepare('SELECT email, firstname FROM authors WHERE id = ?').get(updated.author_id);
+          if (author) {
+            sendTransitionEmail(transporter, updated, 'payment_pending',
+              { type: 'author', email: author.email, firstname: author.firstname }, SITE_URL);
+          }
+        }
+      } catch (err) { console.warn('[WORKFLOW] signature poll error for', m.ref, ':', err.message); }
+    }
+  } catch (err) { console.error('[WORKFLOW] signature cron error:', err.message); }
+}, 5 * 60 * 1000);
+
 // ─── PAYMENT CONFIRMATION (admin confirms payment → invoice created) ────
 const confirmPaymentAuth = adminAuth(db);
-app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtection, async (req, res) => {
+// Le comptable est en lecture seule : bloquer les actions d'écriture sur les paiements
+function blockComptableWrite(req, res, next) {
+  if (req.admin?.role === 'comptable') {
+    return res.status(403).json({ error: 'Accès en lecture seule pour le profil comptable' });
+  }
+  next();
+}
+app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, blockComptableWrite, csrfProtection, async (req, res) => {
   try {
     const orderId = req.params.id;
 
@@ -866,7 +1068,7 @@ app.get('/api/admin/payments', paymentMgmtAuth, (req, res) => {
 });
 
 // Rejeter un paiement
-app.post('/api/admin/payments/:id/reject', paymentMgmtAuth, csrfProtection, (req, res) => {
+app.post('/api/admin/payments/:id/reject', paymentMgmtAuth, blockComptableWrite, csrfProtection, (req, res) => {
   const payment = db.prepare('SELECT * FROM order_payments WHERE id = ?').get(req.params.id);
   if (!payment) return res.status(404).json({ error: 'Paiement introuvable' });
   if (payment.payment_status !== 'pending') return res.status(400).json({ error: 'Seuls les paiements en attente peuvent être rejetés' });

@@ -1,0 +1,173 @@
+/* Panels workflow éditorial — classes namespacées ms-* */
+.ms-panel { padding: 0; }
+.ms-panel h2 { margin: 0 0 8px; font-size: 1.35rem; }
+.ms-subtitle { color: #6b7280; margin-bottom: 20px; }
+
+.ms-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.ms-toolbar input, .ms-toolbar select {
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  min-width: 200px;
+}
+
+.ms-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.ms-table th, .ms-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 0.9rem;
+}
+.ms-table th { background: #f9fafb; font-weight: 600; color: #374151; }
+.ms-table tr:hover td { background: #f9fafb; cursor: pointer; }
+.ms-table tr:last-child td { border-bottom: 0; }
+
+.ms-stage-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.ms-stage-submitted { background: #0284c7; }
+.ms-stage-in_evaluation { background: #ea580c; }
+.ms-stage-evaluation_positive, .ms-stage-editorial_validated, .ms-stage-contract_signed, .ms-stage-printed { background: #10531a; }
+.ms-stage-evaluation_negative { background: #dc2626; }
+.ms-stage-contract_pending, .ms-stage-payment_pending { background: #d97706; }
+.ms-stage-in_correction { background: #0d9488; }
+.ms-stage-correction_author_review, .ms-stage-bat_author_review { background: #7c3aed; }
+.ms-stage-in_editorial { background: #0891b2; }
+.ms-stage-cover_design { background: #c026d3; }
+.ms-stage-print_preparation, .ms-stage-printing { background: #854d0e; }
+
+.ms-empty {
+  text-align: center;
+  padding: 40px;
+  background: #fff;
+  border-radius: 8px;
+  border: 2px dashed #e5e7eb;
+  color: #6b7280;
+}
+
+.ms-detail-layout {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 20px;
+  align-items: flex-start;
+}
+@media (max-width: 900px) {
+  .ms-detail-layout { grid-template-columns: 1fr; }
+}
+
+.ms-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px;
+  border: 1px solid #e5e7eb;
+  margin-bottom: 16px;
+}
+.ms-card h3 { margin: 0 0 12px; font-size: 1rem; color: #111827; }
+
+.ms-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px 16px;
+  font-size: 0.9rem;
+}
+.ms-meta-grid dt { color: #6b7280; font-size: 0.8rem; margin-bottom: 2px; }
+.ms-meta-grid dd { margin: 0 0 6px; color: #111827; font-weight: 500; }
+
+.ms-file-list { list-style: none; padding: 0; margin: 0; }
+.ms-file-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 0.88rem;
+}
+.ms-file-list li:last-child { border-bottom: 0; }
+.ms-file-kind {
+  display: inline-block;
+  font-size: 0.7rem;
+  background: #f3f4f6;
+  color: #374151;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-right: 6px;
+  text-transform: uppercase;
+}
+
+.ms-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.ms-action-banner {
+  background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+  border-left: 4px solid #10531a;
+  padding: 14px 16px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+}
+.ms-action-banner h4 { margin: 0 0 4px; }
+.ms-action-banner p { margin: 0; font-size: 0.85rem; color: #065f46; }
+
+.ms-btn {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ms-btn-primary { background: #10531a; color: #fff; border-color: #10531a; }
+.ms-btn-primary:hover { background: #0e461a; }
+.ms-btn-danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+.ms-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.ms-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; padding: 20px;
+}
+.ms-modal {
+  background: #fff; border-radius: 10px; padding: 24px;
+  max-width: 520px; width: 100%;
+  max-height: 90vh; overflow-y: auto;
+}
+.ms-modal h3 { margin: 0 0 16px; }
+.ms-modal .form-group { margin-bottom: 14px; }
+.ms-modal label { font-weight: 500; font-size: 0.88rem; display: block; margin-bottom: 4px; }
+.ms-modal input, .ms-modal textarea, .ms-modal select {
+  width: 100%; padding: 8px 10px; border: 1px solid #d1d5db;
+  border-radius: 6px; font-size: 0.9rem; font-family: inherit;
+}
+.ms-modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px;
+}
+
+.ms-upload-box {
+  border: 2px dashed #d1d5db;
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.ms-upload-box:hover { background: #f9fafb; }
+.ms-upload-box input[type=file] { display: none; }

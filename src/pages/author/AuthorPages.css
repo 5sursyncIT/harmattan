@@ -1,0 +1,204 @@
+.author-page {
+  min-height: calc(100vh - 200px);
+  padding: 40px 20px 80px;
+  background: #f9fafb;
+}
+.author-card {
+  background: #fff;
+  padding: 32px;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  max-width: 720px;
+  margin: 0 auto;
+}
+.author-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+}
+.author-subtitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #6b7280;
+  margin: 8px 0 0;
+}
+.author-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.author-empty {
+  text-align: center;
+  padding: 48px 20px;
+  background: #fff;
+  border-radius: 12px;
+  border: 2px dashed #e5e7eb;
+}
+.author-empty p { color: #6b7280; margin-bottom: 16px; }
+.author-manuscripts {
+  display: grid;
+  gap: 12px;
+}
+.author-ms-card {
+  background: #fff;
+  padding: 16px 20px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  text-decoration: none;
+  color: inherit;
+  transition: box-shadow 0.2s, transform 0.1s;
+  display: block;
+}
+.author-ms-card:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  transform: translateY(-1px);
+}
+.author-ms-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.author-ms-header h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #111827;
+}
+.author-ms-stage {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 16px;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.author-ms-meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: #6b7280;
+  flex-wrap: wrap;
+}
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #10531a;
+  text-decoration: none;
+  margin-bottom: 20px;
+  font-size: 0.9rem;
+}
+.back-link:hover { text-decoration: underline; }
+.author-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.author-detail-header h1 { margin: 0; font-size: 1.75rem; color: #111827; }
+.author-action-banner {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 1px solid #f59e0b;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.author-action-banner h3 { margin: 0 0 4px; color: #78350f; }
+.author-action-banner p { margin: 0; color: #92400e; font-size: 0.9rem; }
+.author-section {
+  background: #fff;
+  padding: 24px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  border: 1px solid #e5e7eb;
+}
+.author-section h2 {
+  font-size: 1.15rem;
+  margin: 0 0 16px;
+  color: #111827;
+}
+.author-eval-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.author-eval {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #f9fafb;
+  border-left: 4px solid #d1d5db;
+}
+.author-eval-positive { border-left-color: #10531a; background: #f0fdf4; }
+.author-eval-negative { border-left-color: #dc2626; background: #fef2f2; }
+.author-eval em { display: block; font-size: 0.8rem; color: #6b7280; margin-top: 4px; font-style: normal; }
+.author-files {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.author-files li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: #f9fafb;
+  border-radius: 8px;
+  gap: 12px;
+}
+.author-file-meta { font-size: 0.8rem; color: #6b7280; margin-top: 2px; }
+.file-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: #f3f4f6;
+  border: 2px dashed #d1d5db;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.2s;
+}
+.file-upload:hover { background: #e5e7eb; }
+.radio-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 20px;
+  cursor: pointer;
+}
+.author-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.author-modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 28px;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+}
+.author-modal h3 { margin: 0 0 20px; color: #111827; }
+.author-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}

@@ -17,3 +17,4 @@ export const searchAuthors = (q) => api.get('/contracts/thirdparties/search', { 
 export const getSignatureUrl = (id) => api.get(`/contracts/${id}/signature-url`);
 export const sendSignatureEmail = (id) => api.post(`/contracts/${id}/send-signature`);
 export const getSignatureStatus = (id) => api.get(`/contracts/${id}/signature-status`);
+export const regenerateSignedContract = (id) => api.post(`/contracts/${id}/regenerate-signed`);

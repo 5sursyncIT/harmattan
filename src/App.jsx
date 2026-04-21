@@ -36,7 +36,13 @@ const AdminConfigPanel = lazy(() => import('./pages/admin/panels/ConfigPanel'));
 const AdminSlidesPanel = lazy(() => import('./pages/admin/panels/SlidesPanel'));
 const AdminFAQPanel = lazy(() => import('./pages/admin/panels/FAQPanel'));
 const AdminContactPanel = lazy(() => import('./pages/admin/panels/ContactPanel'));
-const AdminManuscriptsPanel = lazy(() => import('./pages/admin/panels/ManuscriptsPanel'));
+const AdminManuscriptsPanel = lazy(() => import('./pages/admin/panels/ManuscriptsPanelV2'));
+const AdminManuscriptDetail = lazy(() => import('./pages/admin/panels/ManuscriptDetailPanel'));
+const AdminEvaluationsPanel = lazy(() => import('./pages/admin/panels/EvaluationsPanel'));
+const AdminCorrectionsPanel = lazy(() => import('./pages/admin/panels/CorrectionsPanel'));
+const AdminEditorialPanel = lazy(() => import('./pages/admin/panels/EditorialPanel'));
+const AdminCoversPanel = lazy(() => import('./pages/admin/panels/CoversPanel'));
+const AdminPrintingPanel = lazy(() => import('./pages/admin/panels/PrintingPanel'));
 const AdminNewsletterPanel = lazy(() => import('./pages/admin/panels/NewsletterPanel'));
 const AdminProfilePanel = lazy(() => import('./pages/admin/panels/ProfilePanel'));
 const AdminUsersPanel = lazy(() => import('./pages/admin/panels/AdminUsersPanel'));
@@ -59,9 +65,18 @@ const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPane
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
 const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'));
 
+// Portail auteur (workflow éditorial)
+const AuthorLoginPage = lazy(() => import('./pages/author/AuthorLoginPage'));
+const AuthorRegisterPage = lazy(() => import('./pages/author/AuthorRegisterPage'));
+const AuthorForgotPasswordPage = lazy(() => import('./pages/author/AuthorForgotPasswordPage'));
+const AuthorSubmitPage = lazy(() => import('./pages/author/AuthorSubmitPage'));
+const AuthorDashboard = lazy(() => import('./pages/author/AuthorDashboard'));
+const AuthorManuscriptDetail = lazy(() => import('./pages/author/AuthorManuscriptDetail'));
+
 import { SiteConfigProvider } from './hooks/useSiteConfig.jsx';
 import ProtectedRoute from './components/auth/ProtectedRoute';
 import PosProtectedRoute from './components/pos/PosProtectedRoute';
+import AuthorProtectedRoute from './components/author/AuthorProtectedRoute';
 
 export default function App() {
   return (
@@ -91,6 +106,12 @@ export default function App() {
             <Route path="faq" element={<AdminFAQPanel />} />
             <Route path="contacts" element={<AdminContactPanel />} />
             <Route path="manuscripts" element={<AdminManuscriptsPanel />} />
+            <Route path="manuscripts/:id" element={<AdminManuscriptDetail />} />
+            <Route path="evaluations" element={<AdminEvaluationsPanel />} />
+            <Route path="corrections" element={<AdminCorrectionsPanel />} />
+            <Route path="editorial" element={<AdminEditorialPanel />} />
+            <Route path="covers" element={<AdminCoversPanel />} />
+            <Route path="printing" element={<AdminPrintingPanel />} />
             <Route path="newsletter" element={<AdminNewsletterPanel />} />
             <Route path="profile" element={<AdminProfilePanel />} />
             <Route path="users" element={<AdminUsersPanel />} />
@@ -118,6 +139,13 @@ export default function App() {
 
           <Route path="/" element={<Layout />}>
             <Route index element={<HomePage />} />
+            {/* Portail auteur */}
+            <Route path="auteur/connexion" element={<AuthorLoginPage />} />
+            <Route path="auteur/inscription" element={<AuthorRegisterPage />} />
+            <Route path="auteur/mot-de-passe-oublie" element={<AuthorForgotPasswordPage />} />
+            <Route path="auteur/dashboard" element={<AuthorProtectedRoute><AuthorDashboard /></AuthorProtectedRoute>} />
+            <Route path="auteur/soumettre" element={<AuthorProtectedRoute><AuthorSubmitPage /></AuthorProtectedRoute>} />
+            <Route path="auteur/manuscrits/:id" element={<AuthorProtectedRoute><AuthorManuscriptDetail /></AuthorProtectedRoute>} />
             <Route path="catalogue" element={<CatalogPage />} />
             <Route path="se-faire-editer" element={<SeFaireEditerPage />} />
             <Route path="evenements" element={<EvenementsPage />} />

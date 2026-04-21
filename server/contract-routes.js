@@ -14,20 +14,43 @@ const adminApi = axios.create({
 });
 
 // ─── Business configuration ──────────────────────────────
+// Nouveaux types (v2) + anciens types conservés pour retro-compat
 const TEMPLATE_MAP = {
+  // v2 — templates enrichis (charte Harmattan, page de garde, pagination)
+  edition_simple: 'template_edition_simple',
+  edition_numerique: 'template_edition_numerique',
+  edition_complete: 'template_edition_complete',
+  // Legacy — contrats existants continuent de pointer vers les anciens templates
   harmattan_2024: 'template_harmattan_2024',
   harmattan_dll: 'template_harmattan_dll',
   tamarinier: 'template_tamarinier',
 };
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
-const TYPE_LABELS = { harmattan_2024: 'Harmattan 2024', harmattan_dll: 'Harmattan DLL', tamarinier: 'Le Tamarinier' };
+const TYPE_LABELS = {
+  edition_simple: 'Édition · papier',
+  edition_numerique: 'Édition · papier & numérique',
+  edition_complete: 'Édition · complète (papier, numérique, adaptations)',
+  harmattan_2024: 'Harmattan 2024 (ancien)',
+  harmattan_dll: 'Harmattan DLL (ancien)',
+  tamarinier: 'Le Tamarinier (ancien)',
+};
 
 const DEFAULTS_BY_TYPE = {
-  harmattan_2024: { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
-  harmattan_dll: { royalty_rate_print: 8, royalty_rate_digital: 8, royalty_threshold: 300, free_author_copies: 10 },
-  tamarinier: { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
+  edition_simple:    { royalty_rate_print: 8,  royalty_rate_digital: 0,  royalty_threshold: 500, free_author_copies: 10, tirage_initial: 100, format_ouvrage: '15 × 21 cm', prix_public_previsionnel: 8000, nombre_pages_estime: 200, exemplaires_sp: 5 },
+  edition_numerique: { royalty_rate_print: 8,  royalty_rate_digital: 15, royalty_threshold: 500, free_author_copies: 10, tirage_initial: 100, format_ouvrage: '15 × 21 cm', prix_public_previsionnel: 8000, nombre_pages_estime: 200, exemplaires_sp: 5 },
+  edition_complete:  { royalty_rate_print: 8,  royalty_rate_digital: 15, royalty_threshold: 500, free_author_copies: 10, tirage_initial: 100, format_ouvrage: '15 × 21 cm', prix_public_previsionnel: 8000, nombre_pages_estime: 200, exemplaires_sp: 5 },
+  harmattan_2024:    { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
+  harmattan_dll:     { royalty_rate_print: 8,  royalty_rate_digital: 8,  royalty_threshold: 300, free_author_copies: 10 },
+  tamarinier:        { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
 };
+
+// Types v2 activement proposés à la création (les anciens restent compatibles mais masqués)
+export const ACTIVE_CONTRACT_TYPES = ['edition_simple', 'edition_numerique', 'edition_complete'];
+
+// Signataire éditeur par défaut (surchargeable par contrat)
+const DEFAULT_EDITOR_NAME = process.env.CONTRACT_EDITOR_SIGNATORY_NAME || '';
+const DEFAULT_EDITOR_TITLE = process.env.CONTRACT_EDITOR_SIGNATORY_TITLE || 'Directeur général';
 
 const COMMERCIAL_SIGNATURE_ID = process.env.CONTRACT_COMMERCIAL_SIGNATURE_ID || '1';
 const COMMERCIAL_SUIVI_ID = process.env.CONTRACT_COMMERCIAL_SUIVI_ID || '1';
@@ -37,6 +60,19 @@ const COMMERCIAL_SUIVI_ID = process.env.CONTRACT_COMMERCIAL_SUIVI_ID || '1';
 const DOLIBARR_INSTANCE_KEY = process.env.DOLIBARR_INSTANCE_KEY || '';
 const DOLIBARR_SIGN_TOKEN_ENCRYPTED = process.env.DOLIBARR_SIGN_TOKEN || '';
 const DOLIBARR_PUBLIC_URL = process.env.DOLIBARR_PUBLIC_URL || '';
+
+// ─── Dolibarr builddoc helper (custom module endpoint) ───
+const DOLIBARR_WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
+const BUILDDOC_URL = 'http://localhost/dolibarr/htdocs/custom/senharmattansync/contract-builddoc.php';
+
+async function rebuildContractDocument(contractId) {
+  if (!DOLIBARR_WEBHOOK_SECRET) throw new Error('DOLIBARR_WEBHOOK_SECRET non configuré');
+  const { data } = await axios.post(BUILDDOC_URL, { contract_id: contractId }, {
+    headers: { 'X-Dolibarr-Secret': DOLIBARR_WEBHOOK_SECRET, 'Content-Type': 'application/json' },
+    timeout: 30000,
+  });
+  return data;
+}
 
 if (!DOLIBARR_INSTANCE_KEY || !DOLIBARR_SIGN_TOKEN_ENCRYPTED || !DOLIBARR_PUBLIC_URL) {
   console.warn('[CONTRACTS] DOLIBARR_INSTANCE_KEY, DOLIBARR_SIGN_TOKEN et DOLIBARR_PUBLIC_URL manquants — la signature en ligne sera désactivée');
@@ -61,7 +97,7 @@ function getSignSeed() {
   return _signSeed;
 }
 
-function generateSignatureUrl(ref) {
+export function generateSignatureUrl(ref) {
   if (!DOLIBARR_PUBLIC_URL) {
     throw new Error('DOLIBARR_PUBLIC_URL non configurée — impossible de générer le lien de signature');
   }
@@ -445,6 +481,28 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       const templateFile = TEMPLATE_MAP[data.contract_type];
       const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${templateFile}.odt`;
 
+      const arrayOptions = {
+        options_contract_type: data.contract_type,
+        options_book_title: data.book_title.trim(),
+        options_book_isbn: (data.book_isbn || '').replace(/[-\s]/g, ''),
+        options_royalty_rate_print: parseFloat(data.royalty_rate_print) || defaults.royalty_rate_print,
+        options_royalty_rate_digital: parseFloat(data.royalty_rate_digital) || defaults.royalty_rate_digital,
+        options_royalty_threshold: parseInt(data.royalty_threshold) || defaults.royalty_threshold,
+        options_free_author_copies: parseInt(data.free_author_copies) || defaults.free_author_copies,
+      };
+
+      // Nouvelles variables v2 (templates edition_*)
+      if (ACTIVE_CONTRACT_TYPES.includes(data.contract_type)) {
+        arrayOptions.options_tirage_initial = parseInt(data.tirage_initial) || defaults.tirage_initial;
+        arrayOptions.options_format_ouvrage = (data.format_ouvrage || defaults.format_ouvrage).trim();
+        arrayOptions.options_prix_public_previsionnel = parseInt(data.prix_public_previsionnel) || defaults.prix_public_previsionnel;
+        arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime) || defaults.nombre_pages_estime;
+        arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp) || defaults.exemplaires_sp;
+        if (data.date_signature) arrayOptions.options_date_signature = data.date_signature;
+        arrayOptions.options_editeur_signataire_nom = (data.editeur_signataire_nom || DEFAULT_EDITOR_NAME).trim();
+        arrayOptions.options_editeur_signataire_qualite = (data.editeur_signataire_qualite || DEFAULT_EDITOR_TITLE).trim();
+      }
+
       const contractRes = await adminApi.post('/contracts', {
         socid: parseInt(data.thirdparty_id),
         date_contrat: Math.floor(Date.now() / 1000),
@@ -452,15 +510,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         commercial_suivi_id: COMMERCIAL_SUIVI_ID,
         model_pdf: modelPdf,
         note_private: data.note_private || '',
-        array_options: {
-          options_contract_type: data.contract_type,
-          options_book_title: data.book_title.trim(),
-          options_book_isbn: (data.book_isbn || '').replace(/[-\s]/g, ''),
-          options_royalty_rate_print: parseFloat(data.royalty_rate_print) || defaults.royalty_rate_print,
-          options_royalty_rate_digital: parseFloat(data.royalty_rate_digital) || defaults.royalty_rate_digital,
-          options_royalty_threshold: parseInt(data.royalty_threshold) || defaults.royalty_threshold,
-          options_free_author_copies: parseInt(data.free_author_copies) || defaults.free_author_copies,
-        },
+        array_options: arrayOptions,
       });
 
       const contractId = contractRes.data;
@@ -551,6 +601,16 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       }
       if (data.royalty_threshold !== undefined) arrayOptions.options_royalty_threshold = parseInt(data.royalty_threshold);
       if (data.free_author_copies !== undefined) arrayOptions.options_free_author_copies = parseInt(data.free_author_copies);
+
+      // Nouvelles variables v2
+      if (data.tirage_initial !== undefined) arrayOptions.options_tirage_initial = parseInt(data.tirage_initial);
+      if (data.format_ouvrage !== undefined) arrayOptions.options_format_ouvrage = (data.format_ouvrage || '').trim();
+      if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = parseInt(data.prix_public_previsionnel);
+      if (data.nombre_pages_estime !== undefined) arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime);
+      if (data.exemplaires_sp !== undefined) arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp);
+      if (data.date_signature !== undefined) arrayOptions.options_date_signature = data.date_signature || null;
+      if (data.editeur_signataire_nom !== undefined) arrayOptions.options_editeur_signataire_nom = (data.editeur_signataire_nom || '').trim();
+      if (data.editeur_signataire_qualite !== undefined) arrayOptions.options_editeur_signataire_qualite = (data.editeur_signataire_qualite || '').trim();
 
       if (Object.keys(arrayOptions).length > 0) updates.array_options = arrayOptions;
 
@@ -694,21 +754,52 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   router.get('/:id/signature-status', auth, async (req, res) => {
     try {
       const [rows] = await dolibarrPool.query(
-        'SELECT signed_status, online_sign_ip, online_sign_name FROM llx_contrat WHERE rowid = ?',
+        `SELECT c.signed_status, c.online_sign_ip, c.online_sign_name, c.tms AS signed_tms,
+                ce.signature_auteur_nom, ce.signature_auteur_date
+         FROM llx_contrat c
+         LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+         WHERE c.rowid = ?`,
         [req.params.id]
       );
       if (rows.length === 0) return res.status(404).json({ error: 'Contrat non trouvé' });
       const c = rows[0];
       const labels = { 0: 'Non signé', 1: 'Signé par l\'éditeur', 2: 'Signé par l\'auteur', 9: 'Signé par tous' };
+      const status = c.signed_status || 0;
       res.json({
-        status: c.signed_status || 0,
-        label: labels[c.signed_status || 0],
+        status,
+        label: labels[status],
         signedBy: c.online_sign_name,
         signedIp: c.online_sign_ip,
+        signedAt: c.signed_tms,
+        // Les extrafields sont renseignés après régénération du PDF signé
+        certifiedInPdf: !!c.signature_auteur_nom && !!c.signature_auteur_date,
+        pdfSignerName: c.signature_auteur_nom,
+        pdfSignerDate: c.signature_auteur_date,
       });
     } catch (err) {
       console.error('Signature status error:', err.message);
       res.status(500).json({ error: 'Erreur statut signature' });
+    }
+  });
+
+  // Regenerate contract PDF after signature
+  // Copie online_sign_* vers les extrafields signature_auteur_* puis régénère le document
+  router.post('/:id/regenerate-signed', auth, csrfProtection, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'ID invalide' });
+
+      const result = await rebuildContractDocument(id);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'regenerate_contract_signed',
+          `Régénération PDF ${result.ref} (signed=${result.signed_status}, signer=${result.signer_name || '-'})`);
+
+      res.json({ success: true, ...result });
+    } catch (err) {
+      const dolErr = err.response?.data;
+      console.error('Regenerate signed contract error:', dolErr || err.message);
+      res.status(500).json({ error: 'Erreur régénération document', details: dolErr || err.message });
     }
   });
 
@@ -718,6 +809,24 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   router.get('/:id/document', auth, async (req, res) => {
     try {
       const id = req.params.id;
+
+      // Auto-régénération : si le contrat est signé mais que les extrafields signature
+      // ne sont pas encore remplis, on régénère le PDF avant de le servir.
+      try {
+        const [sigRows] = await dolibarrPool.query(
+          `SELECT c.signed_status, c.online_sign_name, ce.signature_auteur_nom
+           FROM llx_contrat c
+           LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+           WHERE c.rowid = ?`, [id]
+        );
+        const sig = sigRows[0];
+        if (sig && sig.signed_status > 0 && sig.online_sign_name && !sig.signature_auteur_nom) {
+          await rebuildContractDocument(parseInt(id));
+        }
+      } catch (autoErr) {
+        console.warn('Auto-regenerate warning:', autoErr.response?.data || autoErr.message);
+      }
+
       const docsRes = await adminApi.get('/documents', { params: { modulepart: 'contract', id } });
       const docs = docsRes.data || [];
       const doc = docs.find(d => d.name.endsWith('.pdf')) || docs.find(d => d.name.endsWith('.odt')) || docs[0];

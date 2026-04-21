@@ -9,6 +9,12 @@ const ROLES = [
   { value: 'editor', label: 'Éditeur', color: '#0284c7' },
   { value: 'support', label: 'Support', color: '#f59e0b' },
   { value: 'librarian', label: 'Libraire', color: '#0891b2' },
+  { value: 'comptable', label: 'Comptable', color: '#0d9488' },
+  { value: 'vendeur', label: 'Vendeur POS', color: '#dc2626' },
+  { value: 'evaluateur', label: 'Évaluateur', color: '#9333ea' },
+  { value: 'correcteur', label: 'Correcteur', color: '#14b8a6' },
+  { value: 'infographiste', label: 'Infographiste', color: '#c026d3' },
+  { value: 'imprimeur', label: 'Imprimeur', color: '#854d0e' },
 ];
 
 export default function AdminUsersPanel() {
@@ -107,9 +113,9 @@ export default function AdminUsersPanel() {
   return (
     <div className="admin-panel">
       <div className="admin-panel-header">
-        <h3 style={{ margin: 0 }}>Administrateurs ({users.length})</h3>
+        <h3 style={{ margin: 0 }}>Utilisateurs ({users.length})</h3>
         <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>
-          <FiUserPlus /> Nouvel admin
+          <FiUserPlus /> Nouvel utilisateur
         </button>
       </div>
 

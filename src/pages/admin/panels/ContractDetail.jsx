@@ -3,11 +3,11 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   getContract, validateContract, closeContract, deleteContract,
   downloadContractDocument, updateContract, getSignatureUrl,
-  sendSignatureEmail, getSignatureStatus,
+  sendSignatureEmail, getSignatureStatus, regenerateSignedContract,
 } from '../../../api/contracts';
 import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
-  FiPercent, FiFileText, FiCalendar, FiCopy, FiExternalLink, FiEdit3, FiSave, FiAlertCircle,
+  FiPercent, FiFileText, FiCalendar, FiCopy, FiExternalLink, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
@@ -22,7 +22,7 @@ function InfoRow({ icon, label, value, mono = false }) {
     <div className="ct-info-row">
       <span className="ct-info-icon">{icon}</span>
       <span className="ct-info-label">{label}</span>
-      <span className={`ct-info-value ${mono ? 'mono' : ''}`}>{value || '\u2014'}</span>
+      <span className={`ct-info-value ${mono ? 'mono' : ''}`}>{value || '—'}</span>
     </div>
   );
 }
@@ -50,6 +50,7 @@ export default function ContractDetail() {
   const [signStatus, setSignStatus] = useState(null);
   const [signUrl, setSignUrl] = useState(null);
   const [sendingSign, setSendingSign] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [confirmAction, setConfirmAction] = useState(null);
@@ -97,24 +98,35 @@ export default function ContractDetail() {
     setSendingSign(true);
     try {
       const res = await sendSignatureEmail(id);
-      toast.success(`Lien de signature envoy\u00e9 \u00e0 ${res.data.email}`);
+      toast.success(`Lien de signature envoyé à ${res.data.email}`);
     } catch (err) { toast.error(err.response?.data?.error || 'Erreur envoi'); }
     finally { setSendingSign(false); }
+  };
+
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    try {
+      const res = await regenerateSignedContract(id);
+      toast.success(`PDF régénéré (${res.data.ref})`);
+      getSignatureStatus(id).then(r => setSignStatus(r.data)).catch(() => {});
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur régénération');
+    } finally { setRegenerating(false); }
   };
 
   const handleValidate = async () => {
     setConfirmAction(null);
     try {
       const res = await validateContract(id);
-      toast.success(`Contrat valid\u00e9 : ${res.data.ref}`);
+      toast.success(`Contrat validé : ${res.data.ref}`);
       load();
     } catch { toast.error('Erreur validation'); }
   };
 
   const handleClose = async () => {
     setConfirmAction(null);
-    try { await closeContract(id); toast.success('Contrat cl\u00f4tur\u00e9'); load(); }
-    catch { toast.error('Erreur cl\u00f4ture'); }
+    try { await closeContract(id); toast.success('Contrat clôturé'); load(); }
+    catch { toast.error('Erreur clôture'); }
   };
 
   const handleDownload = async () => {
@@ -131,16 +143,16 @@ export default function ContractDetail() {
 
   const handleDelete = async () => {
     setConfirmAction(null);
-    try { await deleteContract(id); toast.success('Contrat supprim\u00e9'); navigate('/admin/contracts/list'); }
+    try { await deleteContract(id); toast.success('Contrat supprimé'); navigate('/admin/contracts/list'); }
     catch (err) { toast.error(err.response?.data?.error || 'Erreur suppression'); }
   };
 
   const handleUpdate = async () => {
-    try { await updateContract(id, editForm); toast.success('Contrat mis \u00e0 jour'); setIsEditing(false); load(); }
-    catch (err) { toast.error(err.response?.data?.error || 'Erreur lors de la mise \u00e0 jour'); }
+    try { await updateContract(id, editForm); toast.success('Contrat mis à jour'); setIsEditing(false); load(); }
+    catch (err) { toast.error(err.response?.data?.error || 'Erreur lors de la mise à jour'); }
   };
 
-  const copyRef = () => { navigator.clipboard?.writeText(contract.ref); toast.success('R\u00e9f\u00e9rence copi\u00e9e'); };
+  const copyRef = () => { navigator.clipboard?.writeText(contract.ref); toast.success('Référence copiée'); };
 
   if (loading) return <Loader />;
   if (!contract) return <div className="ct-empty"><FiAlertCircle size={48} className="ct-empty-icon" /><h3>Contrat introuvable</h3></div>;
@@ -150,7 +162,7 @@ export default function ContractDetail() {
   const statusClass = contract.status === 0 ? 'ct-badge-draft' : contract.status === 1 ? 'ct-badge-active' : 'ct-badge-closed';
 
   const formatDate = (ts) => {
-    if (!ts) return '\u2014';
+    if (!ts) return '—';
     const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
     return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
   };
@@ -165,7 +177,7 @@ export default function ContractDetail() {
           </Link>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <h2 style={{ margin: 0, fontSize: '1.4rem', color: '#0f172a' }}>{contract.ref || `Contrat #${id}`}</h2>
-            <button onClick={copyRef} className="ct-btn-ghost" title="Copier la r\u00e9f\u00e9rence"><FiCopy size={14} /></button>
+            <button onClick={copyRef} className="ct-btn-ghost" title="Copier la référence"><FiCopy size={14} /></button>
             <span className={`ct-badge ${statusClass}`} style={{ padding: '4px 12px', borderRadius: 8, fontSize: '0.82rem' }}>
               {STATUS_LABELS[contract.status]}
             </span>
@@ -188,9 +200,9 @@ export default function ContractDetail() {
             )
           )}
           {contract.status === 1 && (
-            <button onClick={() => setConfirmAction('close')} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Cl\u00f4turer</button>
+            <button onClick={() => setConfirmAction('close')} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Clôturer</button>
           )}
-          <button onClick={handleDownload} className="ct-btn ct-btn-dark"><FiDownload size={14} /> T\u00e9l\u00e9charger PDF</button>
+          <button onClick={handleDownload} className="ct-btn ct-btn-dark"><FiDownload size={14} /> Télécharger PDF</button>
           {contract.status === 0 && (
             <button onClick={() => setConfirmAction('delete')} className="ct-btn ct-btn-danger"><FiXCircle size={14} /> Supprimer</button>
           )}
@@ -204,7 +216,7 @@ export default function ContractDetail() {
           {/* Author card */}
           <div className="ct-section">
             <h3 className="ct-section-title"><FiUser size={16} /> Auteur</h3>
-            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>{contract.author?.name || '\u2014'}</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>{contract.author?.name || '—'}</div>
             {contract.author?.email && <a href={`mailto:${contract.author.email}`} style={{ fontSize: '0.85rem', color: '#3b82f6' }}>{contract.author.email}</a>}
             {contract.author?.phone && <div style={{ fontSize: '0.85rem', color: '#64748b', marginTop: 2 }}>{contract.author.phone}</div>}
           </div>
@@ -230,7 +242,7 @@ export default function ContractDetail() {
                 <InfoRow icon={<FiFileText size={14} />} label="ISBN" value={ef.bookIsbn} mono />
                 <InfoRow icon={<FiCalendar size={14} />} label="Date contrat" value={formatDate(contract.date)} />
                 <InfoRow icon={<FiExternalLink size={14} />} label="Type" value={
-                  ef.contractType ? <span className="ct-badge" style={{ padding: '2px 10px', background: `${typeColor}10`, color: typeColor }}>{TYPE_LABELS[ef.contractType]}</span> : '\u2014'
+                  ef.contractType ? <span className="ct-badge" style={{ padding: '2px 10px', background: `${typeColor}10`, color: typeColor }}>{TYPE_LABELS[ef.contractType]}</span> : '—'
                 } />
               </>
             )}
@@ -242,7 +254,7 @@ export default function ContractDetail() {
               <h3 className="ct-section-title">Lignes du contrat</h3>
               <div className="admin-table-container">
                 <table className="admin-table" style={{ fontSize: '0.85rem' }}>
-                  <thead><tr><th>Description</th><th>Qt\u00e9</th><th>Prix</th><th>Total</th></tr></thead>
+                  <thead><tr><th>Description</th><th>Qté</th><th>Prix</th><th>Total</th></tr></thead>
                   <tbody>
                     {contract.lines.map(l => (
                       <tr key={l.id}>
@@ -309,7 +321,7 @@ export default function ContractDetail() {
                 );
               })
             ) : (
-              <p style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Aucun document. Validez le contrat pour g\u00e9n\u00e9rer le PDF.</p>
+              <p style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Aucun document. Validez le contrat pour générer le PDF.</p>
             )}
           </div>
 
@@ -333,25 +345,43 @@ export default function ContractDetail() {
               <h3 className="ct-section-title"><FiCheckCircle size={16} /> Signature en ligne</h3>
               <div className={`ct-sign-status ${signStatus?.status >= 2 ? 'signed' : 'pending'}`}>
                 <div className="ct-sign-label" style={{ color: signStatus?.status >= 2 ? '#166534' : '#92400e' }}>
-                  {signStatus?.label || 'Non sign\u00e9'}
+                  {signStatus?.label || 'Non signé'}
                 </div>
                 {signStatus?.signedBy && (
-                  <div className="ct-sign-detail">Sign\u00e9 par : {signStatus.signedBy} {signStatus.signedIp ? `(IP: ${signStatus.signedIp})` : ''}</div>
+                  <div className="ct-sign-detail">Signé par : {signStatus.signedBy} {signStatus.signedIp ? `(IP: ${signStatus.signedIp})` : ''}</div>
+                )}
+                {signStatus?.status >= 2 && (
+                  signStatus?.certifiedInPdf ? (
+                    <div className="ct-sign-detail" style={{ color: '#166534', marginTop: 6 }}>
+                      ✓ Certificat intégré au PDF ({signStatus.pdfSignerDate})
+                    </div>
+                  ) : (
+                    <div className="ct-sign-detail" style={{ color: '#b45309', marginTop: 6 }}>
+                      ⚠ Le PDF actuel ne contient pas encore le certificat de signature.
+                    </div>
+                  )
                 )}
               </div>
               {signStatus?.status < 2 && (
                 <div className="ct-sign-actions">
                   <button onClick={handleSendSignature} disabled={sendingSign} className="ct-btn ct-btn-primary" style={{ justifyContent: 'center' }}>
-                    {sendingSign ? 'Envoi...' : 'Envoyer le lien \u00e0 l\u2019auteur'}
+                    {sendingSign ? 'Envoi...' : 'Envoyer le lien à l’auteur'}
                   </button>
                   {signUrl && (
                     <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
                       Ou copier le lien : {' '}
-                      <button onClick={() => { navigator.clipboard?.writeText(signUrl); toast.success('Lien copi\u00e9'); }} className="ct-btn-link">
+                      <button onClick={() => { navigator.clipboard?.writeText(signUrl); toast.success('Lien copié'); }} className="ct-btn-link">
                         Copier l'URL
                       </button>
                     </div>
                   )}
+                </div>
+              )}
+              {signStatus?.status >= 2 && (
+                <div className="ct-sign-actions">
+                  <button onClick={handleRegenerate} disabled={regenerating} className="ct-btn ct-btn-blue" style={{ justifyContent: 'center' }}>
+                    <FiRefreshCw size={14} /> {regenerating ? 'Régénération…' : 'Régénérer le PDF signé'}
+                  </button>
                 </div>
               )}
             </div>
@@ -363,7 +393,7 @@ export default function ContractDetail() {
       {confirmAction === 'validate' && (
         <ConfirmModal
           title="Valider ce contrat ?"
-          message="Le contrat passera en statut Actif et ne pourra plus \u00eatre modifi\u00e9. Le PDF sera g\u00e9n\u00e9r\u00e9 automatiquement."
+          message="Le contrat passera en statut Actif et ne pourra plus être modifié. Le PDF sera généré automatiquement."
           confirmLabel="Valider le contrat"
           onConfirm={handleValidate}
           onCancel={() => setConfirmAction(null)}
@@ -371,9 +401,9 @@ export default function ContractDetail() {
       )}
       {confirmAction === 'close' && (
         <ConfirmModal
-          title="Cl\u00f4turer ce contrat ?"
-          message="Le contrat sera d\u00e9finitivement cl\u00f4tur\u00e9. Cette action est irr\u00e9versible."
-          confirmLabel="Cl\u00f4turer"
+          title="Clôturer ce contrat ?"
+          message="Le contrat sera définitivement clôturé. Cette action est irréversible."
+          confirmLabel="Clôturer"
           danger
           onConfirm={handleClose}
           onCancel={() => setConfirmAction(null)}
@@ -382,7 +412,7 @@ export default function ContractDetail() {
       {confirmAction === 'delete' && (
         <ConfirmModal
           title="Supprimer ce brouillon ?"
-          message="Le contrat sera d\u00e9finitivement supprim\u00e9. Cette action est irr\u00e9versible."
+          message="Le contrat sera définitivement supprimé. Cette action est irréversible."
           confirmLabel="Supprimer"
           danger
           onConfirm={handleDelete}

@@ -30,6 +30,7 @@ export default function Footer() {
               <li><Link to="/contact">Contact</Link></li>
               <li><Link to="/faq">FAQ</Link></li>
               <li><Link to="/suivi-commande">Suivi de commande</Link></li>
+              <li><Link to="/auteur/connexion">Espace auteur</Link></li>
             </ul>
           </div>
 
