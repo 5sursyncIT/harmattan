@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { FiPlus, FiLogOut, FiUser } from 'react-icons/fi';
+import { FiPlus, FiLogOut, FiUser, FiSettings } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
 import useAuthorAuthStore from '../../store/authorAuthStore';
+import NotificationBell from '../../components/author/NotificationBell';
 import './AuthorPages.css';
 
 function stageBadge(stage) {
@@ -65,8 +66,12 @@ export default function AuthorDashboard() {
             </p>
           </div>
           <div className="author-actions">
+            <NotificationBell />
             <Link to="/auteur/soumettre" className="btn btn-primary">
               <FiPlus /> Soumettre un manuscrit
+            </Link>
+            <Link to="/auteur/preferences" className="btn btn-ghost" title="Préférences de notifications">
+              <FiSettings /> Préférences
             </Link>
             <button type="button" className="btn btn-ghost" onClick={handleLogout}>
               <FiLogOut /> Déconnexion

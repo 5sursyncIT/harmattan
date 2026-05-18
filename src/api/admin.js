@@ -40,15 +40,22 @@ export const uploadCoverImage = (file) => {
 };
 
 // ─── Books management ──────────────────────────────────
-export const listBooks = (params = {}) => api.get('/admin/books', { params });
+export const listBooks = (params = {}, config = {}) => api.get('/admin/books', { params, ...config });
 export const getBook = (id) => api.get(`/admin/books/${id}`);
 export const createBook = (data) => api.post('/admin/books', data);
 export const updateBook = (id, data) => api.put(`/admin/books/${id}`, data);
 export const deleteBook = (id, hard = false) => api.delete(`/admin/books/${id}`, { params: { soft: hard ? '0' : '1' } });
 export const checkIsbn = (isbn, excludeId = null) =>
   api.get(`/admin/books/check-isbn/${encodeURIComponent(isbn)}`, { params: excludeId ? { exclude: excludeId } : {} });
-export const searchAuthors = (q = '', limit = 10) =>
-  api.get('/admin/books/authors', { params: { q, limit } });
+export const searchAuthors = (q = '', limit = 10, config = {}) =>
+  api.get('/admin/books/authors', { params: { q, limit }, ...config });
+export const getBookQualityStats = () => api.get('/admin/books/quality-stats');
+export const uploadBookCover = (id, file, { side } = {}) => {
+  const fd = new FormData();
+  fd.append('cover', file);
+  if (side) fd.append('side', side);
+  return api.post(`/admin/books/${id}/cover`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+};
 
 // ─── POS management ──────────────────────────────────
 // Devices
@@ -95,7 +102,12 @@ export const updateAdminUser = (id, data) => api.put(`/admin/users/${id}`, data)
 export const deleteAdminUser = (id) => api.delete(`/admin/users/${id}`);
 
 // Activity log
-export const getActivityLog = (limit = 50) => api.get('/admin/activity-log', { params: { limit } });
+export const getActivityLog = (params = {}) => api.get('/admin/activity-log', { params });
+export const getActivityStats = () => api.get('/admin/activity-log/stats');
+export const getActivityExportUrl = (params = {}) => {
+  const qs = new URLSearchParams(params).toString();
+  return `/api/admin/activity-log/export${qs ? '?' + qs : ''}`;
+};
 
 // Newsletter
 export const getSubscribers = () => api.get('/admin/newsletter/subscribers');
@@ -136,3 +148,24 @@ export const getNotificationCounts = () => api.get('/admin/notifications/counts'
 
 // Stats
 export const getAdminStats = () => api.get('/admin/stats');
+
+// Customers & Authors (public-facing accounts)
+export const getAdminCustomers = (params = {}) => api.get('/admin/customers', { params });
+export const getAdminCustomer = (id) => api.get(`/admin/customers/${id}`);
+export const resetCustomerPassword = (id) => api.post(`/admin/customers/${id}/reset-password`);
+
+export const getAdminAuthors = (params = {}) => api.get('/admin/authors', { params });
+export const getAdminAuthor = (id) => api.get(`/admin/authors/${id}`);
+export const resetAuthorPassword = (id) => api.post(`/admin/authors/${id}/reset-password`);
+
+// ─── News / Actualités ─────────────────────────────────
+export const listNewsArticles = (params = {}) => api.get('/admin/news', { params });
+export const getNewsArticle = (id) => api.get(`/admin/news/${id}`);
+export const createNewsArticle = (data) => api.post('/admin/news', data);
+export const updateNewsArticle = (id, data) => api.put(`/admin/news/${id}`, data);
+export const deleteNewsArticle = (id) => api.delete(`/admin/news/${id}`);
+export const uploadNewsImage = (file) => {
+  const fd = new FormData();
+  fd.append('image', file);
+  return api.post('/admin/news/upload-image', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+};

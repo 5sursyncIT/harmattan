@@ -78,6 +78,14 @@ export default function CheckoutPage() {
         },
       });
 
+      // PayTech : si l'init a réussi, on redirige vers la page hosted
+      if (paymentMethod === 'paytech' && orderRes.data?.paytech_redirect_url) {
+        toast.success('Redirection vers le paiement…');
+        window.location.href = orderRes.data.paytech_redirect_url;
+        return;
+      }
+
+      // Mode manuel (virement) : on bascule sur l'écran d'instructions + preuve
       setOrderResult(orderRes.data);
       setOrderComplete(true);
       clearCart();
@@ -257,7 +265,10 @@ export default function CheckoutPage() {
                           onChange={(e) => setPaymentMethod(e.target.value)}
                         />
                         <span className="payment-icon">{pm.icon}</span>
-                        <span className="payment-label">{pm.label}</span>
+                        <span className="payment-label-block">
+                          <span className="payment-label">{pm.label}</span>
+                          {pm.subtitle && <span className="payment-subtitle">{pm.subtitle}</span>}
+                        </span>
                       </label>
                     ))}
                   </div>

@@ -1,39 +1,25 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { FiArrowRight, FiBook, FiTruck, FiShield, FiHeadphones } from 'react-icons/fi';
-import { getFeaturedProducts } from '../api/dolibarr';
-import ProductGrid from '../components/product/ProductGrid';
+import { FiBook, FiTruck, FiShield, FiHeadphones } from 'react-icons/fi';
+import { getHomeTags } from '../api/tags';
 import HeroCarousel from '../components/home/HeroCarousel';
-import OurSelection from '../components/home/OurSelection';
-import BookOfTheMonthSection from '../components/home/BookOfTheMonth';
+import TagSection from '../components/home/TagSection';
 import UpcomingBooks from '../components/home/UpcomingBooks';
 import YouTubeVideos from '../components/home/YouTubeVideos';
 import './HomePage.css';
 
 export default function HomePage() {
-  const [newProducts, setNewProducts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [tags, setTags] = useState([]);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const prodRes = await getFeaturedProducts(10);
-        setNewProducts(prodRes.data.products || prodRes.data);
-      } catch (err) {
-        console.error('Error loading home data:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
+    getHomeTags()
+      .then((res) => setTags(res.data || []))
+      .catch(() => setTags([]));
   }, []);
 
   return (
     <div className="home-page">
-      {/* Hero Carousel */}
       <HeroCarousel />
 
-      {/* Features */}
       <section className="features">
         <div className="container features-grid">
           <div className="feature">
@@ -67,29 +53,19 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* Notre Sélection (carousel) */}
-      <OurSelection />
+      {/* Sections dynamiques basées sur les tags de curation */}
+      {tags.map((t) => (
+        <TagSection
+          key={t.id}
+          slug={t.slug}
+          title={t.label}
+          color={t.color}
+          max={t.max_items}
+          kicker={t.description}
+        />
+      ))}
 
-      {/* Livres du mois (carousel) */}
-      <BookOfTheMonthSection />
-
-      {/* Nouveautés (grille) */}
-      <section className="home-section">
-        <div className="container">
-          <div className="section-header">
-            <h2 className="section-title">Nouveautés</h2>
-            <Link to="/catalogue" className="see-all">
-              Voir tout <FiArrowRight />
-            </Link>
-          </div>
-          <ProductGrid products={newProducts} loading={loading} />
-        </div>
-      </section>
-
-      {/* Ouvrages à paraître */}
       <UpcomingBooks />
-
-      {/* YouTube Videos */}
       <YouTubeVideos />
     </div>
   );

@@ -4,6 +4,8 @@ import { FiArrowLeft, FiDownload, FiAlertCircle } from 'react-icons/fi';
 import { getReceivables, exportAccounting } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
+import DolibarrLink from '../../../components/admin/DolibarrLink';
+import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import './Accounting.css';
@@ -68,9 +70,13 @@ export default function AccountingReceivables() {
             <FiAlertCircle /> Balance âgée
           </h3>
         </div>
-        <button onClick={handleExport} disabled={exporting} className="btn btn-outline">
-          <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <DolibarrLink href={dolibarrUrls.invoicesList()} title="Toutes les factures Dolibarr (relances possibles)">Factures Dolibarr</DolibarrLink>
+          <DolibarrLink href={dolibarrUrls.thirdpartiesClients()} variant="ghost" title="Liste des clients">Clients</DolibarrLink>
+          <button onClick={handleExport} disabled={exporting} className="btn btn-outline">
+            <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
+          </button>
+        </div>
       </div>
 
       {/* Tuiles buckets */}

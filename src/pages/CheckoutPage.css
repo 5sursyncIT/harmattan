@@ -147,6 +147,18 @@
   color: var(--color-dark);
 }
 
+.payment-label-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.payment-subtitle {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-light, #6b7280);
+}
+
 /* Summary */
 .checkout-summary {
   background: var(--color-light-bg);

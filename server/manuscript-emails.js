@@ -1,10 +1,187 @@
 /**
- * Notifications email liées au workflow éditorial.
- * Chaque transition déclenche un mail au prochain acteur + un mail à l'auteur
- * pour une transparence totale du suivi.
+ * Notifications workflow éditorial :
+ *  - email transactionnel à l'auteur + à l'acteur métier suivant (si email connu)
+ *  - notification in-app persistée dans `author_notifications` pour affichage
+ *    dans la cloche du portail auteur (lecture / non lue / historique).
+ *
+ * Chaque transition déclenche, dans l'ordre :
+ *   1. sendTransitionEmail() vers l'auteur
+ *   2. createAuthorNotification() en DB
+ *   3. sendTransitionEmail() vers l'acteur métier suivant (si connu)
  */
 
 import { STAGE_LABELS } from './manuscript-workflow.js';
+
+// Stages dits "terminaux" pour l'auteur — on ne génère pas de notification car
+// l'utilisateur n'a plus d'action à mener ou ce sont des états techniques internes.
+const SKIP_AUTHOR_NOTIFICATION = new Set([]);
+
+// Stages où l'auteur DOIT agir (validation) — on les marque comme "action requise"
+// pour pouvoir afficher un badge spécifique dans la cloche.
+const ACTION_REQUIRED_STAGES = new Set([
+  'correction_author_review',
+  'bat_author_review',
+]);
+
+/**
+ * Crée la table `author_notifications` si absente + colonne `notification_prefs` sur authors.
+ * À appeler une fois au démarrage.
+ */
+export function ensureNotificationsSchema(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS author_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    author_id INTEGER NOT NULL,
+    manuscript_id INTEGER,
+    manuscript_ref TEXT,
+    manuscript_title TEXT,
+    stage TEXT,
+    title TEXT NOT NULL,
+    message TEXT,
+    action_url TEXT,
+    action_required INTEGER NOT NULL DEFAULT 0,
+    is_read INTEGER NOT NULL DEFAULT 0,
+    read_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_author_notif_author ON author_notifications(author_id, is_read, created_at DESC)'); } catch (e) { void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_author_notif_manuscript ON author_notifications(manuscript_id)'); } catch (e) { void e; }
+  // Préférences email (opt-out par catégorie). Colonne TEXT JSON, NULL = tous les emails actifs.
+  try { db.exec('ALTER TABLE authors ADD COLUMN notification_prefs TEXT'); } catch (e) { void e; }
+  // Biographie auteur — soumise via les formulaires manuscrit, partagée entre tous les manuscrits.
+  try { db.exec('ALTER TABLE authors ADD COLUMN bio TEXT'); } catch (e) { void e; }
+  // Biographie spécifique au manuscrit (telle que soumise à ce moment-là).
+  try { db.exec('ALTER TABLE manuscripts ADD COLUMN biography TEXT'); } catch (e) { void e; }
+}
+
+// Catégorisation des stages workflow pour les opt-out
+const STAGE_CATEGORY = {
+  submitted: 'workflow', in_evaluation: 'workflow', evaluation_positive: 'workflow',
+  evaluation_negative: 'workflow', in_correction: 'workflow', correction_author_review: 'workflow',
+  in_editorial: 'workflow', editorial_validated: 'workflow',
+  contract_pending: 'critical', contract_signed: 'critical', payment_pending: 'critical',
+  cover_design: 'cover', bat_author_review: 'cover',
+  print_preparation: 'print', printing: 'print', printed: 'print',
+};
+
+/**
+ * Charge les préférences notification d'un auteur. Tout est ON par défaut.
+ * 'critical' est toujours ON (contrats, paiements) — non configurable.
+ */
+export function getAuthorPreferences(db, authorId) {
+  let prefs = {};
+  try {
+    const row = db.prepare('SELECT notification_prefs FROM authors WHERE id = ?').get(authorId);
+    if (row?.notification_prefs) {
+      prefs = JSON.parse(row.notification_prefs) || {};
+    }
+  } catch (e) { void e; }
+  return {
+    workflow: prefs.workflow !== false,
+    cover: prefs.cover !== false,
+    print: prefs.print !== false,
+    reminders: prefs.reminders !== false,
+    critical: true, // toujours actif
+  };
+}
+
+/**
+ * Décide si on envoie un email auteur pour ce stage, selon ses préférences.
+ * Les notifications in-app sont créées dans tous les cas (l'auteur peut les masquer mais
+ * elles persistent dans l'historique).
+ */
+export function shouldEmailAuthor(db, authorId, toStage) {
+  const category = STAGE_CATEGORY[toStage] || 'workflow';
+  if (category === 'critical') return true;
+  const prefs = getAuthorPreferences(db, authorId);
+  return !!prefs[category];
+}
+
+/**
+ * Construit le couple (titre, message) court pour la cloche, dérivé du stage.
+ * Volontairement distinct des templates email — plus dense, sans HTML.
+ */
+function buildNotificationCopy(manuscript, toStage) {
+  const title = manuscript?.title || 'votre manuscrit';
+  const stageLabel = STAGE_LABELS[toStage] || toStage;
+  switch (toStage) {
+    case 'submitted':
+      return { title: 'Manuscrit bien reçu', message: `« ${title} » est enregistré. Suivez son évolution depuis votre espace.` };
+    case 'in_evaluation':
+      return { title: 'Évaluation en cours', message: `Votre manuscrit « ${title} » a été transmis au comité éditorial.` };
+    case 'evaluation_positive':
+      return { title: 'Évaluation favorable', message: `Bonne nouvelle : « ${title} » a reçu une évaluation favorable.` };
+    case 'evaluation_negative':
+      return { title: 'Décision éditoriale', message: `Le comité n'a pas retenu « ${title} » pour publication.` };
+    case 'contract_pending':
+      return { title: 'Contrat à signer', message: `Votre contrat pour « ${title} » est prêt à la signature.` };
+    case 'contract_signed':
+      return { title: 'Contrat signé', message: `Contrat de « ${title} » signé. Prochaine étape : le règlement.` };
+    case 'payment_pending':
+      return { title: 'Paiement en attente', message: `Règlement attendu pour démarrer la correction de « ${title} ».` };
+    case 'in_correction':
+      return { title: 'En correction', message: `« ${title} » est entre les mains du correcteur.` };
+    case 'correction_author_review':
+      return { title: 'Corrections à valider', message: `Les corrections de « ${title} » sont prêtes pour votre relecture.` };
+    case 'in_editorial':
+      return { title: 'Validation éditoriale', message: `Vos corrections de « ${title} » ont été validées. Phase éditoriale en cours.` };
+    case 'editorial_validated':
+      return { title: 'Validé par l\'éditeur', message: `« ${title} » est validé. La conception de la couverture va démarrer.` };
+    case 'cover_design':
+      return { title: 'Couverture en conception', message: `L'infographiste prépare la couverture de « ${title} ».` };
+    case 'bat_author_review':
+      return { title: 'BAT couverture à valider', message: `Le bon à tirer de « ${title} » attend votre validation.` };
+    case 'print_preparation':
+      return { title: 'Préparation impression', message: `BAT validé — « ${title} » entre en préparation pour l'impression.` };
+    case 'printing':
+      return { title: 'En impression', message: `« ${title} » est désormais en impression.` };
+    case 'printed':
+      return { title: 'Votre livre est prêt !', message: `L'impression de « ${title} » est terminée. Nous vous recontactons pour la suite.` };
+    default:
+      return { title: stageLabel, message: `Nouvelle étape pour « ${title} » : ${stageLabel}.` };
+  }
+}
+
+/**
+ * Insère une notification in-app pour l'auteur.
+ * Idempotent par (manuscript_id, stage, author_id) sur l'heure du jour pour éviter les doublons
+ * en cas de double-transition (ex: cron qui retrigger).
+ */
+export function createAuthorNotification(db, manuscript, toStage, author, siteUrl) {
+  if (!author?.id) return null;
+  if (SKIP_AUTHOR_NOTIFICATION.has(toStage)) return null;
+  try {
+    // Anti-doublon : si une notif pour le même couple (auteur, manuscrit, stage) existe créée il y a moins d'1h, on saute
+    const recent = db.prepare(
+      `SELECT id FROM author_notifications
+       WHERE author_id = ? AND manuscript_id IS ? AND stage = ?
+         AND created_at > datetime('now', '-1 hour')
+       LIMIT 1`
+    ).get(author.id, manuscript?.id || null, toStage);
+    if (recent) return recent.id;
+
+    const { title, message } = buildNotificationCopy(manuscript, toStage);
+    const actionUrl = manuscript?.id ? `${siteUrl || ''}/auteur/manuscrits/${manuscript.id}` : null;
+    const info = db.prepare(
+      `INSERT INTO author_notifications
+        (author_id, manuscript_id, manuscript_ref, manuscript_title, stage, title, message, action_url, action_required)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      author.id,
+      manuscript?.id || null,
+      manuscript?.ref || null,
+      manuscript?.title || null,
+      toStage,
+      title,
+      message,
+      actionUrl,
+      ACTION_REQUIRED_STAGES.has(toStage) ? 1 : 0,
+    );
+    return info.lastInsertRowid;
+  } catch (err) {
+    console.error('[NOTIF] createAuthorNotification error:', err.message);
+    return null;
+  }
+}
 
 function escapeHtml(str) {
   if (typeof str !== 'string') return '';
@@ -67,7 +244,9 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         body = header('Décision du comité éditorial')
           + greeting
           + `<p>Après examen attentif, notre comité n'a pas retenu votre manuscrit <strong>« ${msTitle} »</strong> pour publication.</p>`
-          + `<p>Nous vous remercions de votre confiance et vous encourageons à persévérer.</p>`;
+          + `<p>Vous pouvez consulter l'avis détaillé du comité depuis votre espace auteur.</p>`
+          + `<p>Nous vous remercions de votre confiance et vous encourageons à persévérer.</p>`
+          + btn('Consulter l\'avis', authorUrl);
         break;
       case 'contract_pending':
         subject = `${msTitle} — Contrat à signer`;
@@ -235,23 +414,72 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
   }).catch((err) => console.error('[WORKFLOW] Email error:', err.message));
 }
 
-/**
- * Résout la liste des destinataires pour une transition et envoie les mails.
- */
-export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl) {
-  if (!transporter) return;
+const ROLE_LABELS = {
+  evaluateur: { label: 'évaluateur', task: "à évaluer", adminTab: 'evaluations' },
+  correcteur: { label: 'correcteur', task: "à corriger", adminTab: 'corrections' },
+  editor: { label: 'éditeur', task: "à valider éditorialement", adminTab: 'editorial' },
+  infographiste: { label: 'infographiste', task: "dont la couverture est à concevoir", adminTab: 'covers' },
+  imprimeur: { label: 'imprimeur', task: "à préparer à l'impression", adminTab: 'printing' },
+};
 
-  // Auteur
-  const author = db.prepare('SELECT email, firstname FROM authors WHERE id = ?').get(manuscript.author_id);
-  if (author?.email) {
-    sendTransitionEmail(transporter, manuscript, toStage, {
-      type: 'author',
-      email: author.email,
-      firstname: author.firstname,
-    }, siteUrl);
+/**
+ * Notifie un admin métier nouvellement (ré)assigné à un manuscrit.
+ *  - kind = 'assigned' : on lui annonce qu'il a un nouveau dossier
+ *  - kind = 'unassigned' : on lui annonce qu'on lui a retiré le dossier
+ */
+export function sendAssignmentEmail(transporter, manuscript, role, recipient, siteUrl, kind = 'assigned') {
+  if (!transporter || !recipient?.email) return Promise.resolve();
+  const roleInfo = ROLE_LABELS[role] || { label: role, task: 'à traiter', adminTab: 'manuscripts' };
+  const msTitle = escapeHtml(manuscript?.title || 'un manuscrit');
+  const msRef = escapeHtml(manuscript?.ref || '');
+  const greeting = `<p>Bonjour ${escapeHtml(recipient.label || recipient.firstname || 'cher collègue')},</p>`;
+  const adminUrl = `${siteUrl || ''}/admin/${roleInfo.adminTab}`;
+
+  let subject, body;
+  if (kind === 'unassigned') {
+    subject = `[Workflow] ${msTitle} — désassignation`;
+    body = header('Manuscrit retiré')
+      + greeting
+      + `<p>Le manuscrit <strong>« ${msTitle} »</strong> (${msRef}) ne vous est plus assigné comme ${roleInfo.label}. Vous n'avez plus d'action à mener dessus.</p>`;
+  } else {
+    subject = `[Workflow] ${msTitle} — nouveau dossier ${roleInfo.label}`;
+    body = header('Nouveau manuscrit assigné')
+      + greeting
+      + `<p>Le manuscrit <strong>« ${msTitle} »</strong> (${msRef}) vous est confié en tant que <strong>${roleInfo.label}</strong>. Il sera ${roleInfo.task} dès qu'il atteindra l'étape correspondante.</p>`
+      + btn('Accéder à mes dossiers', adminUrl);
   }
 
-  // Prochain acteur (admin) selon le stage cible
+  return transporter.sendMail({
+    to: recipient.email,
+    subject,
+    html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+  }).catch((err) => console.error('[WORKFLOW] Assignment email error:', err.message));
+}
+
+/**
+ * Résout la liste des destinataires pour une transition, envoie les mails
+ * et crée une notification in-app pour l'auteur.
+ */
+export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl) {
+  // 1. Auteur : notification in-app (toujours) + email (selon préférences)
+  const author = db.prepare('SELECT id, email, firstname FROM authors WHERE id = ?').get(manuscript.author_id);
+  if (author?.id) {
+    // Notification in-app — toujours créée, même sans transporter et même si email opt-out
+    createAuthorNotification(db, manuscript, toStage, author, siteUrl);
+
+    // Email — uniquement si transporter dispo, email connu, ET préférence active pour la catégorie
+    if (transporter && author.email && shouldEmailAuthor(db, author.id, toStage)) {
+      sendTransitionEmail(transporter, manuscript, toStage, {
+        type: 'author',
+        email: author.email,
+        firstname: author.firstname,
+      }, siteUrl);
+    }
+  }
+
+  if (!transporter) return;
+
+  // 2. Prochain acteur métier : email si une adresse est connue dans admin_users
   const roleToColumn = {
     in_evaluation: 'assigned_evaluator_id',
     in_correction: 'assigned_corrector_id',
@@ -262,17 +490,28 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
   };
   const col = roleToColumn[toStage];
   if (col && manuscript[col]) {
-    const admin = db.prepare('SELECT username, role FROM admin_users WHERE id = ?').get(manuscript[col]);
-    if (admin?.username) {
-      // Les admin_users n'ont pas de colonne email — on utilise username comme label, pas de mail direct
-      // (On pourrait ajouter un email mais le schéma actuel n'en a pas.)
-      // Pour l'instant on logue simplement pour traçabilité.
-      console.log(`[WORKFLOW] Prochain acteur notifié : ${admin.username} (${admin.role}) pour ${manuscript.ref} → ${toStage}`);
+    try {
+      const admin = db.prepare('SELECT username, role, email FROM admin_users WHERE id = ?').get(manuscript[col]);
+      if (admin?.email) {
+        sendTransitionEmail(transporter, manuscript, toStage, {
+          type: 'admin',
+          email: admin.email,
+          role: admin.role,
+          label: admin.username,
+        }, siteUrl);
+      } else if (admin?.username) {
+        console.log(`[WORKFLOW] ${admin.username} (${admin.role}) assigné à ${manuscript.ref} → ${toStage} — aucun email enregistré`);
+      }
+    } catch (err) {
+      // La colonne email peut ne pas exister sur les très vieilles bases. On loggue et on continue.
+      console.warn('[WORKFLOW] admin_users.email lookup error:', err.message);
     }
   }
 
-  // Admins généraux sur transitions clés (paiement attendu, évaluation positive)
-  const adminEmailStages = ['evaluation_positive', 'payment_pending'];
+  // 3. Admins généraux sur transitions clés (nouvelle soumission, paiement attendu,
+  //    évaluation positive, contrat signé, éditorial validé — étapes qui nécessitent
+  //    une action humaine côté équipe ou un suivi rapproché)
+  const adminEmailStages = ['submitted', 'evaluation_positive', 'payment_pending', 'editorial_validated', 'contract_signed'];
   if (adminEmailStages.includes(toStage)) {
     try {
       const fs = global.__siteConfigFallback;

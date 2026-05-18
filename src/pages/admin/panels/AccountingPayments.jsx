@@ -4,6 +4,8 @@ import { FiArrowLeft, FiDownload, FiDollarSign } from 'react-icons/fi';
 import { getPaymentsJournal, exportAccounting, getTreasury } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
+import DolibarrLink from '../../../components/admin/DolibarrLink';
+import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import './Accounting.css';
 
@@ -60,9 +62,13 @@ export default function AccountingPayments() {
             <FiDollarSign /> Journal des encaissements ({data.total})
           </h3>
         </div>
-        <button onClick={handleExport} disabled={exporting} className="btn btn-outline">
-          <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <DolibarrLink href={dolibarrUrls.payments()} title="Liste des paiements clients Dolibarr">Paiements Dolibarr</DolibarrLink>
+          <DolibarrLink href={dolibarrUrls.bankJournal()} variant="ghost" title="Journal de banque (écritures)">Journal banque</DolibarrLink>
+          <button onClick={handleExport} disabled={exporting} className="btn btn-outline">
+            <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
+          </button>
+        </div>
       </div>
 
       <div className="ac-filters">

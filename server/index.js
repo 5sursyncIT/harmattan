@@ -16,8 +16,10 @@ import crypto from 'crypto';
 import { readdirSync, readFileSync, statSync } from 'fs';
 import mysql from 'mysql2/promise';
 import sharp from 'sharp';
+import axios from 'axios';
 import { dolibarrApi } from './dolibarr-client.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
+import { EXCLUDED_CATEGORIES_SET, excludedCategorySqlList } from '../src/utils/excludedCategories.js';
 import {
   buildPreorderCancellationEmail,
   buildPreorderConfirmationEmail,
@@ -222,6 +224,37 @@ function createMailTransporter() {
   return nodemailer.createTransport({ host: '127.0.0.1', port: 1025, ignoreTLS: true });
 }
 const transporter = createMailTransporter();
+
+// MAIL_FROM : si défini, force l'expéditeur de TOUS les emails sortants (alignement SPF/DMARC
+// quand le compte SMTP n'autorise pas un From: arbitraire).
+const MAIL_FROM_OVERRIDE = process.env.MAIL_FROM?.trim();
+if (MAIL_FROM_OVERRIDE) {
+  const _originalSendMail = transporter.sendMail.bind(transporter);
+  transporter.sendMail = (mailOptions, callback) => {
+    const patched = { ...mailOptions, from: MAIL_FROM_OVERRIDE };
+    const result = _originalSendMail(patched, callback);
+    if (result && typeof result.then === 'function') {
+      return result.then(
+        (info) => {
+          console.log(`[MAIL] ✓ envoyé à ${patched.to} — sujet: ${patched.subject} — id: ${info?.messageId || '?'}`);
+          return info;
+        },
+        (err) => {
+          console.error(`[MAIL] ✗ ÉCHEC envoi à ${patched.to} — sujet: ${patched.subject} — erreur: ${err.message}`);
+          throw err;
+        }
+      );
+    }
+    return result;
+  };
+  console.log(`[MAIL] MAIL_FROM override actif : ${MAIL_FROM_OVERRIDE}`);
+}
+
+// Vérifie au démarrage que le SMTP répond
+transporter.verify().then(
+  () => console.log('[MAIL] ✓ connexion SMTP vérifiée — prêt à envoyer'),
+  (err) => console.error(`[MAIL] ✗ connexion SMTP impossible : ${err.message}`)
+);
 // SITE_URL pour les liens dans les emails (newsletter, reset password, etc.)
 const SITE_URL = process.env.SITE_URL || `http://38.242.229.122:${PORT}`;
 // ---------------------------
@@ -239,7 +272,7 @@ app.use(helmet({
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https://i.ytimg.com", "blob:"],
       connectSrc: ["'self'"],
-      frameSrc: ["'self'", "https://www.youtube.com"],
+      frameSrc: ["'self'", "https://www.youtube.com", "https://www.youtube-nocookie.com"],
       upgradeInsecureRequests: null, // Désactivé tant que HTTPS n'est pas configuré
     },
   } : false,
@@ -467,6 +500,10 @@ function requireCustomerAuth(req, res, next) {
   next();
 }
 
+// ─── PAYTECH columns migration (idempotent) ─────────────────
+import { migrateAddPaytechColumns } from './migrations/add-paytech-columns.js';
+migrateAddPaytechColumns(db);
+
 // ─── DOLIBARR WEBHOOK SYNC ──────────────────────────────────
 const WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
 
@@ -481,6 +518,74 @@ db.exec(`CREATE TABLE IF NOT EXISTS webhook_sync_log (
   caches_cleared TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )`);
+
+// ─── BOOK TAGS (curation éditoriale : Notre sélection, Livres du mois, etc.) ───
+db.exec(`CREATE TABLE IF NOT EXISTS book_tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL,
+  description TEXT,
+  color TEXT DEFAULT '#10531a',
+  icon TEXT,
+  sort_order INTEGER DEFAULT 0,
+  is_active INTEGER DEFAULT 1,
+  is_system INTEGER DEFAULT 0,
+  show_on_home INTEGER DEFAULT 1,
+  max_items INTEGER DEFAULT 12,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)`);
+
+db.exec(`CREATE TABLE IF NOT EXISTS book_tag_products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tag_id INTEGER NOT NULL,
+  product_id INTEGER NOT NULL,
+  discount_pct REAL,
+  pinned INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  added_by INTEGER,
+  UNIQUE(tag_id, product_id),
+  FOREIGN KEY(tag_id) REFERENCES book_tags(id) ON DELETE CASCADE
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_btp_tag ON book_tag_products(tag_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_btp_product ON book_tag_products(product_id)`);
+
+// Seed les 4 tags système si absents
+const SYSTEM_TAGS = [
+  { slug: 'notre_selection', label: 'Notre sélection', color: '#ea580c', icon: 'FiStar', sort_order: 1, description: "Les livres choisis par l'équipe éditoriale" },
+  { slug: 'livre_du_mois', label: 'Livres du mois', color: '#10531a', icon: 'FiCalendar', sort_order: 2, description: 'Les livres mis en avant ce mois-ci' },
+  { slug: 'nouveaute', label: 'Nouveautés', color: '#059669', icon: 'FiZap', sort_order: 3, description: 'Les dernières parutions du catalogue' },
+  { slug: 'promotion', label: 'Promotions', color: '#dc2626', icon: 'FiTag', sort_order: 4, description: 'Bonnes affaires du moment' },
+];
+const insertTag = db.prepare(`INSERT OR IGNORE INTO book_tags
+  (slug, label, description, color, icon, sort_order, is_active, is_system, show_on_home, max_items)
+  VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, 12)`);
+for (const t of SYSTEM_TAGS) {
+  insertTag.run(t.slug, t.label, t.description, t.color, t.icon, t.sort_order);
+}
+
+// Migration one-shot : extrafield livre_du_mois → book_tag_products
+async function migrateLivreDuMois() {
+  try {
+    const tag = db.prepare('SELECT id FROM book_tags WHERE slug = ?').get('livre_du_mois');
+    if (!tag) return;
+    const alreadyMigrated = db.prepare('SELECT COUNT(*) AS c FROM book_tag_products WHERE tag_id = ?').get(tag.id);
+    if (alreadyMigrated.c > 0) return; // idempotent
+    const [rows] = await dolibarrPool.query(
+      'SELECT fk_object FROM llx_product_extrafields WHERE livre_du_mois = 1'
+    );
+    const insert = db.prepare(
+      'INSERT OR IGNORE INTO book_tag_products (tag_id, product_id) VALUES (?, ?)'
+    );
+    const trx = db.transaction((productIds) => {
+      for (const pid of productIds) insert.run(tag.id, pid);
+    });
+    trx(rows.map((r) => r.fk_object));
+    console.log(`[TAGS] Migration livre_du_mois → book_tag_products : ${rows.length} livres importés`);
+  } catch (err) {
+    console.error('[TAGS] Migration livre_du_mois failed:', err.message);
+  }
+}
 
 app.post('/api/webhooks/dolibarr', (req, res) => {
   try {
@@ -767,10 +872,20 @@ async function sendPreorderReleaseEmail(preorder, paymentMethods = getEnabledPay
 }
 import { setupAdminRoutes, adminAuth } from './admin-routes.js';
 try {
-  setupAdminRoutes(app, { db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure: COOKIE_SECURE, authLimiter });
+  setupAdminRoutes(app, { db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure: COOKIE_SECURE, authLimiter, siteUrl: SITE_URL });
   console.log('[ADMIN] Admin routes mounted');
 } catch (err) {
   console.error('[ADMIN] Failed to mount admin routes:', err);
+}
+
+// ─── ACTUALITÉS (public + admin) — monté APRÈS setupAdminRoutes
+// pour bénéficier du middleware RBAC global sur /api/admin
+import { createNewsRouter } from './news-routes.js';
+try {
+  app.use(createNewsRouter({ db, cache, adminAuth: adminAuth(db), csrfProtection }));
+  console.log('[NEWS] News routes mounted');
+} catch (err) {
+  console.error('[NEWS] Failed to mount news routes:', err);
 }
 
 // ─── MANUSCRIPT WORKFLOW (admin) — monté APRÈS setupAdminRoutes
@@ -778,7 +893,19 @@ try {
 import { createManuscriptRouter } from './manuscript-routes.js';
 import { generateSignatureUrl } from './contract-routes.js';
 import { transition as wfTransition } from './manuscript-workflow.js';
-import { sendTransitionEmail } from './manuscript-emails.js';
+import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences } from './manuscript-emails.js';
+
+// Initialise la table author_notifications (cloche in-app auteur)
+try { ensureNotificationsSchema(db); console.log('[NOTIF] Schéma author_notifications OK'); }
+catch (err) { console.error('[NOTIF] Init schéma:', err.message); }
+
+// Expose la config site pour les emails admin (lecture seule, rafraîchie à chaque notif)
+// Utilisée par notifyTransition pour résoudre l'adresse admin de réception
+try {
+  global.__siteConfigFallback = JSON.parse(
+    readFileSync(join(__dirname, 'site-config.json'), 'utf-8')
+  );
+} catch (err) { console.warn('[NOTIF] site-config.json lookup failed:', err.message); }
 
 // Hook 1 : créer un contrat Dolibarr draft quand une évaluation est positive
 async function createContractDraft(manuscript) {
@@ -936,21 +1063,35 @@ setInterval(async () => {
           'SELECT signed_status FROM llx_contrat WHERE rowid = ?', [m.contract_id]
         );
         if (contract && [2, 9].includes(contract.signed_status)) {
-          const updated = wfTransition(db, m.id, 'contract_signed',
+          const signed = wfTransition(db, m.id, 'contract_signed',
             { role: 'system', label: 'polling' },
             { note: `Signature détectée (signed_status=${contract.signed_status})` }
           );
           console.log(`[WORKFLOW] ${m.ref} contrat signé détecté.`);
+
+          // Notifier l'auteur du contract_signed (email + in-app)
+          const author = db.prepare('SELECT id, email, firstname FROM authors WHERE id = ?').get(signed.author_id);
+          if (author) {
+            createAuthorNotification(db, signed, 'contract_signed', author, SITE_URL);
+            if (author.email) {
+              sendTransitionEmail(transporter, signed, 'contract_signed',
+                { type: 'author', email: author.email, firstname: author.firstname }, SITE_URL);
+            }
+          }
+
           // Avancer automatiquement à payment_pending
-          wfTransition(db, m.id, 'payment_pending',
+          const pending = wfTransition(db, m.id, 'payment_pending',
             { role: 'system', label: 'polling' },
             { note: 'Paiement attendu après signature' }
           );
-          // Notifier l'auteur
-          const author = db.prepare('SELECT email, firstname FROM authors WHERE id = ?').get(updated.author_id);
+
+          // Notifier l'auteur du payment_pending (email + in-app)
           if (author) {
-            sendTransitionEmail(transporter, updated, 'payment_pending',
-              { type: 'author', email: author.email, firstname: author.firstname }, SITE_URL);
+            createAuthorNotification(db, pending, 'payment_pending', author, SITE_URL);
+            if (author.email) {
+              sendTransitionEmail(transporter, pending, 'payment_pending',
+                { type: 'author', email: author.email, firstname: author.firstname }, SITE_URL);
+            }
           }
         }
       } catch (err) { console.warn('[WORKFLOW] signature poll error for', m.ref, ':', err.message); }
@@ -1115,6 +1256,52 @@ try {
   console.error('[BOOKS] Failed to mount book routes:', err);
 }
 
+// ─── BOOK TAGS (curation éditoriale home) ──────────────────
+import { createTagRouter } from './tag-routes.js';
+try {
+  const tagAuth = adminAuth(db);
+  app.use('/api', createTagRouter({
+    db,
+    auth: tagAuth,
+    csrfProtection,
+    dolibarrPool,
+    enrichProduct,
+    dolibarrApi,
+    cache,
+  }));
+  console.log('[TAGS] Tag routes mounted');
+} catch (err) {
+  console.error('[TAGS] Failed to mount tag routes:', err);
+}
+
+// ─── PAYTECH (paiement hosted) ──────────────────────────────
+import { createPaytechRouter, isPaytechConfigured } from './paytech-routes.js';
+import * as emailService from './email-service.js';
+import * as whatsappService from './whatsapp-service.js';
+try {
+  app.use('/api', createPaytechRouter({
+    db,
+    dolibarrApi,
+    csrfProtection,
+    requireCustomerAuth,
+    cache,
+    transporter,
+    getAdminEmails: () => {
+      try {
+        const cfg = JSON.parse(readFileSync(join(__dirname, 'site-config.json'), 'utf-8'));
+        return Array.isArray(cfg.admin_emails) ? cfg.admin_emails : [];
+      } catch {
+        return [];
+      }
+    },
+    emailService,
+    whatsapp: whatsappService,
+  }));
+  console.log(`[PAYTECH] routes mounted (configured=${isPaytechConfigured()})`);
+} catch (err) {
+  console.error('[PAYTECH] Failed to mount paytech routes:', err);
+}
+
 // ─── ADMIN STATS (KPI Dashboard) ────────────────────────────
 import { createAdminStatsRouter } from './admin-stats-routes.js';
 try {
@@ -1142,6 +1329,18 @@ try {
   console.log('[ADMIN-POS] POS management routes mounted');
 } catch (err) {
   console.error('[ADMIN-POS] Failed to mount POS management routes:', err);
+}
+
+// ─── CLIENTS & AUTEURS (portail admin) ──────────────────────
+import { createAdminPeopleRouter } from './admin-people-routes.js';
+try {
+  const peopleAuth = adminAuth(db);
+  app.use('/api/admin', createAdminPeopleRouter({
+    db, dolibarrPool, auth: peopleAuth, csrfProtection, transporter,
+  }));
+  console.log('[PEOPLE] Customer + author admin routes mounted');
+} catch (err) {
+  console.error('[PEOPLE] Failed to mount customer/author admin routes:', err);
 }
 
 // ─── COMPTABILITÉ MODULE ───────────────────────────────────
@@ -1390,7 +1589,7 @@ app.get('/api/products', async (req, res) => {
           (SELECT c.label FROM llx_categorie c
            INNER JOIN llx_categorie_product cp2 ON cp2.fk_categorie = c.rowid
            WHERE cp2.fk_product = p.rowid
-           AND c.label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Services','Racine','Livres du mois','http://senharmattan.com/')
+           AND c.label NOT IN (${excludedCategorySqlList()})
            LIMIT 1) AS genre_category
         ${joinParts.join(' ')}
         WHERE ${conditions.join(' AND ')}
@@ -1542,23 +1741,39 @@ app.get('/api/products/featured', async (req, res) => {
   }
 });
 
-// Livre du mois — products tagged via Dolibarr extrafield
+// Livre du mois — priorité source book_tag_products (nouvelle), fallback extrafield Dolibarr
 app.get('/api/products/livre-du-mois', async (req, res) => {
   try {
     const cacheKey = 'products:livre-du-mois';
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
 
-    // Fetch tagged product IDs from Dolibarr MySQL
-    const products = [];
-    const [rows] = await dolibarrPool.query(
-      'SELECT fk_object FROM llx_product_extrafields WHERE livre_du_mois = 1'
-    );
+    // Source 1 : book_tag_products (nouvelle source de vérité)
+    let productIds = [];
+    try {
+      const tag = db.prepare('SELECT id FROM book_tags WHERE slug = ? AND is_active = 1').get('livre_du_mois');
+      if (tag) {
+        const tagRows = db.prepare(`SELECT product_id FROM book_tag_products
+          WHERE tag_id = ?
+          ORDER BY pinned DESC, sort_order ASC, added_at DESC`).all(tag.id);
+        productIds = tagRows.map((r) => r.product_id);
+      }
+    } catch (e) {
+      console.warn('[livre-du-mois] SQLite read failed, falling back to extrafield:', e.message);
+    }
 
-    const excludedCats = new Set([
-      'LIBRAIRIE', 'LIVRES', 'Racine', 'Accueil', 'Services',
-      'http://senharmattan.com/', 'Livres du mois',
-    ]);
+    // Fallback : extrafield Dolibarr si nouvelle source vide
+    const products = [];
+    let rows;
+    if (productIds.length > 0) {
+      rows = productIds.map((id) => ({ fk_object: id }));
+    } else {
+      [rows] = await dolibarrPool.query(
+        'SELECT fk_object FROM llx_product_extrafields WHERE livre_du_mois = 1'
+      );
+    }
+
+    const excludedCats = EXCLUDED_CATEGORIES_SET;
 
     for (const { fk_object: pid } of rows) {
       try {
@@ -1697,14 +1912,19 @@ app.get('/api/products/:id', async (req, res) => {
       }));
     }
 
-    const images = (docResult?.data || [])
-      .filter((d) => /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover'))
-      .sort((a, b) => (/cover/i.test(a.name) ? -1 : 1) - (/cover/i.test(b.name) ? -1 : 1))
-      .map((d) => ({
-        name: d.name,
-        url: `/api/image/${p.id}?file=${encodeURIComponent(d.name)}`,
-        size: d.size,
-      }));
+    // Ordre : recto (non-verso, plus récent en 1er) puis verso
+    const rawImgs = (docResult?.data || [])
+      .filter((d) => /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover'));
+    const isVerso = (n) => /(^|-|_)(verso|back)(-|_|\.)/i.test(n);
+    const rectoList = rawImgs.filter((d) => !isVerso(d.name)).sort((a, b) => (b.date || 0) - (a.date || 0));
+    const versoList = rawImgs.filter((d) => isVerso(d.name)).sort((a, b) => (b.date || 0) - (a.date || 0));
+    const ordered = [...rectoList, ...versoList];
+    const images = ordered.map((d) => ({
+      name: d.name,
+      url: `/api/image/${p.id}?file=${encodeURIComponent(d.name)}`,
+      size: d.size,
+      side: isVerso(d.name) ? 'verso' : 'recto',
+    }));
 
     const product = {
       id: p.id,
@@ -1735,19 +1955,29 @@ app.get('/api/products/:id', async (req, res) => {
 });
 
 // Product image by product ID - auto-finds first image
+// ETag = nom du fichier source (cover-<timestamp>.ext) → change à chaque upload
 app.get('/api/image/:productId', async (req, res) => {
   try {
     const productId = req.params.productId;
     const fileParam = req.query.file || '';
     const cacheKey = `imgdata:${productId}:${fileParam}`;
 
+    function sendWithValidation(buffer, contentType, etag) {
+      res.set('Content-Type', contentType);
+      res.set('Cache-Control', 'public, max-age=600, must-revalidate'); // 10 min + revalidation
+      res.set('Vary', 'Accept');
+      if (etag) res.set('ETag', etag);
+      if (etag && req.headers['if-none-match'] === etag) {
+        return res.status(304).end();
+      }
+      res.send(buffer);
+    }
+
     // Check cache
     const cached = cache.get(cacheKey);
     if (cached) {
       if (cached === 'none') return sendPlaceholder(res, req.query.title);
-      res.set('Content-Type', cached.contentType);
-      res.set('Cache-Control', 'public, max-age=86400');
-      return res.send(cached.buffer);
+      return sendWithValidation(cached.buffer, cached.contentType, cached.etag);
     }
 
     // Find product documents
@@ -1770,10 +2000,38 @@ app.get('/api/image/:productId', async (req, res) => {
     if (requestedFile) {
       img = images.find((i) => i.name === requestedFile) || images[0];
     } else {
+      // Filtrer les placeholders par défaut
       const realImages = images.filter((i) => !i.name.startsWith('default_cover'));
-      img = realImages.find((i) => /cover/i.test(i.name)) || realImages[0] || images[0];
+
+      // Détection robuste recto/verso : nom contient verso/back/dos/arriere (séparateurs - _ . début/fin)
+      const isVerso = (n) => /(^|[-_. ])(verso|back|dos|arriere|arrière)([-_. ]|\.)/i.test(n);
+      const isRecto = (n) => /(^|[-_. ])(recto|front|cover|couverture|couv)([-_. ]|\.)/i.test(n);
+
+      const rectoList = realImages
+        .filter((i) => !isVerso(i.name))
+        .sort((a, b) => {
+          // Priorité 1 : noms qui contiennent explicitement recto/cover/front
+          const aRecto = isRecto(a.name) ? 1 : 0;
+          const bRecto = isRecto(b.name) ? 1 : 0;
+          if (aRecto !== bRecto) return bRecto - aRecto;
+          // Priorité 2 : plus récent en premier
+          return (b.date || 0) - (a.date || 0);
+        });
+      const versoList = realImages
+        .filter((i) => isVerso(i.name))
+        .sort((a, b) => (b.date || 0) - (a.date || 0));
+
+      img = rectoList[0] || versoList[0] || images[0];
     }
     const ref = img.level1name || img.path.split('/').pop();
+    // ETag stable : change quand on upload une nouvelle cover (nom contient un timestamp)
+    const acceptsWebp = req.headers.accept?.includes('image/webp');
+    const etag = `"${Buffer.from(`${img.name}:${img.size || ''}:${acceptsWebp ? 'w' : 'j'}`).toString('base64').slice(0, 27)}"`;
+
+    // Early 304 avant de re-télécharger depuis Dolibarr
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).set('ETag', etag).end();
+    }
 
     const response = await dolibarrApi.get('/documents/download', {
       params: {
@@ -1800,7 +2058,6 @@ app.get('/api/image/:productId', async (req, res) => {
 
     // Optimize image: resize to max 800px wide, convert to webp
     const width = parseInt(req.query.w) || 800;
-    const acceptsWebp = req.headers.accept?.includes('image/webp');
 
     let optimized;
     let contentType;
@@ -1822,12 +2079,9 @@ app.get('/api/image/:productId', async (req, res) => {
     }
 
     // Cache the optimized image (2 hours)
-    cache.set(cacheKey, { buffer: optimized, contentType }, 7200);
+    cache.set(cacheKey, { buffer: optimized, contentType, etag }, 7200);
 
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'public, max-age=604800, immutable'); // 7 days
-    res.set('Vary', 'Accept');
-    res.send(optimized);
+    sendWithValidation(optimized, contentType, etag);
   } catch (err) {
     console.warn(`Error in /api/image/${req.params.productId}:`, err.message);
     sendPlaceholder(res, req.query.title);
@@ -1977,14 +2231,14 @@ app.get('/api/categories', async (req, res) => {
     });
 
     const categories = (catRes.data || []).map((c) => ({
-      id: c.id,
+      id: parseInt(c.id, 10),
       label: c.label,
       description: c.description,
-      fk_parent: c.fk_parent,
+      fk_parent: c.fk_parent !== null && c.fk_parent !== undefined ? parseInt(c.fk_parent, 10) : 0,
       color: c.color,
     }));
 
-    cache.set('categories:all', categories, 600); // cache 10 min
+    cache.set('categories:all', categories, 120); // cache 2 min (fraîcheur vs. coût)
     res.json(categories);
   } catch (err) {
     console.error('GET /api/categories error:', err.response?.status);
@@ -2093,12 +2347,62 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
     cache.keys().filter((k) => k.startsWith('customer-orders:')).forEach((k) => cache.del(k));
     cache.keys().filter((k) => k.startsWith('customer-invoices:')).forEach((k) => cache.del(k));
 
+    // Si le client a choisi PayTech, initier le checkout hosted dans la foulée
+    let paytechRedirectUrl = null;
+    if (payment_method === 'paytech' && isPaytechConfigured()) {
+      try {
+        const refCommand = orderDetail.data.ref || `SO-${orderId}`;
+        const total = parseInt(orderDetail.data.total_ttc, 10) || 0;
+        if (total > 0) {
+          const ptPayload = {
+            item_name: `Commande ${refCommand}`,
+            item_price: total,
+            currency: 'XOF',
+            ref_command: refCommand,
+            command_name: `Commande ${refCommand}`,
+            env: (process.env.PAYTECH_ENV || 'test').toLowerCase(),
+            ipn_url: process.env.PAYTECH_IPN_URL || `${SITE_URL}/api/webhooks/paytech`,
+            success_url: `${process.env.PAYTECH_RETURN_URL || `${SITE_URL}/commande/succes`}?ref=${encodeURIComponent(refCommand)}`,
+            cancel_url: `${process.env.PAYTECH_CANCEL_URL || `${SITE_URL}/commande/echec`}?ref=${encodeURIComponent(refCommand)}`,
+            custom_field: JSON.stringify({ order_id: String(orderId), order_ref: refCommand }),
+          };
+          const ptRes = await axios.post(
+            'https://paytech.sn/api/payment/request-payment',
+            ptPayload,
+            {
+              headers: {
+                API_KEY: process.env.PAYTECH_API_KEY,
+                API_SECRET: process.env.PAYTECH_API_SECRET,
+                'Content-Type': 'application/json',
+              },
+              timeout: 15000,
+            }
+          );
+          if (ptRes.data?.success === 1 && ptRes.data?.redirect_url) {
+            paytechRedirectUrl = ptRes.data.redirect_url;
+            db.prepare(
+              `UPDATE order_payments
+               SET external_transaction_id = ?, external_provider = 'paytech', external_status = 'pending'
+               WHERE dolibarr_order_id = ?`
+            ).run(ptRes.data.token || '', String(orderId));
+          } else {
+            console.warn('[PAYTECH] init unexpected:', ptRes.data);
+          }
+        }
+      } catch (ptErr) {
+        console.error('[PAYTECH] init error inside /api/orders:', ptErr.response?.data || ptErr.message);
+        // On ne fait pas planter la commande — on retourne quand même les infos
+        // et le client peut retenter via /api/payments/paytech/init
+      }
+    }
+
     res.json({
       success: true,
       order_id: orderId,
       order_ref: orderDetail.data.ref,
       payment_status: 'pending',
       total: orderDetail.data.total_ttc,
+      paytech_redirect_url: paytechRedirectUrl,
     });
   } catch (err) {
     console.error('POST /api/orders error:', err.response?.data || err.message);
@@ -2534,6 +2838,99 @@ cron.schedule('0 5 * * 1', async () => {
   try { await runClassificationBatch(dolibarrPool, db); } catch (e) { console.error('[CRON] Classification error:', e.message); }
 });
 
+// Relances workflow auteur — quotidien à 8h Dakar
+// Stages en attente d'action auteur : correction_author_review, bat_author_review
+// → J+7 : rappel auteur (email + notif in-app)
+// → J+14 : rappel auteur + copie admin
+cron.schedule('0 8 * * *', () => {
+  try {
+    const stalled = db.prepare(
+      `SELECT m.*, a.email AS author_email, a.firstname AS author_firstname,
+              CAST((julianday('now') - julianday(m.updated_at)) AS INTEGER) AS days_idle
+       FROM manuscripts m
+       JOIN authors a ON a.id = m.author_id
+       WHERE m.current_stage IN ('correction_author_review', 'bat_author_review')
+         AND CAST((julianday('now') - julianday(m.updated_at)) AS INTEGER) >= 7`
+    ).all();
+
+    for (const m of stalled) {
+      const days = m.days_idle;
+      const level = days >= 14 ? 'urgent' : 'rappel';
+
+      // Anti-doublon : si on a déjà envoyé une relance dans les 6 derniers jours pour ce manuscrit, on saute
+      const recent = db.prepare(
+        `SELECT id FROM author_notifications
+         WHERE author_id = ? AND manuscript_id = ?
+           AND stage LIKE 'reminder%'
+           AND created_at > datetime('now', '-6 days')
+         LIMIT 1`
+      ).get(m.author_id, m.id);
+      if (recent) continue;
+
+      const stageLabel = m.current_stage === 'bat_author_review' ? 'le BAT couverture' : 'les corrections';
+      const title = level === 'urgent'
+        ? `Rappel important — ${m.title}`
+        : `Rappel — ${m.title}`;
+      const message = `Vous n'avez pas encore validé ${stageLabel} depuis ${days} jours. Merci de vous prononcer pour ne pas bloquer la suite du projet.`;
+
+      // Notification in-app
+      try {
+        db.prepare(
+          `INSERT INTO author_notifications
+            (author_id, manuscript_id, manuscript_ref, manuscript_title, stage, title, message, action_url, action_required)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+        ).run(
+          m.author_id, m.id, m.ref, m.title,
+          `reminder_${level}`,
+          title, message,
+          `${SITE_URL}/auteur/manuscrits/${m.id}`
+        );
+      } catch (e) { console.warn('[CRON] reminder notif insert error:', e.message); }
+
+      // Email auteur — uniquement si l'auteur n'a pas opt-out des rappels
+      const prefs = getAuthorPreferences(db, m.author_id);
+      if (transporter && m.author_email && prefs.reminders) {
+        transporter.sendMail({
+          to: m.author_email,
+          subject: title,
+          html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
+            <h2 style="color:${level === 'urgent' ? '#dc2626' : '#10531a'}">${title.replace(/^Rappel\s*(important\s*)?—\s*/, '')}</h2>
+            <p>Bonjour ${m.author_firstname || ''},</p>
+            <p>${message}</p>
+            <p><a href="${SITE_URL}/auteur/manuscrits/${m.id}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">Accéder à mon manuscrit</a></p>
+            <p style="color:#666;font-size:0.9em;margin-top:24px">L'équipe éditoriale — L'Harmattan Sénégal</p>
+            <p style="color:#999;font-size:0.75em;margin-top:8px">Vous pouvez désactiver ces rappels depuis vos <a href="${SITE_URL}/auteur/preferences" style="color:#10531a">préférences de notifications</a>.</p>
+          </div>`,
+        }).catch((err) => console.error('[CRON] reminder email error:', err.message));
+      }
+
+      // Copie admin si urgent (>= 14j)
+      if (level === 'urgent' && transporter) {
+        try {
+          const cfg = JSON.parse(readFileSync(join(__dirname, 'site-config.json'), 'utf-8'));
+          const adminEmail = cfg.contact?.emails?.[0];
+          if (adminEmail) {
+            transporter.sendMail({
+              to: adminEmail,
+              subject: `[Workflow] ${m.ref} bloqué — ${days} jours sans réponse auteur`,
+              html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
+                <h2 style="color:#dc2626">Manuscrit bloqué côté auteur</h2>
+                <p>Le manuscrit <strong>${m.title}</strong> (${m.ref}) est en attente de validation auteur (${m.current_stage === 'bat_author_review' ? 'BAT couverture' : 'corrections'}) depuis <strong>${days} jours</strong>.</p>
+                <p>Auteur : ${m.author_firstname} (${m.author_email || 'email manquant'})</p>
+                <p><a href="${SITE_URL}/admin/manuscripts/${m.id}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">Voir dans l'admin</a></p>
+              </div>`,
+            }).catch((err) => console.error('[CRON] reminder admin copy error:', err.message));
+          }
+        } catch (e) { void e; }
+      }
+
+      console.log(`[CRON] Relance ${level} envoyée pour ${m.ref} (${days}j sans réponse auteur)`);
+    }
+  } catch (err) {
+    console.error('[CRON] Workflow reminders error:', err.message);
+  }
+});
+
 // ─── SERVE STATIC IN PRODUCTION ─────────────────────────────
 
 // Block access to database and sensitive files
@@ -2576,6 +2973,9 @@ app.listen(PORT, '0.0.0.0', async () => {
   } catch (e) {
     console.error('[INIT] Category sync failed:', e.message);
   }
+
+  // Migration one-shot des tags système (idempotent)
+  await migrateLivreDuMois();
 
   // ─── Product Change Polling (complements webhook for REST API changes) ───
   let lastPollTimestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);

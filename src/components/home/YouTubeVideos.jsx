@@ -149,31 +149,97 @@ export default function YouTubeVideos() {
 
       {/* Modal Vidéo Responsive */}
       {activeVideo && (
-        <div 
-          className="yt-modal" 
-          onClick={() => setActiveVideo(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Lecteur vidéo"
-        >
-          <button 
-            className="yt-modal-close" 
-            aria-label="Fermer la vidéo"
-            autoFocus
-          >
-            <FiX />
-          </button>
-          <div className="yt-modal-wrapper" onClick={(e) => e.stopPropagation()}>
-            <iframe
-              src={`https://www.youtube.com/embed/${activeVideo}?autoplay=1&rel=0&modestbranding=1&color=white`}
-              title="Lecteur vidéo YouTube"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-              allowFullScreen
-              loading="lazy"
-            />
-          </div>
-        </div>
+        <YouTubePlayerModal
+          videoId={activeVideo}
+          onClose={() => setActiveVideo(null)}
+        />
       )}
     </section>
+  );
+}
+
+/**
+ * Lecteur YouTube avec fallback :
+ *   1. Tente youtube-nocookie.com (privacy-enhanced, généralement plus permissif)
+ *   2. Si l'iframe ne se charge pas dans 4s OU émet onError, on bascule sur www.youtube.com
+ *   3. Si toujours en échec, on affiche un lien direct "Ouvrir sur YouTube"
+ */
+function YouTubePlayerModal({ videoId, onClose }) {
+  const [domain, setDomain] = useState('youtube-nocookie.com');
+  const [errored, setErrored] = useState(false);
+
+  // Origin sans le port pour youtube embed (certaines configurations le requièrent)
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const params = new URLSearchParams({
+    autoplay: '1',
+    rel: '0',
+    modestbranding: '1',
+    color: 'white',
+    playsinline: '1',
+    ...(origin ? { origin } : {}),
+  });
+  const src = `https://www.${domain}/embed/${videoId}?${params.toString()}`;
+  const fallbackUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Si nocookie échoue, retomber sur le domaine standard
+  useEffect(() => {
+    setErrored(false);
+  }, [videoId, domain]);
+
+  // Esc pour fermer
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="yt-modal"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Lecteur vidéo"
+    >
+      <button
+        className="yt-modal-close"
+        aria-label="Fermer la vidéo"
+        autoFocus
+        onClick={onClose}
+      >
+        <FiX />
+      </button>
+      <div className="yt-modal-wrapper" onClick={(e) => e.stopPropagation()}>
+        {!errored ? (
+          <iframe
+            key={`${domain}-${videoId}`}
+            src={src}
+            title="Lecteur vidéo YouTube"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            loading="lazy"
+            onError={() => {
+              if (domain === 'youtube-nocookie.com') {
+                setDomain('youtube.com');
+              } else {
+                setErrored(true);
+              }
+            }}
+          />
+        ) : (
+          <div className="yt-modal-fallback">
+            <p>La vidéo ne peut pas être lue ici (restriction d'embed).</p>
+            <a
+              href={fallbackUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn btn-primary"
+            >
+              Ouvrir sur YouTube
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

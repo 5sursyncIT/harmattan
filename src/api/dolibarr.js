@@ -157,6 +157,9 @@ export const getBooksOfTheMonth = () => api.get('/products/livre-du-mois');
 
 export const getEvenements = () => api.get('/evenements');
 
+export const getNews = (limit = 50) => api.get('/news', { params: { limit } });
+export const getNewsArticleBySlug = (slug) => api.get(`/news/${slug}`);
+
 export const getPriceRange = () => api.get('/products/price-range');
 
 // Categories

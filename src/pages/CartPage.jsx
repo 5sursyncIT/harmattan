@@ -3,6 +3,7 @@ import { FiTrash2, FiMinus, FiPlus, FiShoppingCart, FiArrowLeft } from 'react-ic
 import useCartStore from '../store/cartStore';
 import { formatPrice } from '../utils/formatters';
 import { getProductImageUrl } from '../api/dolibarr';
+import WhatsAppOrderButton from '../components/cart/WhatsAppOrderButton';
 import './CartPage.css';
 
 export default function CartPage() {
@@ -80,6 +81,7 @@ export default function CartPage() {
             <Link to="/commande" className="btn btn-primary btn-lg" style={{ width: '100%' }}>
               Passer la commande
             </Link>
+            <WhatsAppOrderButton items={items} />
             <button className="btn btn-outline btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={() => { if (confirm('Vider le panier ?')) clearCart(); }}>
               Vider le panier
             </button>

@@ -4,6 +4,7 @@
  */
 
 import { Router } from 'express';
+import { excludedCategorySqlList } from '../src/utils/excludedCategories.js';
 
 const CACHE_MAIN_TTL = 60;       // 1 min
 const CACHE_SERIES_TTL = 300;    // 5 min
@@ -419,7 +420,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
          INNER JOIN llx_categorie c ON c.rowid = cp.fk_categorie
          WHERE f.fk_statut >= 1
            AND YEAR(f.datef) = YEAR(CURDATE()) AND MONTH(f.datef) = MONTH(CURDATE())
-           AND c.label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Racine','Services','Livres du mois','http://senharmattan.com/')
+           AND c.label NOT IN (${excludedCategorySqlList()})
          GROUP BY c.label
          ORDER BY revenue DESC
          LIMIT 5`

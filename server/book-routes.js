@@ -5,8 +5,14 @@
 
 import { Router } from 'express';
 import axios from 'axios';
+import multer from 'multer';
+import sharp from 'sharp';
 import 'dotenv/config';
 import { validateBook, validateISBN } from '../src/utils/bookValidation.js';
+import {
+  EXCLUDED_CATEGORY_LABELS,
+  excludedCategoryPlaceholders,
+} from '../src/utils/excludedCategories.js';
 
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
 const DOLIBARR_URL = process.env.DOLIBARR_URL || 'http://localhost/dolibarr/htdocs/api/index.php';
@@ -21,12 +27,58 @@ const adminApi = axios.create({
   timeout: 30000,
 });
 
+const coverUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+// Detect real image format via magic bytes. Returns 'jpeg'|'png'|'webp'|'gif'|null
+function detectImageFormat(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+      buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) return 'png';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'gif';
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'webp';
+  return null;
+}
+
+const excludedListSql = `(${excludedCategoryPlaceholders()})`;
+
 /**
  * Crée le router.
  * @param {Object} deps - { dolibarrPool, auth, csrfProtection, sanitizeBody, cache }
  */
 export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeBody, cache }) {
   const router = Router();
+
+  // Libraire = lecture seule sur les livres (crée/édite via admin)
+  function blockLibrarianWrite(req, res, next) {
+    if (req.admin?.role === 'librarian') {
+      return res.status(403).json({ error: 'Accès en lecture seule pour votre profil' });
+    }
+    next();
+  }
+
+  async function fetchAllowedGenreIds() {
+    const [rows] = await dolibarrPool.query(
+      `SELECT rowid FROM llx_categorie WHERE type = 0 AND label NOT IN ${excludedListSql}`,
+      EXCLUDED_CATEGORY_LABELS
+    );
+    return rows.map((r) => r.rowid);
+  }
+
+  async function fetchProductGenreIds(productId) {
+    const [rows] = await dolibarrPool.query(
+      `SELECT c.rowid
+       FROM llx_categorie c
+       INNER JOIN llx_categorie_product cp ON cp.fk_categorie = c.rowid
+       WHERE cp.fk_product = ? AND c.type = 0 AND c.label NOT IN ${excludedListSql}`,
+      [productId, ...EXCLUDED_CATEGORY_LABELS]
+    );
+    return rows.map((r) => r.rowid);
+  }
 
   // ── Helper: check ISBN uniqueness (exclude self for updates) ──
   async function isIsbnDuplicate(isbn, excludeId = null) {
@@ -66,17 +118,38 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
     };
   }
 
-  // ── Helper: invalidate cache after write ──
-  function invalidateProductCache(productId) {
+  function invalidateProductCache(productId, ref = null) {
     if (!cache) return;
     cache.del(`product:${productId}`);
+    cache.del('price-range');
+    cache.del('categories:all');
+    cache.del('refs-with-real-covers');
+    if (ref) {
+      cache.del(`img:${ref}`);
+      cache.del(`realcover:${ref}`);
+    }
     for (const k of cache.keys()) {
-      if (k.startsWith('products:') || k.startsWith('suggest:')) {
+      if (
+        k.startsWith('products:') ||
+        k.startsWith('suggest:') ||
+        k.startsWith(`imgdata:${productId}:`) ||
+        k.startsWith('catimg:')
+      ) {
         cache.del(k);
       }
     }
-    cache.del('price-range');
-    cache.del('categories:all');
+  }
+
+  // Normalise un payload genre_ids[] accepté, en gardant la rétrocompat genre_id
+  function resolveGenreIds(body) {
+    if (Array.isArray(body.genre_ids) && body.genre_ids.length > 0) {
+      return body.genre_ids.map((g) => parseInt(g, 10)).filter((n) => !Number.isNaN(n));
+    }
+    if (body.genre_id !== undefined && body.genre_id !== null && body.genre_id !== '') {
+      const n = parseInt(body.genre_id, 10);
+      return Number.isNaN(n) ? [] : [n];
+    }
+    return [];
   }
 
   // ══════════════════════════════════════════════════════
@@ -115,20 +188,57 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
           (SELECT c.label FROM llx_categorie c
             INNER JOIN llx_categorie_product cp2 ON cp2.fk_categorie = c.rowid
             WHERE cp2.fk_product = p.rowid
-              AND c.label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Racine','Services','Livres du mois','http://senharmattan.com/')
+              AND c.label NOT IN ${excludedListSql}
             LIMIT 1) AS genre_label
         ${joins.join(' ')}
         WHERE ${conditions.join(' AND ')}
         ORDER BY p.tms DESC
         LIMIT ? OFFSET ?
       `;
-      params.push(limit, page * limit);
-
-      const [rows] = await dolibarrPool.query(dataSql, params);
+      // L'ordre des placeholders dans le SQL final (important) :
+      //   1. SELECT sous-requête corrélée NOT IN (...)  → EXCLUDED_CATEGORY_LABELS
+      //   2. WHERE principal (q + genre)               → params
+      //   3. LIMIT, OFFSET
+      const dataParams = [...EXCLUDED_CATEGORY_LABELS, ...params, limit, page * limit];
+      const [rows] = await dolibarrPool.query(dataSql, dataParams);
       res.json({ books: rows, page, limit, total });
     } catch (err) {
       console.error('[BOOKS] GET list error:', err.message);
       res.status(500).json({ error: 'Erreur chargement des livres' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
+  // GET /api/admin/books/quality-stats — Conformité globale catalogue
+  // ══════════════════════════════════════════════════════
+  router.get('/quality-stats', auth, async (req, res) => {
+    try {
+      const [[{ total }]] = await dolibarrPool.query(
+        'SELECT COUNT(*) AS total FROM llx_product WHERE fk_product_type = 0'
+      );
+      const [[{ compliant }]] = await dolibarrPool.query(
+        `SELECT COUNT(DISTINCT p.rowid) AS compliant
+         FROM llx_product p
+         LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
+         WHERE p.fk_product_type = 0
+           AND p.label IS NOT NULL AND p.label != ''
+           AND p.ref IS NOT NULL AND p.ref != ''
+           AND pe.publication_year IS NOT NULL AND pe.publication_year > 0
+           AND pe.nombre_pages IS NOT NULL AND pe.nombre_pages > 0
+           AND pe.editeur IS NOT NULL AND pe.editeur != ''
+           AND EXISTS (
+             SELECT 1 FROM llx_categorie_product cp
+             INNER JOIN llx_categorie c ON c.rowid = cp.fk_categorie
+             WHERE cp.fk_product = p.rowid
+               AND c.label NOT IN ${excludedListSql}
+           )`,
+        EXCLUDED_CATEGORY_LABELS
+      );
+      const pct = total > 0 ? Math.round((compliant / total) * 100) : 100;
+      res.json({ total, compliant, pct });
+    } catch (err) {
+      console.error('[BOOKS] quality-stats error:', err.message);
+      res.status(500).json({ error: 'Erreur calcul conformité' });
     }
   });
 
@@ -140,8 +250,6 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
       const q = req.query.q ? String(req.query.q).trim() : '';
       const limit = Math.min(parseInt(req.query.limit) || 10, 50);
 
-      // Recherche insensible à la casse dans pe.auteur
-      // Renvoie les auteurs distincts avec le nombre de livres
       let sql, params;
       if (q.length >= 1) {
         sql = `
@@ -157,7 +265,6 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         `;
         params = [`%${q}%`, limit];
       } else {
-        // Sans query, retourner les plus populaires
         sql = `
           SELECT pe.auteur AS name, COUNT(*) AS book_count
           FROM llx_product_extrafields pe
@@ -200,7 +307,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
   });
 
   // ══════════════════════════════════════════════════════
-  // GET /api/admin/books/:id — Détail complet
+  // GET /api/admin/books/:id — Détail complet (multi-catégories)
   // ══════════════════════════════════════════════════════
   router.get('/:id', auth, async (req, res) => {
     try {
@@ -209,12 +316,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
 
       const [rows] = await dolibarrPool.query(
         `SELECT p.rowid AS id, p.ref, p.label, p.description, p.barcode, p.price_ttc, p.tosell AS status,
-          pe.auteur, pe.soustitre, pe.publication_year, pe.nombre_pages, pe.editeur, pe.longdescript,
-          (SELECT c.rowid FROM llx_categorie c
-            INNER JOIN llx_categorie_product cp ON cp.fk_categorie = c.rowid
-            WHERE cp.fk_product = p.rowid
-              AND c.label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Racine','Services','Livres du mois','http://senharmattan.com/')
-            LIMIT 1) AS genre_id
+          pe.auteur, pe.soustitre, pe.publication_year, pe.nombre_pages, pe.editeur, pe.longdescript
          FROM llx_product p
          LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
          WHERE p.rowid = ? LIMIT 1`,
@@ -223,8 +325,9 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
 
       if (rows.length === 0) return res.status(404).json({ error: 'Livre introuvable' });
 
+      const genreIds = await fetchProductGenreIds(id);
+
       const p = rows[0];
-      // Split author name if in "NOM Prénom" format (first word = nom)
       let author_nom = p.auteur || '';
       let author_prenom = '';
       if (author_nom.includes(' ')) {
@@ -233,7 +336,6 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         author_prenom = parts.slice(1).join(' ');
       }
 
-      // Prefer longdescript extrafield, fallback to standard description
       const description = p.longdescript || p.description || '';
 
       res.json({
@@ -244,7 +346,8 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         isbn: p.barcode || p.ref,
         editeur: p.editeur || '',
         publication_year: p.publication_year,
-        genre_id: p.genre_id,
+        genre_id: genreIds[0] || null, // rétrocompat
+        genre_ids: genreIds,            // nouveau : multi
         nombre_pages: p.nombre_pages,
         price_ttc: parseFloat(p.price_ttc) || 0,
         soustitre: p.soustitre || '',
@@ -259,46 +362,48 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
   });
 
   // ══════════════════════════════════════════════════════
-  // POST /api/admin/books — Création
+  // POST /api/admin/books — Création avec rollback
   // ══════════════════════════════════════════════════════
-  router.post('/', auth, csrfProtection, async (req, res) => {
+  router.post('/', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+    let newProductId = null;
     try {
-      // Get allowed genre IDs from Dolibarr categories
-      const [genreRows] = await dolibarrPool.query(
-        "SELECT rowid FROM llx_categorie WHERE type = 0 AND label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Racine','Services','Livres du mois','http://senharmattan.com/')"
-      );
-      const allowedGenreIds = genreRows.map((r) => r.rowid);
+      const allowedGenreIds = await fetchAllowedGenreIds();
+      const selectedGenreIds = resolveGenreIds(req.body);
 
-      // Validate + normalize
-      const result = validateBook(req.body, { allowedGenreIds });
+      // Validate + normalize (compat mono : si genre_ids vide mais genre_id présent, fallback)
+      const bodyForValidation = { ...req.body, genre_id: selectedGenreIds[0] || '' };
+      const result = validateBook(bodyForValidation, { allowedGenreIds });
       if (!result.valid) {
         return res.status(400).json({ error: 'Validation échouée', errors: result.errors });
       }
 
-      // Check ISBN uniqueness
+      // Valide multi : chaque ID doit être dans allowedGenreIds
+      const invalidGenres = selectedGenreIds.filter((g) => !allowedGenreIds.includes(g));
+      if (invalidGenres.length > 0) {
+        return res.status(400).json({
+          error: 'Un ou plusieurs genres sélectionnés sont invalides',
+          errors: { genre_id: 'Un ou plusieurs genres sélectionnés sont invalides' },
+        });
+      }
+
       const duplicate = await isIsbnDuplicate(result.normalized.isbn);
       if (duplicate) {
         return res.status(409).json({
-          error: `Cet ISBN existe déjà dans le catalogue (livre ID ${duplicate.rowid}, réf ${duplicate.ref})`,
+          error: `Cet ISBN existe déjà dans le catalogue`,
           errors: { isbn: `ISBN déjà utilisé par "${duplicate.ref}"` },
         });
       }
 
-      // Build payload and create in Dolibarr
       const payload = buildDolibarrPayload(result.normalized);
       const createRes = await adminApi.post('/products', payload);
-      const newProductId = createRes.data;
+      newProductId = createRes.data;
 
-      // Link category
-      if (result.normalized.genre_id) {
-        try {
-          await adminApi.post(`/categories/${result.normalized.genre_id}/objects/product/${newProductId}`);
-        } catch (catErr) {
-          console.warn('[BOOKS] Category link failed:', catErr.response?.data || catErr.message);
-        }
+      // Lie toutes les catégories sélectionnées. Si une seule échoue → rollback.
+      for (const gid of selectedGenreIds) {
+        await adminApi.post(`/categories/${gid}/objects/product/${newProductId}`);
       }
 
-      invalidateProductCache(newProductId);
+      invalidateProductCache(newProductId, result.normalized.isbn);
 
       res.status(201).json({
         id: newProductId,
@@ -307,33 +412,49 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
       });
     } catch (err) {
       console.error('[BOOKS] POST error:', err.response?.data || err.message);
-      res.status(500).json({ error: err.response?.data?.error?.message || 'Erreur création du livre' });
+      // Compensation : si le produit a été créé mais qu'une erreur est survenue après,
+      // on tente de le supprimer pour ne pas laisser d'orphelin
+      if (newProductId) {
+        try {
+          await adminApi.delete(`/products/${newProductId}`);
+          console.warn(`[BOOKS] Rollback produit ${newProductId} suite à erreur`);
+        } catch (rollbackErr) {
+          console.error(`[BOOKS] Rollback produit ${newProductId} échoué:`, rollbackErr.message);
+        }
+      }
+      res.status(500).json({ error: 'Erreur création du livre' });
     }
   });
 
   // ══════════════════════════════════════════════════════
-  // PUT /api/admin/books/:id — Édition
+  // PUT /api/admin/books/:id — Édition avec diff catégories
   // ══════════════════════════════════════════════════════
-  router.put('/:id', auth, csrfProtection, async (req, res) => {
+  router.put('/:id', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (!id) return res.status(400).json({ error: 'ID invalide' });
 
-      const [genreRows] = await dolibarrPool.query(
-        "SELECT rowid FROM llx_categorie WHERE type = 0 AND label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Racine','Services','Livres du mois','http://senharmattan.com/')"
-      );
-      const allowedGenreIds = genreRows.map((r) => r.rowid);
+      const allowedGenreIds = await fetchAllowedGenreIds();
+      const selectedGenreIds = resolveGenreIds(req.body);
 
-      const result = validateBook(req.body, { allowedGenreIds });
+      const bodyForValidation = { ...req.body, genre_id: selectedGenreIds[0] || '' };
+      const result = validateBook(bodyForValidation, { allowedGenreIds });
       if (!result.valid) {
         return res.status(400).json({ error: 'Validation échouée', errors: result.errors });
       }
 
-      // Check ISBN uniqueness (excluding self)
+      const invalidGenres = selectedGenreIds.filter((g) => !allowedGenreIds.includes(g));
+      if (invalidGenres.length > 0) {
+        return res.status(400).json({
+          error: 'Un ou plusieurs genres sélectionnés sont invalides',
+          errors: { genre_id: 'Un ou plusieurs genres sélectionnés sont invalides' },
+        });
+      }
+
       const duplicate = await isIsbnDuplicate(result.normalized.isbn, id);
       if (duplicate) {
         return res.status(409).json({
-          error: `Cet ISBN existe déjà dans le catalogue (livre ID ${duplicate.rowid}, réf ${duplicate.ref})`,
+          error: `Cet ISBN existe déjà dans le catalogue`,
           errors: { isbn: `ISBN déjà utilisé par "${duplicate.ref}"` },
         });
       }
@@ -341,53 +462,131 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
       const payload = buildDolibarrPayload(result.normalized);
       await adminApi.put(`/products/${id}`, payload);
 
-      // Update category: remove old ones, add new
-      if (result.normalized.genre_id) {
+      // Diff catégories : compare actuelles vs. demandées, n'efface/ajoute que le delta
+      const currentGenres = await fetchProductGenreIds(id);
+      const toRemove = currentGenres.filter((g) => !selectedGenreIds.includes(g));
+      const toAdd = selectedGenreIds.filter((g) => !currentGenres.includes(g));
+
+      for (const gid of toRemove) {
         try {
-          // Remove existing category links for this product (only genre cats)
-          await dolibarrPool.query(
-            `DELETE cp FROM llx_categorie_product cp
-             INNER JOIN llx_categorie c ON c.rowid = cp.fk_categorie
-             WHERE cp.fk_product = ? AND c.rowid IN (${allowedGenreIds.join(',') || '0'})`,
-            [id]
-          );
-          await adminApi.post(`/categories/${result.normalized.genre_id}/objects/product/${id}`);
+          await adminApi.delete(`/categories/${gid}/objects/product/${id}`);
         } catch (catErr) {
-          console.warn('[BOOKS] Category update failed:', catErr.response?.data || catErr.message);
+          console.warn(`[BOOKS] Unlink category ${gid} failed:`, catErr.message);
+        }
+      }
+      for (const gid of toAdd) {
+        try {
+          await adminApi.post(`/categories/${gid}/objects/product/${id}`);
+        } catch (catErr) {
+          console.warn(`[BOOKS] Link category ${gid} failed:`, catErr.message);
         }
       }
 
-      invalidateProductCache(id);
+      // Récupère ref actuelle pour invalidation image
+      const [refRows] = await dolibarrPool.query('SELECT ref FROM llx_product WHERE rowid = ? LIMIT 1', [id]);
+      invalidateProductCache(id, refRows[0]?.ref);
 
       res.json({ id, message: 'Livre mis à jour avec succès' });
     } catch (err) {
       console.error('[BOOKS] PUT error:', err.response?.data || err.message);
-      res.status(500).json({ error: err.response?.data?.error?.message || 'Erreur mise à jour du livre' });
+      res.status(500).json({ error: 'Erreur mise à jour du livre' });
     }
   });
 
   // ══════════════════════════════════════════════════════
   // DELETE /api/admin/books/:id — Suppression (soft par défaut)
   // ══════════════════════════════════════════════════════
-  router.delete('/:id', auth, csrfProtection, async (req, res) => {
+  router.delete('/:id', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (!id) return res.status(400).json({ error: 'ID invalide' });
 
       const hardDelete = req.query.soft === '0';
+      const [refRows] = await dolibarrPool.query('SELECT ref FROM llx_product WHERE rowid = ? LIMIT 1', [id]);
 
       if (hardDelete) {
         await adminApi.delete(`/products/${id}`);
       } else {
-        // Soft delete: set tosell = 0
         await adminApi.put(`/products/${id}`, { status: 0 });
       }
 
-      invalidateProductCache(id);
+      invalidateProductCache(id, refRows[0]?.ref);
       res.json({ id, message: hardDelete ? 'Livre supprimé' : 'Livre masqué' });
     } catch (err) {
       console.error('[BOOKS] DELETE error:', err.response?.data || err.message);
-      res.status(500).json({ error: err.response?.data?.error?.message || 'Erreur suppression du livre' });
+      res.status(500).json({ error: 'Erreur suppression du livre' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
+  // POST /api/admin/books/:id/cover — Upload sécurisé
+  // ══════════════════════════════════════════════════════
+  router.post('/:id/cover', auth, blockLibrarianWrite, csrfProtection, coverUpload.single('cover'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'ID invalide' });
+      if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
+
+      // 1) Validation magic bytes
+      const detected = detectImageFormat(req.file.buffer);
+      if (!detected) {
+        return res.status(400).json({ error: 'Format image non reconnu (JPG, PNG, WEBP acceptés)' });
+      }
+      if (!['jpeg', 'png', 'webp'].includes(detected)) {
+        return res.status(400).json({ error: 'Format non supporté (JPG, PNG, WEBP uniquement)' });
+      }
+
+      // 2) Re-encode via sharp : strip EXIF + normalise + limite taille
+      let safeBuffer;
+      let safeExt;
+      try {
+        const pipeline = sharp(req.file.buffer, { failOn: 'error' })
+          .rotate() // auto-orient avant de stripper EXIF
+          .resize({ width: 1600, height: 2400, fit: 'inside', withoutEnlargement: true });
+
+        if (detected === 'png') {
+          safeBuffer = await pipeline.png({ compressionLevel: 9 }).toBuffer();
+          safeExt = 'png';
+        } else if (detected === 'webp') {
+          safeBuffer = await pipeline.webp({ quality: 85 }).toBuffer();
+          safeExt = 'webp';
+        } else {
+          safeBuffer = await pipeline.jpeg({ quality: 85, mozjpeg: true }).toBuffer();
+          safeExt = 'jpg';
+        }
+      } catch (encodeErr) {
+        console.error('[BOOKS] Re-encode failed:', encodeErr.message);
+        return res.status(400).json({ error: 'Image corrompue ou non décodable' });
+      }
+
+      const [rows] = await dolibarrPool.query('SELECT ref FROM llx_product WHERE rowid = ? LIMIT 1', [id]);
+      if (rows.length === 0) return res.status(404).json({ error: 'Livre introuvable' });
+      const ref = rows[0].ref;
+
+      // side=recto (défaut) ou side=verso — influence le nom du fichier
+      const rawSide = (req.body?.side || req.query?.side || 'recto').toString().toLowerCase();
+      const side = rawSide === 'verso' ? 'verso' : 'recto';
+      const filename = side === 'verso'
+        ? `cover-verso-${Date.now()}.${safeExt}`
+        : `cover-${Date.now()}.${safeExt}`;
+
+      await adminApi.post('/documents/upload', {
+        filename,
+        modulepart: 'produit',
+        ref,
+        subdir: '',
+        filecontent: safeBuffer.toString('base64'),
+        fileencoding: 'base64',
+        overwriteifexists: 1,
+        createdirifnotexists: 1,
+      });
+
+      invalidateProductCache(id, ref);
+
+      res.json({ id, ref, filename, message: 'Couverture mise à jour' });
+    } catch (err) {
+      console.error('[BOOKS] COVER upload error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur upload couverture' });
     }
   });
 

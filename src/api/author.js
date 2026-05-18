@@ -48,4 +48,12 @@ export const authorApi = {
     api.post(`/author/manuscripts/${id}/validate-correction`, { decision, comment }),
   validateBat: (id, decision, comment) =>
     api.post(`/author/manuscripts/${id}/validate-bat`, { decision, comment }),
+  // Notifications in-app (cloche)
+  listNotifications: (limit = 30) => api.get('/author/notifications', { params: { limit } }),
+  getUnreadCount: () => api.get('/author/notifications/unread-count'),
+  markNotificationRead: (id) => api.post(`/author/notifications/${id}/read`),
+  markAllNotificationsRead: () => api.post('/author/notifications/read-all'),
+  // Préférences de notification (opt-out par catégorie)
+  getPreferences: () => api.get('/author/preferences'),
+  updatePreferences: (prefs) => api.put('/author/preferences', prefs),
 };

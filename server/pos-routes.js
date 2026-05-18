@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import 'dotenv/config';
 import { dolibarrApi } from './dolibarr-client.js';
+import { EXCLUDED_CATEGORIES_SET } from '../src/utils/excludedCategories.js';
 
 // Dolibarr admin API key (for invoice/payment operations)
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -318,7 +319,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // CATEGORIES
   // ═══════════════════════════════════════════════════════
 
-  const EXCLUDED_CATEGORIES = new Set(['Accueil', 'Racine', 'Services', 'LIBRAIRIE', 'Livres du mois', 'http://senharmattan.com/', 'LIVRES']);
+  const EXCLUDED_CATEGORIES = EXCLUDED_CATEGORIES_SET;
 
   router.get('/categories', requirePosAuth, async (req, res) => {
     try {
@@ -327,7 +328,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       });
       const categories = (response.data || [])
         .filter(c => !EXCLUDED_CATEGORIES.has(c.label) && parseInt(c.visible) === 1)
-        .map(c => ({ id: c.id, label: c.label, description: c.description || '' }));
+        .map(c => ({ id: parseInt(c.id, 10), label: c.label, description: c.description || '' }));
       res.json(categories);
     } catch (err) {
       console.error('POS categories error:', err.message);

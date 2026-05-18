@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { generateManuscriptRef, transition, STAGE_LABELS } from './manuscript-workflow.js';
-import { notifyTransition, sendTransitionEmail } from './manuscript-emails.js';
+import { notifyTransition, sendTransitionEmail, getAuthorPreferences } from './manuscript-emails.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
@@ -154,8 +154,8 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
   });
 
   router.get('/me', requireAuthorAuth, (req, res) => {
-    const { id, email, firstname, lastname, phone } = req.author;
-    res.json({ id, email, firstname, lastname, phone: phone || '' });
+    const { id, email, firstname, lastname, phone, bio } = req.author;
+    res.json({ id, email, firstname, lastname, phone: phone || '', bio: bio || '' });
   });
 
   router.put('/profile', requireAuthorAuth, csrfProtection, sanitizeBody(['firstname', 'lastname', 'phone']), (req, res) => {
@@ -222,17 +222,21 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
 
   router.post('/manuscripts', requireAuthorAuth, originalUpload.single('original'), (req, res) => {
     try {
-      const { title, genre, synopsis, message } = req.body;
+      const { title, genre, synopsis, biography, message } = req.body;
       if (!title) return res.status(400).json({ error: 'Titre requis' });
       if (!req.file) return res.status(400).json({ error: 'Fichier manuscrit requis' });
 
       const ref = generateManuscriptRef(db);
       const tx = db.transaction(() => {
         const result = db.prepare(
-          `INSERT INTO manuscripts (ref, author_id, title, genre, synopsis, message, current_stage)
-           VALUES (?, ?, ?, ?, ?, ?, 'submitted')`
-        ).run(ref, req.author.id, title.trim(), genre?.trim() || null, synopsis || null, message || null);
+          `INSERT INTO manuscripts (ref, author_id, title, genre, synopsis, biography, message, current_stage)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted')`
+        ).run(ref, req.author.id, title.trim(), genre?.trim() || null, synopsis || null, biography || null, message || null);
         const manuscriptId = result.lastInsertRowid;
+        // Mettre à jour la bio sur le profil auteur si fournie (réutilisable pour les prochains manuscrits)
+        if (biography && String(biography).trim()) {
+          db.prepare('UPDATE authors SET bio = ? WHERE id = ?').run(String(biography).trim(), req.author.id);
+        }
         // Déplacement du fichier vers le bon dossier
         const finalDir = join(MANUSCRIPTS_DIR, String(manuscriptId), 'original');
         mkdirSync(finalDir, { recursive: true });
@@ -323,6 +327,90 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     const updated = transition(db, manuscript.id, nextStage, actor, { note: `Validation correction : ${decision}${comment ? ' — ' + comment : ''}` });
     notifyTransition(db, transporter, updated, nextStage, actor, siteUrl);
     res.json({ success: true, stage: nextStage });
+  });
+
+  // ─── NOTIFICATIONS IN-APP (cloche) ──────────────────────────
+  router.get('/notifications', requireAuthorAuth, (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
+      const rows = db.prepare(
+        `SELECT * FROM author_notifications
+         WHERE author_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      ).all(req.author.id, limit);
+      res.json(rows.map((n) => ({ ...n, is_read: !!n.is_read, action_required: !!n.action_required })));
+    } catch (err) {
+      console.error('GET /author/notifications error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement notifications' });
+    }
+  });
+
+  router.get('/notifications/unread-count', requireAuthorAuth, (req, res) => {
+    try {
+      const row = db.prepare(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN action_required = 1 THEN 1 ELSE 0 END) AS action_required
+         FROM author_notifications
+         WHERE author_id = ? AND is_read = 0`
+      ).get(req.author.id);
+      res.json({ unread: row?.total || 0, action_required: row?.action_required || 0 });
+    } catch (err) {
+      console.error('GET /author/notifications/unread-count error:', err.message);
+      res.json({ unread: 0, action_required: 0 });
+    }
+  });
+
+  router.post('/notifications/:id/read', requireAuthorAuth, csrfProtection, (req, res) => {
+    try {
+      const result = db.prepare(
+        `UPDATE author_notifications
+         SET is_read = 1, read_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND author_id = ? AND is_read = 0`
+      ).run(req.params.id, req.author.id);
+      res.json({ updated: result.changes });
+    } catch (err) {
+      console.error('POST /author/notifications/:id/read error:', err.message);
+      res.status(500).json({ error: 'Erreur' });
+    }
+  });
+
+  router.post('/notifications/read-all', requireAuthorAuth, csrfProtection, (req, res) => {
+    try {
+      const result = db.prepare(
+        `UPDATE author_notifications
+         SET is_read = 1, read_at = CURRENT_TIMESTAMP
+         WHERE author_id = ? AND is_read = 0`
+      ).run(req.author.id);
+      res.json({ updated: result.changes });
+    } catch (err) {
+      console.error('POST /author/notifications/read-all error:', err.message);
+      res.status(500).json({ error: 'Erreur' });
+    }
+  });
+
+  // ─── PRÉFÉRENCES NOTIFICATION ──────────────────────────────
+  router.get('/preferences', requireAuthorAuth, (req, res) => {
+    res.json(getAuthorPreferences(db, req.author.id));
+  });
+
+  router.put('/preferences', requireAuthorAuth, csrfProtection, (req, res) => {
+    try {
+      const { workflow, cover, print, reminders } = req.body || {};
+      const prefs = {
+        workflow: workflow !== false,
+        cover: cover !== false,
+        print: print !== false,
+        reminders: reminders !== false,
+      };
+      db.prepare('UPDATE authors SET notification_prefs = ? WHERE id = ?')
+        .run(JSON.stringify(prefs), req.author.id);
+      res.json({ ...prefs, critical: true });
+    } catch (err) {
+      console.error('PUT /author/preferences error:', err.message);
+      res.status(500).json({ error: 'Erreur' });
+    }
   });
 
   router.post('/manuscripts/:id/validate-bat', requireAuthorAuth, csrfProtection, (req, res) => {

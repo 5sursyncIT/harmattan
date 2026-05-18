@@ -84,12 +84,33 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth }) {
       const firstDay = firstDayOfMonth();
       const todayStr = today();
 
-      // CA mois HT
+      // CA mois HT + TVA collectée
       const [[revMtd]] = await dolibarrPool.query(
-        `SELECT COALESCE(SUM(total_ht), 0) AS ca_ht, COALESCE(SUM(total_ttc), 0) AS ca_ttc, COUNT(*) AS nb
+        `SELECT COALESCE(SUM(total_ht), 0) AS ca_ht, COALESCE(SUM(total_ttc), 0) AS ca_ttc,
+                COALESCE(SUM(total_tva), 0) AS tva_collected, COUNT(*) AS nb
          FROM llx_facture WHERE fk_statut >= 1 AND datef BETWEEN ? AND ?`,
         [firstDay, todayStr]
       );
+
+      // TVA cumulée année en cours
+      const yearStart = `${new Date().getFullYear()}-01-01`;
+      const [[vatYtd]] = await dolibarrPool.query(
+        `SELECT COALESCE(SUM(total_tva), 0) AS collected
+         FROM llx_facture WHERE fk_statut >= 1 AND datef BETWEEN ? AND ?`,
+        [yearStart, todayStr]
+      );
+
+      // Achats fournisseurs du mois (charges) — pour estimer le résultat
+      let purchasesMtd = { ht: 0, ttc: 0, tva: 0, nb: 0 };
+      try {
+        const [[p]] = await dolibarrPool.query(
+          `SELECT COALESCE(SUM(total_ht), 0) AS ht, COALESCE(SUM(total_ttc), 0) AS ttc,
+                  COALESCE(SUM(total_tva), 0) AS tva, COUNT(*) AS nb
+           FROM llx_facture_fourn WHERE fk_statut >= 1 AND datef BETWEEN ? AND ?`,
+          [firstDay, todayStr]
+        );
+        purchasesMtd = { ht: Number(p.ht), ttc: Number(p.ttc), tva: Number(p.tva), nb: Number(p.nb) };
+      } catch (e) { /* table peut ne pas exister si module pas activé */ void e; }
 
       // Encaissements mois
       const [[cashMtd]] = await dolibarrPool.query(
@@ -146,13 +167,24 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth }) {
          ORDER BY p.rowid DESC LIMIT 10`
       );
 
+      const caHt = Math.round(Number(revMtd.ca_ht));
+      const purchHt = Math.round(purchasesMtd.ht);
       const result = {
         generated_at: new Date().toISOString(),
         period: { from: firstDay, to: todayStr },
-        revenue: { ht: Math.round(Number(revMtd.ca_ht)), ttc: Math.round(Number(revMtd.ca_ttc)), count: Number(revMtd.nb) },
+        revenue: { ht: caHt, ttc: Math.round(Number(revMtd.ca_ttc)), count: Number(revMtd.nb) },
         cash_in: { total: Math.round(Number(cashMtd.total)), count: Number(cashMtd.nb) },
         receivables: { outstanding: Math.round(Number(ar.outstanding)), count: Number(ar.nb) },
         treasury: { total: Math.round(Number(treasury.total)), accounts: Number(treasury.nb_accounts) },
+        // KPIs enrichis (niveau 1)
+        vat: {
+          collected_mtd: Math.round(Number(revMtd.tva_collected)),
+          deductible_mtd: Math.round(purchasesMtd.tva),
+          to_pay_mtd: Math.round(Number(revMtd.tva_collected) - purchasesMtd.tva),
+          collected_ytd: Math.round(Number(vatYtd.collected)),
+        },
+        purchases: { ht: purchHt, ttc: Math.round(purchasesMtd.ttc), count: purchasesMtd.nb },
+        result_mtd: { value: caHt - purchHt, label: caHt - purchHt >= 0 ? 'Bénéfice' : 'Perte' },
         monthly_series: monthlySeries,
         recent_invoices: recentInvoices.map(i => ({
           ...i, total_ttc: Number(i.total_ttc), paye: Number(i.paye),
@@ -942,6 +974,80 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth }) {
           { label: 'Royalty due', key: 'royalty' },
         ], rows);
         filename = `royalties-${d_from}-${d_to}.csv`;
+      }
+      else if (journal === 'royalties_od') {
+        // Génère un fichier d'écritures de journal OD prêt à importer dans Dolibarr
+        // Modèle SYSCOHADA :
+        //   DEBIT  6512 (Redevances pour brevets, licences, marques) — charge royalties
+        //   CREDIT 401  (Fournisseurs)                              — dette envers l'auteur
+        // Une écriture (2 lignes) par contrat avec royalty > 0 sur la période.
+        const year = parseInt(req.query.year) || new Date().getFullYear();
+        const month = req.query.month ? parseInt(req.query.month) : null;
+        const d_from = month ? `${year}-${String(month).padStart(2, '0')}-01` : `${year}-01-01`;
+        const d_to = month ? new Date(year, month, 0).toISOString().split('T')[0] : `${year}-12-31`;
+        const docDate = d_to;
+
+        const [contracts] = await dolibarrPool.query(
+          `SELECT c.rowid AS contract_id, c.ref, s.rowid AS soc_id, s.nom AS author,
+                  s.code_fournisseur, ce.book_title, ce.book_isbn,
+                  ce.royalty_rate_print, ce.royalty_threshold, ce.free_author_copies
+           FROM llx_contrat c
+           JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+           JOIN llx_societe s ON s.rowid = c.fk_soc
+           WHERE c.statut >= 1 AND ce.book_isbn IS NOT NULL AND ce.book_isbn <> ''
+           ORDER BY s.nom ASC`
+        );
+
+        const odRows = [];
+        for (const c of contracts) {
+          const isbnNorm = normalizeIsbn(c.book_isbn);
+          const [[sales]] = await dolibarrPool.query(
+            `SELECT COALESCE(SUM(fd.qty), 0) AS units, COALESCE(SUM(fd.total_ht), 0) AS gross_ht
+             FROM llx_facturedet fd
+             JOIN llx_facture f ON f.rowid = fd.fk_facture
+             JOIN llx_product p ON p.rowid = fd.fk_product
+             WHERE f.fk_statut >= 1 AND fd.qty > 0
+               AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
+               AND f.datef BETWEEN ? AND ?`,
+            [isbnNorm, d_from, d_to]
+          );
+          const units = Number(sales.units);
+          if (units === 0) continue;
+          const gross = Number(sales.gross_ht);
+          const rate = Number(c.royalty_rate_print) || 0;
+          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0) - Number(c.free_author_copies || 0));
+          const royalty = Math.round((gross / units) * unitsOver * (rate / 100));
+          if (royalty <= 0) continue;
+
+          const piece = `ROY-${c.ref}-${month ? String(month).padStart(2, '0') : 'AN'}-${year}`;
+          const authorSubledger = c.code_fournisseur || `AUT${c.soc_id}`;
+          const label = `Royalties ${c.book_title || c.ref} — ${c.author} (${month ? `${String(month).padStart(2, '0')}/` : ''}${year})`;
+
+          // DEBIT charge
+          odRows.push({
+            doc_date: docDate, code_journal: 'OD', piece_num: piece,
+            account_num: '6512', subledger: '', label,
+            debit: royalty, credit: 0,
+          });
+          // CREDIT dette fournisseur (auteur)
+          odRows.push({
+            doc_date: docDate, code_journal: 'OD', piece_num: piece,
+            account_num: '401', subledger: authorSubledger, label,
+            debit: 0, credit: royalty,
+          });
+        }
+
+        csv = toCsv([
+          { label: 'Date', key: 'doc_date' },
+          { label: 'Code journal', key: 'code_journal' },
+          { label: 'Pièce', key: 'piece_num' },
+          { label: 'Compte', key: 'account_num' },
+          { label: 'Tiers', key: 'subledger' },
+          { label: 'Libellé', key: 'label' },
+          { label: 'Débit', key: 'debit' },
+          { label: 'Crédit', key: 'credit' },
+        ], odRows);
+        filename = `royalties-OD-${d_from}-${d_to}.csv`;
       }
       else {
         return res.status(400).json({ error: 'Journal inconnu' });

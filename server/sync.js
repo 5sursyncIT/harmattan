@@ -70,14 +70,14 @@ export async function syncCategories() {
     });
 
     const categories = (res.data || []).map((c) => ({
-      id: c.id,
+      id: parseInt(c.id, 10),
       label: c.label,
       description: c.description,
-      fk_parent: c.fk_parent,
+      fk_parent: c.fk_parent !== null && c.fk_parent !== undefined ? parseInt(c.fk_parent, 10) : 0,
       color: c.color,
     }));
 
-    cache.set('categories:all', categories, 3600); // 1 hour
+    cache.set('categories:all', categories, 120); // 2 min (cohérent avec /api/categories)
     syncState.categories = {
       lastSync: new Date().toISOString(),
       count: categories.length,

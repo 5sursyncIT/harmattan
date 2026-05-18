@@ -1,0 +1,146 @@
+.checkout-callback {
+  padding: 60px 20px;
+  display: flex;
+  justify-content: center;
+}
+
+.cb-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 40px 32px;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+}
+
+.cb-card svg {
+  flex-shrink: 0;
+}
+
+.cb-card h1 {
+  font-size: 24px;
+  font-weight: 800;
+  color: #111827;
+  margin: 0;
+}
+
+.cb-card p {
+  font-size: 15px;
+  color: var(--color-text, #374151);
+  line-height: 1.55;
+  margin: 0;
+  max-width: 420px;
+}
+
+.cb-success svg { color: #059669; }
+.cb-pending svg { color: #0284c7; }
+.cb-fail svg { color: #b91c1c; }
+.cb-error svg, .cb-warn svg { color: #d97706; }
+
+.cb-meta {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #f9fafb;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin: 8px 0;
+}
+
+.cb-meta > div {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+}
+
+.cb-meta span {
+  color: var(--color-text-light, #6b7280);
+}
+
+.cb-meta strong {
+  color: #111827;
+  font-weight: 700;
+}
+
+.cb-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid #dbeafe;
+  border-top-color: #0284c7;
+  border-radius: 50%;
+  animation: cb-spin 0.9s linear infinite;
+  margin-top: 8px;
+}
+
+@keyframes cb-spin {
+  to { transform: rotate(360deg); }
+}
+
+.cb-help {
+  font-size: 13px;
+  color: var(--color-text-light, #6b7280);
+  margin-top: 12px;
+}
+
+.cb-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.cb-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 22px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.cb-actions .btn-primary {
+  background: var(--color-green-deep, #10531a);
+  color: #fff;
+}
+
+.cb-actions .btn-primary:hover {
+  filter: brightness(0.92);
+}
+
+.cb-actions .btn-outline {
+  background: #fff;
+  border-color: #d1d5db;
+  color: var(--color-text, #374151);
+}
+
+.cb-actions .btn-outline:hover {
+  background: #f9fafb;
+}
+
+.cb-actions .btn-whatsapp {
+  background: #25D366;
+  color: #fff;
+}
+
+.cb-actions .btn-whatsapp:hover {
+  background: #128C7E;
+}
+
+.cb-error-line {
+  text-align: center;
+  margin-top: 20px;
+  color: #b91c1c;
+  font-size: 13px;
+}

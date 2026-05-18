@@ -1,5 +1,6 @@
-import { Fragment } from 'react';
+import { Fragment, useState } from 'react';
 import { FiPrinter, FiX } from 'react-icons/fi';
+import { printSaleReceipt, htmlPrintFallback } from '../../pos/printReceipt';
 import './POSReceipt.css';
 
 const PAYMENT_LABELS = {
@@ -7,7 +8,14 @@ const PAYMENT_LABELS = {
 };
 
 export default function POSReceipt({ sale, onClose }) {
-  const handlePrint = () => window.print();
+  const [printing, setPrinting] = useState(false);
+  const handlePrint = async () => {
+    setPrinting(true);
+    try {
+      const ok = await printSaleReceipt(sale);
+      if (!ok) htmlPrintFallback();
+    } finally { setPrinting(false); }
+  };
 
   const totalPaid = sale.payments?.reduce((s, p) => s + parseFloat(p.amount), 0) || 0;
   const change = totalPaid - (sale.total_ttc || 0);
@@ -17,8 +25,8 @@ export default function POSReceipt({ sale, onClose }) {
     <div className="pos-receipt-overlay">
       <div className="pos-receipt-panel">
         <div className="pos-receipt-actions no-print">
-          <button className="pos-receipt-print" onClick={handlePrint}>
-            <FiPrinter /> Imprimer
+          <button className="pos-receipt-print" onClick={handlePrint} disabled={printing}>
+            <FiPrinter /> {printing ? 'Impression…' : 'Imprimer'}
           </button>
           <button className="pos-receipt-close" onClick={onClose}>
             <FiX /> Nouveau ticket

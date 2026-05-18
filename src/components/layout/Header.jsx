@@ -78,7 +78,7 @@ export default function Header() {
               <li><NavLink to="/" end className={getNavClass} onClick={closeMenu}>Accueil</NavLink></li>
               <li><NavLink to="/catalogue" className={getNavClass} onClick={closeMenu}>Catalogue</NavLink></li>
               <li><NavLink to="/se-faire-editer" className={getNavClass} onClick={closeMenu}>Se faire éditer</NavLink></li>
-              <li><NavLink to="/evenements" className={getNavClass} onClick={closeMenu}>Actualités</NavLink></li>
+              <li><NavLink to="/actualites" className={getNavClass} onClick={closeMenu}>Actualités</NavLink></li>
               <li><NavLink to="/contact" className={getNavClass} onClick={closeMenu}>Contacts</NavLink></li>
             </ul>
           </nav>

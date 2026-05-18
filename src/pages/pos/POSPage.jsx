@@ -17,6 +17,9 @@ import CashRegister from '../../components/pos/CashRegister';
 import POSChangePin from '../../components/pos/POSChangePin';
 import POSReturn from '../../components/pos/POSReturn';
 import DeviceManager from '../../components/pos/DeviceManager';
+import POSPrinterSettings from '../../components/pos/POSPrinterSettings';
+import usePosPrinterStore from '../../store/posPrinterStore';
+import { printSaleReceipt } from '../../pos/printReceipt';
 import toast from 'react-hot-toast';
 import './POSPage.css';
 
@@ -28,6 +31,7 @@ export default function POSPage() {
   const [showChangePin, setShowChangePin] = useState(false);
   const [showReturn, setShowReturn] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
+  const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [showCustomer, setShowCustomer] = useState(false);
   const [showCashRegister, setShowCashRegister] = useState(false);
   const [completedSale, setCompletedSale] = useState(null);
@@ -127,8 +131,14 @@ export default function POSPage() {
   const handlePaymentComplete = (sale) => {
     setShowPayment(false);
     const { items: cartItems, customer } = usePosCartStore.getState();
-    setCompletedSale({ ...sale, items: cartItems, customer_name: customer?.name });
+    const fullSale = { ...sale, items: cartItems, customer_name: customer?.name };
+    setCompletedSale(fullSale);
     clearTicket();
+
+    // Auto-impression thermique via QZ Tray (fallback silencieux si indispo)
+    if (usePosPrinterStore.getState().autoPrint) {
+      printSaleReceipt(fullSale, { silent: true }).catch(() => { /* noop, fallback disponible via bouton */ });
+    }
   };
 
   const handleNewTicket = () => {
@@ -151,7 +161,13 @@ export default function POSPage() {
 
   return (
     <div className={`pos-page ${touchMode ? 'touch-mode' : ''} panel-${activePanel}`}>
-      <POSHeader onOpenCashRegister={() => setShowCashRegister(true)} onChangePin={() => setShowChangePin(true)} onReturn={() => setShowReturn(true)} onDevices={() => setShowDevices(true)} />
+      <POSHeader
+        onOpenCashRegister={() => setShowCashRegister(true)}
+        onChangePin={() => setShowChangePin(true)}
+        onReturn={() => setShowReturn(true)}
+        onDevices={() => setShowDevices(true)}
+        onPrinterSettings={() => setShowPrinterSettings(true)}
+      />
 
       <div className="pos-body">
         <div className="pos-left">
@@ -272,6 +288,10 @@ export default function POSPage() {
 
       {showDevices && (
         <DeviceManager onClose={() => setShowDevices(false)} />
+      )}
+
+      {showPrinterSettings && (
+        <POSPrinterSettings onClose={() => setShowPrinterSettings(false)} />
       )}
     </div>
   );

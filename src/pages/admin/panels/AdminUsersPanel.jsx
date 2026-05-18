@@ -21,13 +21,14 @@ export default function AdminUsersPanel() {
   const [users, setUsers] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('admin');
   const [creating, setCreating] = useState(false);
 
   // Edit state
   const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({ username: '', role: '', password: '' });
+  const [editForm, setEditForm] = useState({ username: '', role: '', email: '', password: '' });
   const [showPasswordField, setShowPasswordField] = useState(false);
   const [updating, setUpdating] = useState(false);
 
@@ -41,11 +42,16 @@ export default function AdminUsersPanel() {
     if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
       return toast.error('Min. 8 caractères, 1 majuscule, 1 chiffre');
     }
+    const cleanEmail = email.trim();
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return toast.error('Email invalide');
+    }
     setCreating(true);
     try {
-      const res = await createAdminUser({ username: username.trim(), password, role });
+      const res = await createAdminUser({ username: username.trim(), password, role, email: cleanEmail || undefined });
       setUsers([...users, res.data]);
       setUsername('');
+      setEmail('');
       setPassword('');
       setShowForm(false);
       toast.success(`Admin "${res.data.username}" créé`);
@@ -69,13 +75,13 @@ export default function AdminUsersPanel() {
 
   const startEdit = (user) => {
     setEditingId(user.id);
-    setEditForm({ username: user.username, role: user.role, password: '' });
+    setEditForm({ username: user.username, role: user.role, email: user.email || '', password: '' });
     setShowPasswordField(false);
   };
 
   const cancelEdit = () => {
     setEditingId(null);
-    setEditForm({ username: '', role: '', password: '' });
+    setEditForm({ username: '', role: '', email: '', password: '' });
     setShowPasswordField(false);
   };
 
@@ -86,6 +92,13 @@ export default function AdminUsersPanel() {
     }
     if (editForm.role && editForm.role !== user.role) {
       payload.role = editForm.role;
+    }
+    if ((editForm.email || '').trim() !== (user.email || '')) {
+      const trimmed = editForm.email.trim();
+      if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        return toast.error('Email invalide');
+      }
+      payload.email = trimmed;
     }
     if (showPasswordField && editForm.password) {
       if (editForm.password.length < 8 || !/[A-Z]/.test(editForm.password) || !/[0-9]/.test(editForm.password)) {
@@ -122,11 +135,15 @@ export default function AdminUsersPanel() {
       {showForm && (
         <div className="admin-card" style={{ marginBottom: '1rem' }}>
           <form onSubmit={handleCreate} style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-            <div className="admin-field" style={{ flex: 1, minWidth: 180 }}>
+            <div className="admin-field" style={{ flex: 1, minWidth: 160 }}>
               <label>Nom d'utilisateur</label>
               <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="ex: bachir" required />
             </div>
             <div className="admin-field" style={{ flex: 1, minWidth: 200 }}>
+              <label>Email <span style={{ color: '#9ca3af', fontWeight: 400 }}>(notifications workflow)</span></label>
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ex: bachir@5sursync.com" />
+            </div>
+            <div className="admin-field" style={{ flex: 1, minWidth: 180 }}>
               <label>Mot de passe</label>
               <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min. 8 car., 1 maj., 1 chiffre" required />
             </div>
@@ -148,6 +165,7 @@ export default function AdminUsersPanel() {
           <thead>
             <tr>
               <th>Utilisateur</th>
+              <th>Email</th>
               <th>Rôle</th>
               <th>Créé le</th>
               <th style={{ width: 140 }}>Actions</th>
@@ -195,6 +213,15 @@ export default function AdminUsersPanel() {
                       )}
                     </td>
                     <td>
+                      <input
+                        type="email"
+                        value={editForm.email}
+                        onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                        placeholder="email@…"
+                        style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db' }}
+                      />
+                    </td>
+                    <td>
                       <select
                         value={editForm.role}
                         onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
@@ -230,6 +257,9 @@ export default function AdminUsersPanel() {
                   <td style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <FiShield size={16} style={{ color: roleInfo.color }} />
                     <strong>{u.username}</strong>
+                  </td>
+                  <td style={{ color: u.email ? '#374151' : '#9ca3af', fontSize: '0.85rem' }}>
+                    {u.email || '—'}
                   </td>
                   <td><span style={{ padding: '2px 8px', borderRadius: 4, background: `${roleInfo.color}15`, color: roleInfo.color, fontSize: '0.8rem', fontWeight: 700 }}>{roleInfo.label}</span></td>
                   <td>{new Date(u.created_at).toLocaleDateString('fr-FR')}</td>

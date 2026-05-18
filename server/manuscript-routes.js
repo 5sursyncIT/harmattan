@@ -3,7 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
 import { transition, STAGE_LABELS, MANUSCRIPT_STAGES } from './manuscript-workflow.js';
-import { notifyTransition } from './manuscript-emails.js';
+import { notifyTransition, sendAssignmentEmail } from './manuscript-emails.js';
 import { createManuscriptMulter } from './author-routes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -138,12 +138,39 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         return res.status(400).json({ error: `Utilisateur n'a pas le rôle ${role}` });
       }
     }
+
+    // Capter l'assigné précédent pour pouvoir le notifier de la désassignation
+    const before = db.prepare(`SELECT ${col} AS prev_id FROM manuscripts WHERE id = ?`).get(req.params.id);
     db.prepare(`UPDATE manuscripts SET ${col} = ?, updated_at = datetime('now') WHERE id = ?`)
       .run(user_id || null, req.params.id);
 
-    // Si on assigne un évaluateur et que le stage est 'submitted', transition auto vers 'in_evaluation'
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
-    if (role === 'evaluateur' && user_id && manuscript.current_stage === 'submitted') {
+
+    // Notifier l'ancien assigné qu'il est retiré (si changement)
+    if (before?.prev_id && before.prev_id !== user_id) {
+      try {
+        const prev = db.prepare('SELECT username, email FROM admin_users WHERE id = ?').get(before.prev_id);
+        if (prev?.email) {
+          sendAssignmentEmail(transporter, manuscript, role,
+            { email: prev.email, label: prev.username }, siteUrl, 'unassigned');
+        }
+      } catch (err) { console.warn('[WORKFLOW] previous assignee notify error:', err.message); }
+    }
+
+    // Notifier le nouvel assigné (sauf cas géré ci-dessous par notifyTransition lors du in_evaluation auto)
+    const willAutoTransition = role === 'evaluateur' && user_id && manuscript.current_stage === 'submitted';
+    if (user_id && before?.prev_id !== user_id && !willAutoTransition) {
+      try {
+        const next = db.prepare('SELECT username, email FROM admin_users WHERE id = ?').get(user_id);
+        if (next?.email) {
+          sendAssignmentEmail(transporter, manuscript, role,
+            { email: next.email, label: next.username }, siteUrl, 'assigned');
+        }
+      } catch (err) { console.warn('[WORKFLOW] new assignee notify error:', err.message); }
+    }
+
+    // Si on assigne un évaluateur et que le stage est 'submitted', transition auto vers 'in_evaluation'
+    if (willAutoTransition) {
       const updated = transition(db, manuscript.id, 'in_evaluation',
         { role: req.admin.role, id: req.admin.id, label: req.admin.username },
         { note: `Assignation évaluateur: admin user ${user_id}` });

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
@@ -7,6 +7,8 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { existsSync } from 'fs';
 import rateLimit from 'express-rate-limit';
+import { generateManuscriptRef } from './manuscript-workflow.js';
+import { notifyTransition } from './manuscript-emails.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -112,7 +114,7 @@ export function blockLibrarian(req, res, next) {
 // ─── CREATE ROUTER ──────────────────────────────────────────
 export { setupAdminRoutes };
 export function createAdminRouter(opts) { return setupAdminRoutes(null, opts); }
-function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure = false, authLimiter }) {
+function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure = false, authLimiter, siteUrl = '' }) {
   const app = appRef || appFromOpts;
   const auth = adminAuth(db);
 
@@ -137,11 +139,14 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     editor: [
       ...COMMON_PATHS,
       /^\/api\/admin\/books(\/.*)?$/,
+      /^\/api\/admin\/tags(\/.*)?$/,
       /^\/api\/admin\/stats(\/.*)?$/,
       /^\/api\/admin\/slides(\/.*)?$/,
       /^\/api\/admin\/manuscripts(\/.*)?$/,
       /^\/api\/admin\/editorial(\/.*)?$/,
       /^\/api\/admin\/covers(\/.*)?$/,
+      /^\/api\/admin\/authors(\/.*)?$/,
+      /^\/api\/admin\/news(\/.*)?$/,
       /^\/api\/admin\/notifications(\/.*)?$/,
     ],
     support: [
@@ -150,11 +155,15 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       /^\/api\/admin\/contact(\/.*)?$/,
       /^\/api\/admin\/faq(\/.*)?$/,
       /^\/api\/admin\/newsletter(\/.*)?$/,
+      /^\/api\/admin\/customers(\/.*)?$/,
+      /^\/api\/admin\/authors(\/.*)?$/,
+      /^\/api\/admin\/news(\/.*)?$/,
       /^\/api\/admin\/notifications(\/.*)?$/,
     ],
     librarian: [
       ...COMMON_PATHS,
       /^\/api\/admin\/books(\/.*)?$/,
+      /^\/api\/admin\/tags(\/.*)?$/,
       /^\/api\/admin\/stock(\/.*)?$/,
       /^\/api\/admin\/notifications(\/.*)?$/,
     ],
@@ -217,6 +226,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   
   // Add role column if missing
   try { db.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'"); } catch (err) { console.warn('Role column already exists or error:', err.message); }
+  // Add email column if missing — utilisée par les notifications workflow auprès des acteurs métiers
+  // (évaluateur, correcteur, infographiste, imprimeur)
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN email TEXT'); } catch (e) { void e; }
 
   // Activity log table
   db.exec(`CREATE TABLE IF NOT EXISTS admin_activity_log (
@@ -253,12 +265,14 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     title TEXT NOT NULL,
     genre TEXT,
     synopsis TEXT,
+    biography TEXT,
     message TEXT,
     file_path TEXT,
     file_name TEXT,
     status TEXT DEFAULT 'reçu',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+  try { db.exec('ALTER TABLE manuscript_submissions ADD COLUMN biography TEXT'); } catch (e) { void e; /* column exists */ }
 
   // ─── WORKFLOW ÉDITORIAL ─────────────────────────────────────
   // Portail auteur
@@ -625,56 +639,120 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   app.post('/api/admin/manuscripts', csrfProtection, manuscriptUpload.single('file'), (req, res) => {
     try {
-      const { firstname, lastname, email, phone, title, genre, synopsis, message } = req.body;
+      const { firstname, lastname, email, phone, title, genre, synopsis, biography, message } = req.body;
       if (!firstname || !lastname || !email || !title) {
         return res.status(400).json({ error: 'Champs requis manquants' });
       }
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'Le manuscrit (PDF, DOC ou DOCX) est obligatoire.',
+          errors: { file: 'Veuillez joindre votre manuscrit.' },
+        });
+      }
 
-      const filePath = req.file?.path || null;
-      const fileName = req.file?.originalname || null;
+      const cleanEmail = email.trim().toLowerCase();
+      const cleanFirstname = firstname.trim();
+      const cleanLastname = lastname.trim();
+      const cleanTitle = title.trim();
+      const cleanBio = biography ? String(biography).trim() : null;
 
-      db.prepare(
-        `INSERT INTO manuscript_submissions
-         (firstname, lastname, email, phone, title, genre, synopsis, message, file_path, file_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(firstname, lastname, email, phone || null, title, genre || null, synopsis || null, message || null, filePath, fileName);
+      // 1. Find or create author
+      let author = db.prepare('SELECT * FROM authors WHERE email = ?').get(cleanEmail);
+      let isNewAuthor = false;
+      if (!author) {
+        const ins = db.prepare(
+          `INSERT INTO authors (email, firstname, lastname, phone, bio) VALUES (?, ?, ?, ?, ?)`
+        ).run(cleanEmail, cleanFirstname, cleanLastname, phone || null, cleanBio);
+        author = db.prepare('SELECT * FROM authors WHERE id = ?').get(ins.lastInsertRowid);
+        isNewAuthor = true;
+      } else if (cleanBio && !author.bio) {
+        // Renseigne la bio sur le profil si absente
+        db.prepare('UPDATE authors SET bio = ? WHERE id = ?').run(cleanBio, author.id);
+      }
+      const needsActivation = !author.password;
 
-      // Notify admin
-      const config = readConfig();
-      const adminEmail = config.contact?.emails?.[0] || 'direction@senharmattan.com';
+      // 2. Create manuscript + move file + traces (en transaction)
+      const ref = generateManuscriptRef(db);
+      const tmpPath = req.file.path;
+      const fileName = req.file.originalname;
+      let manuscriptId, finalPath;
+      try {
+        const tx = db.transaction(() => {
+          const result = db.prepare(
+            `INSERT INTO manuscripts (ref, author_id, title, genre, synopsis, biography, message, current_stage)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted')`
+          ).run(ref, author.id, cleanTitle, genre?.trim() || null, synopsis || null, cleanBio, message || null);
+          const id = result.lastInsertRowid;
 
-      transporter.sendMail({
-        from: '"Sen Harmattan Site" <noreply@senharmattan.com>',
-        to: adminEmail,
-        subject: `[Manuscrit] Nouvelle soumission : ${title}`,
-        html: `
-          <h3>Nouvelle soumission de manuscrit</h3>
-          <p><strong>Auteur :</strong> ${escapeHtml(firstname)} ${escapeHtml(lastname)}</p>
-          <p><strong>Email :</strong> ${escapeHtml(email)}</p>
-          <p><strong>Téléphone :</strong> ${escapeHtml(phone || 'Non renseigné')}</p>
-          <p><strong>Titre :</strong> ${escapeHtml(title)}</p>
-          <p><strong>Genre :</strong> ${escapeHtml(genre || 'Non spécifié')}</p>
-          <p><strong>Fichier :</strong> ${escapeHtml(fileName || 'Non joint')}</p>
-          <hr />
-          <p><strong>Synopsis :</strong><br>${(synopsis || 'Non fourni').replace(/\n/g, '<br>')}</p>
-          <p><strong>Message :</strong><br>${(message || '').replace(/\n/g, '<br>')}</p>
-        `,
-      }).catch((err) => console.error('[MANUSCRIPT] Email error:', err.message));
+          // Déplacement du fichier vers manuscripts/<id>/original/
+          const finalDir = join(MANUSCRIPTS_DIR, String(id), 'original');
+          mkdirSync(finalDir, { recursive: true });
+          const fp = join(finalDir, req.file.filename || `manuscrit-${Date.now()}`);
+          try { renameSync(tmpPath, fp); }
+          catch (err) { console.warn('[MANUSCRIPT] rename fallback:', err.message); }
 
-      // Confirmation to author
-      transporter.sendMail({
-        from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
-        to: email,
-        subject: 'Confirmation de réception de votre manuscrit',
-        html: `
-          <p>Bonjour ${escapeHtml(firstname)},</p>
-          <p>Nous avons bien reçu votre manuscrit <strong>« ${escapeHtml(title)} »</strong>.</p>
-          <p>Notre comité éditorial l'examinera et vous répondra dans un délai maximum de 12 semaines.</p>
-          <p>Cordialement,<br>L'équipe éditoriale de L'Harmattan Sénégal</p>
-        `,
-      }).catch((err) => console.error('[MANUSCRIPT] Confirmation email error:', err.message));
+          db.prepare(
+            `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
+             VALUES (?, 'original', 1, ?, ?, ?, ?, 'author', ?)`
+          ).run(id, fp, fileName || req.file.filename, req.file.size || null, req.file.mimetype || null, author.id);
 
-      res.json({ success: true });
+          db.prepare(
+            `INSERT INTO manuscript_stages (manuscript_id, from_stage, to_stage, actor_role, actor_id, actor_label, note)
+             VALUES (?, NULL, 'submitted', 'author', ?, ?, ?)`
+          ).run(id, author.id, `${cleanFirstname} ${cleanLastname}`,
+            isNewAuthor ? 'Soumission formulaire public — compte créé' : 'Soumission formulaire public');
+
+          // Conservation legacy (les anciennes vues admin pointent encore dessus)
+          db.prepare(
+            `INSERT INTO manuscript_submissions
+             (firstname, lastname, email, phone, title, genre, synopsis, biography, message, file_path, file_name)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).run(cleanFirstname, cleanLastname, cleanEmail, phone || null, cleanTitle,
+            genre || null, synopsis || null, cleanBio, message || null, fp, fileName);
+
+          return { id, fp };
+        });
+        const out = tx();
+        manuscriptId = out.id;
+        finalPath = out.fp;
+      } catch (err) {
+        console.error('[MANUSCRIPT] DB error:', err.message);
+        return res.status(500).json({ error: 'Erreur enregistrement manuscrit' });
+      }
+
+      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(manuscriptId);
+
+      // 3. Workflow notification (in-app + email + admin)
+      try {
+        notifyTransition(db, transporter, manuscript, 'submitted',
+          { role: 'author', id: author.id, label: `${cleanFirstname} ${cleanLastname}` }, siteUrl);
+      } catch (err) { console.error('[MANUSCRIPT] notifyTransition error:', err.message); }
+
+      // 4. Magic link d'activation pour les nouveaux auteurs (ou ceux sans mot de passe)
+      if (needsActivation && transporter) {
+        try {
+          const token = crypto.randomBytes(32).toString('hex');
+          // 90 jours d'expiration (vs 1h pour un vrai reset password)
+          const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+          db.prepare('INSERT OR REPLACE INTO author_password_resets (email, token, expires_at) VALUES (?, ?, ?)')
+            .run(cleanEmail, token, expiresAt);
+          const activateUrl = `${siteUrl}/auteur/activer?token=${token}&email=${encodeURIComponent(cleanEmail)}`;
+          transporter.sendMail({
+            to: cleanEmail,
+            subject: 'Activez votre espace auteur — L\'Harmattan Sénégal',
+            html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
+              <h2 style="color:#10531a">Bienvenue ${escapeHtml(cleanFirstname)} !</h2>
+              <p>Votre manuscrit <strong>« ${escapeHtml(cleanTitle)} »</strong> est bien arrivé chez nous (référence <strong>${manuscript.ref}</strong>).</p>
+              <p>Pour suivre l'avancement du projet, valider les corrections et le BAT, télécharger les fichiers et échanger avec notre équipe, activez votre espace auteur :</p>
+              <p><a href="${activateUrl}" style="background:#10531a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">Activer mon espace auteur</a></p>
+              <p style="color:#666;font-size:0.85em">Ce lien est valable 90 jours. Vous pourrez ensuite vous connecter à tout moment sur ${siteUrl}/auteur/connexion.</p>
+              <p style="color:#666;font-size:0.9em;margin-top:24px">L'équipe éditoriale — L'Harmattan Sénégal</p>
+            </div>`,
+          }).catch((err) => console.error('[MANUSCRIPT] Activation email error:', err.message));
+        } catch (err) { console.error('[MANUSCRIPT] Activation setup error:', err.message); }
+      }
+
+      res.json({ success: true, ref: manuscript.ref, id: manuscript.id });
     } catch (err) {
       console.error('POST /manuscripts error:', err.message);
       res.status(500).json({ error: 'Erreur soumission manuscrit' });
@@ -856,26 +934,27 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // ─── ADMIN USERS MANAGEMENT ────────────────────────────────
 
   app.get('/api/admin/users', auth, requireSuperAdmin, (req, res) => {
-    const users = db.prepare("SELECT id, username, role, created_at FROM admin_users").all();
+    const users = db.prepare("SELECT id, username, role, email, created_at FROM admin_users").all();
     res.json(users);
   });
 
   app.post('/api/admin/users', auth, requireSuperAdmin, csrfProtection, (req, res) => {
     try {
-      const { username, password, role = 'admin' } = req.body;
+      const { username, password, role = 'admin', email } = req.body;
       if (!username || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
       if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
         return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères, une majuscule et un chiffre' });
       }
       const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
       const safeRole = validRoles.includes(role) ? role : 'admin';
+      const cleanEmail = email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? email.trim() : null;
       const existing = db.prepare('SELECT id FROM admin_users WHERE username = ?').get(username);
       if (existing) return res.status(400).json({ error: 'Ce nom d\'utilisateur existe déjà' });
 
       const hash = bcrypt.hashSync(password, 12);
-      const result = db.prepare('INSERT INTO admin_users (username, password, role) VALUES (?, ?, ?)').run(username, hash, safeRole);
-      logActivity(req.admin.username, 'create_admin', `Création admin: ${username} (${safeRole})`);
-      res.json({ id: result.lastInsertRowid, username, role: safeRole });
+      const result = db.prepare('INSERT INTO admin_users (username, password, role, email) VALUES (?, ?, ?, ?)').run(username, hash, safeRole, cleanEmail);
+      logActivity(req.admin.username, 'create_admin', `Création admin: ${username} (${safeRole})${cleanEmail ? ` <${cleanEmail}>` : ''}`);
+      res.json({ id: result.lastInsertRowid, username, role: safeRole, email: cleanEmail });
     } catch (err) {
       console.error('Create admin error:', err.message);
       res.status(500).json({ error: 'Erreur création administrateur' });
@@ -885,9 +964,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   app.put('/api/admin/users/:id', auth, requireSuperAdmin, csrfProtection, (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const { username, role, password } = req.body;
+      const { username, role, password, email } = req.body;
 
-      const target = db.prepare('SELECT id, username, role FROM admin_users WHERE id = ?').get(id);
+      const target = db.prepare('SELECT id, username, role, email FROM admin_users WHERE id = ?').get(id);
       if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
 
       // Empêcher un super_admin de se rétrograder lui-même (risque de perdre l'accès)
@@ -917,6 +996,16 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         values.push(role);
       }
 
+      // Changement d'email (optionnel ; on accepte vide pour effacer)
+      if (email !== undefined) {
+        const trimmed = (email || '').trim();
+        if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+          return res.status(400).json({ error: 'Adresse email invalide' });
+        }
+        updates.push('email = ?');
+        values.push(trimmed || null);
+      }
+
       // Changement de mot de passe (optionnel)
       if (password && password.length > 0) {
         if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
@@ -937,11 +1026,12 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       db.prepare(`UPDATE admin_users SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
       // Relire le user pour renvoyer l'état à jour
-      const updated = db.prepare('SELECT id, username, role, created_at FROM admin_users WHERE id = ?').get(id);
+      const updated = db.prepare('SELECT id, username, role, email, created_at FROM admin_users WHERE id = ?').get(id);
 
       const changes = [];
       if (username && username.trim() !== target.username) changes.push(`username→${username.trim()}`);
       if (role && role !== target.role) changes.push(`rôle→${role}`);
+      if (email !== undefined && (email || '').trim() !== (target.email || '')) changes.push(`email→${(email || '').trim() || '∅'}`);
       if (password) changes.push('mdp réinitialisé');
       logActivity(req.admin.username, 'update_admin', `Modification admin ${target.username}: ${changes.join(', ')}`);
 
@@ -964,10 +1054,87 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   // ─── ACTIVITY LOG ──────────────────────────────────────────
 
+  // Build WHERE clause from filters (shared between list + export)
+  function buildActivityFilters(q) {
+    const clauses = [];
+    const params = [];
+    if (q.action) { clauses.push('action = ?'); params.push(String(q.action)); }
+    if (q.username) { clauses.push('admin_username = ?'); params.push(String(q.username)); }
+    if (q.search) {
+      clauses.push('(details LIKE ? OR action LIKE ? OR admin_username LIKE ?)');
+      const like = `%${String(q.search)}%`;
+      params.push(like, like, like);
+    }
+    if (q.from) { clauses.push("created_at >= ?"); params.push(String(q.from)); }
+    if (q.to) { clauses.push("created_at < datetime(?, '+1 day')"); params.push(String(q.to)); }
+    return {
+      where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '',
+      params,
+    };
+  }
+
   app.get('/api/admin/activity-log', auth, (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
-    const logs = db.prepare('SELECT * FROM admin_activity_log ORDER BY created_at DESC LIMIT ?').all(limit);
-    res.json(logs);
+    try {
+      const page = Math.max(0, parseInt(req.query.page) || 0);
+      const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+      const { where, params } = buildActivityFilters(req.query);
+
+      const total = db.prepare(`SELECT COUNT(*) AS c FROM admin_activity_log ${where}`).get(...params).c;
+      const logs = db.prepare(`SELECT * FROM admin_activity_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+        .all(...params, limit, page * limit);
+
+      // Options disponibles pour les filtres (rapides, pas de filter appliqué)
+      const available_actions = db.prepare('SELECT DISTINCT action FROM admin_activity_log ORDER BY action').all().map((r) => r.action);
+      const available_users = db.prepare('SELECT DISTINCT admin_username FROM admin_activity_log ORDER BY admin_username').all().map((r) => r.admin_username);
+
+      res.json({ logs, total, page, limit, available_actions, available_users });
+    } catch (err) {
+      console.error('[ACTIVITY] list error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement du journal' });
+    }
+  });
+
+  app.get('/api/admin/activity-log/stats', auth, (req, res) => {
+    try {
+      const total = db.prepare('SELECT COUNT(*) AS c FROM admin_activity_log').get().c;
+      const today = db.prepare("SELECT COUNT(*) AS c FROM admin_activity_log WHERE date(created_at) = date('now', 'localtime')").get().c;
+      const week = db.prepare("SELECT COUNT(*) AS c FROM admin_activity_log WHERE created_at >= datetime('now', '-7 days')").get().c;
+      const byAction = db.prepare('SELECT action, COUNT(*) AS c FROM admin_activity_log GROUP BY action ORDER BY c DESC LIMIT 8').all();
+      const byUser = db.prepare('SELECT admin_username AS user, COUNT(*) AS c FROM admin_activity_log GROUP BY admin_username ORDER BY c DESC LIMIT 5').all();
+      const byDay = db.prepare(`SELECT date(created_at, 'localtime') AS day, COUNT(*) AS c
+        FROM admin_activity_log
+        WHERE created_at >= datetime('now', '-14 days')
+        GROUP BY day ORDER BY day ASC`).all();
+      res.json({ total, today, week, byAction, byUser, byDay });
+    } catch (err) {
+      console.error('[ACTIVITY] stats error:', err.message);
+      res.status(500).json({ error: 'Erreur calcul statistiques' });
+    }
+  });
+
+  app.get('/api/admin/activity-log/export', auth, (req, res) => {
+    try {
+      const { where, params } = buildActivityFilters(req.query);
+      const logs = db.prepare(`SELECT id, admin_username, action, details, created_at
+        FROM admin_activity_log ${where} ORDER BY created_at DESC LIMIT 10000`).all(...params);
+
+      const esc = (v) => {
+        if (v === null || v === undefined) return '';
+        const s = String(v).replace(/"/g, '""');
+        return /[,;"\n\r]/.test(s) ? `"${s}"` : s;
+      };
+      const header = 'id;date;utilisateur;action;details\n';
+      const body = logs.map((l) => [l.id, l.created_at, l.admin_username, l.action, l.details].map(esc).join(';')).join('\n');
+      const csv = '﻿' + header + body; // BOM UTF-8 pour Excel
+
+      const filename = `journal-activite-${new Date().toISOString().slice(0, 10)}.csv`;
+      res.set('Content-Type', 'text/csv; charset=utf-8');
+      res.set('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(csv);
+    } catch (err) {
+      console.error('[ACTIVITY] export error:', err.message);
+      res.status(500).json({ error: 'Erreur export CSV' });
+    }
   });
 
   // ─── NOTIFICATION BADGES (sidebar counters) ───────────────

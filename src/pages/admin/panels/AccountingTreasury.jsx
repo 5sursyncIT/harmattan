@@ -4,6 +4,8 @@ import { FiArrowLeft, FiCreditCard, FiTrendingUp, FiTrendingDown } from 'react-i
 import { getTreasury } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
+import DolibarrLink from '../../../components/admin/DolibarrLink';
+import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import './Accounting.css';
 
@@ -34,12 +36,23 @@ export default function AccountingTreasury() {
             <FiCreditCard /> Trésorerie ({data.accounts?.length || 0} comptes)
           </h3>
         </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <DolibarrLink href={dolibarrUrls.bankList()} title="Liste des comptes bancaires">Comptes bancaires</DolibarrLink>
+          {selectedAccount && (
+            <DolibarrLink
+              href={dolibarrUrls.reconciliation(selectedAccount)}
+              title="Rapprochement bancaire pour ce compte"
+            >
+              Rapprocher ce compte
+            </DolibarrLink>
+          )}
+        </div>
       </div>
 
       {/* Cartes par compte */}
       <div className="ac-bank-grid">
         {data.accounts?.map(acc => (
-          <div key={acc.id} className="ac-bank-card" style={{ cursor: 'pointer', borderColor: selectedAccount === String(acc.id) ? '#10531a' : '#e2e8f0' }}
+          <div key={acc.id} className="ac-bank-card" style={{ cursor: 'pointer', borderColor: selectedAccount === String(acc.id) ? '#10531a' : '#e2e8f0', position: 'relative' }}
                onClick={() => setSelectedAccount(selectedAccount === String(acc.id) ? '' : String(acc.id))}>
             <div className="ac-bank-name">{acc.label || acc.ref}</div>
             <div className="ac-bank-balance" style={{ color: acc.balance >= 0 ? '#10531a' : '#dc2626' }}>
@@ -48,6 +61,14 @@ export default function AccountingTreasury() {
             <div className="ac-bank-meta">
               {acc.nb_movements} mvts · Dernier : {fmtDate(acc.last_movement)}
             </div>
+            <a
+              href={dolibarrUrls.bankAccount(acc.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Ouvrir ce compte dans Dolibarr"
+              onClick={(e) => e.stopPropagation()}
+              style={{ position: 'absolute', top: 8, right: 8, color: '#94a3b8', fontSize: 11 }}
+            >↗</a>
           </div>
         ))}
         <div className="ac-bank-card total">

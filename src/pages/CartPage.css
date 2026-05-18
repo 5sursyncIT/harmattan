@@ -2,6 +2,36 @@
   padding: 32px 0 64px;
 }
 
+/* Bouton commander sur WhatsApp */
+.wa-order-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px 16px;
+  background: #25D366;
+  color: #fff;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.wa-order-btn:hover {
+  background: #128C7E;
+  transform: translateY(-1px);
+}
+
+.wa-order-btn:focus-visible {
+  outline: 2px solid #128C7E;
+  outline-offset: 2px;
+}
+
 .cart-page h1 {
   font-size: 28px;
   font-weight: 900;

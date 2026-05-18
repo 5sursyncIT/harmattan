@@ -35,6 +35,7 @@ const fieldStepMap = {
   title: 1,
   genre: 1,
   synopsis: 1,
+  biography: 1,
   file: 2,
 };
 
@@ -175,6 +176,7 @@ function getInitialForm() {
     title: '',
     genre: '',
     synopsis: '',
+    biography: '',
     message: '',
   };
 }
@@ -204,7 +206,9 @@ function getValidationErrors(form, file) {
     nextErrors.synopsis = 'Le synopsis doit comporter au moins 80 caractères.';
   }
 
-  if (file && !/\.(pdf|doc|docx)$/i.test(file.name)) {
+  if (!file) {
+    nextErrors.file = 'Veuillez joindre votre manuscrit (PDF, DOC ou DOCX).';
+  } else if (!/\.(pdf|doc|docx)$/i.test(file.name)) {
     nextErrors.file = 'Format accepté : PDF, DOC ou DOCX.';
   }
 
@@ -595,6 +599,23 @@ function ManuscriptForm() {
         </div>
 
         <div className="editer-field">
+          <label htmlFor="biography"><FiUser size={14} /> Biographie de l’auteur</label>
+          <textarea
+            id="biography"
+            name="biography"
+            value={form.biography}
+            onChange={handleChange}
+            onBlur={handleBlur}
+            rows={4}
+            placeholder="Présentez-vous en quelques lignes : parcours, formation, expériences marquantes, précédentes publications…"
+            aria-describedby="biography-help"
+          />
+          <p className="editer-field-help" id="biography-help">
+            Une courte biographie (3 à 5 lignes) aide le comité à mieux comprendre votre démarche et figurera, après publication, sur la 4ᵉ de couverture.
+          </p>
+        </div>
+
+        <div className="editer-field">
           <label htmlFor="message">Message complémentaire</label>
           <textarea
             id="message"
@@ -602,7 +623,7 @@ function ManuscriptForm() {
             value={form.message}
             onChange={handleChange}
             rows={4}
-            placeholder="Informations complémentaires, parcours d’auteur, publications précédentes, objectifs..."
+            placeholder="Informations complémentaires, attentes vis-à-vis de l’éditeur, contexte du projet…"
           />
         </div>
       </section>
@@ -619,10 +640,21 @@ function ManuscriptForm() {
           <p>{formStepConfig[2].description}</p>
         </div>
 
-        <div className="editer-field">
-          <label htmlFor="manuscript-file"><FiUpload size={14} /> Manuscrit (PDF, DOC, DOCX — max 20 Mo)</label>
+        <div className={`editer-field ${isVisibleError('file') ? 'has-error' : ''}`}>
+          <label htmlFor="manuscript-file">
+            <FiUpload size={14} /> Manuscrit (PDF, DOC, DOCX — max 20 Mo) <span className="editer-required" aria-label="champ obligatoire">*</span>
+          </label>
           <div className="editer-file-input">
-            <input type="file" id="manuscript-file" accept=".pdf,.doc,.docx" onChange={handleFile} />
+            <input
+              type="file"
+              id="manuscript-file"
+              accept=".pdf,.doc,.docx"
+              onChange={handleFile}
+              required
+              aria-required="true"
+              aria-invalid={isVisibleError('file') ? 'true' : 'false'}
+              aria-describedby={isVisibleError('file') ? 'file-error' : 'file-help'}
+            />
             <label htmlFor="manuscript-file" className="editer-file-label">
               <FiUpload />
               {file ? 'Remplacer le fichier' : 'Choisir un fichier'}
@@ -632,8 +664,8 @@ function ManuscriptForm() {
               <span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} Mo` : 'Formats acceptés : PDF, DOC, DOCX'}</span>
             </div>
           </div>
-          <p className="editer-field-help">Le dépôt de fichier est fortement recommandé pour permettre une évaluation complète dès la première lecture.</p>
-          {isVisibleError('file') && <p className="editer-field-error" id="file-error"><FiAlertCircle /> {errors.file}</p>}
+          <p className="editer-field-help" id="file-help">Le dépôt du manuscrit est obligatoire pour permettre l'évaluation par le comité éditorial.</p>
+          {isVisibleError('file') && <p className="editer-field-error" id="file-error" role="alert"><FiAlertCircle /> {errors.file}</p>}
         </div>
 
         <div className="editer-form-summary">

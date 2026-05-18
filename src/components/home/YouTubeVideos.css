@@ -357,6 +357,43 @@
   border: none;
 }
 
+.yt-modal-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  height: 100%;
+  width: 100%;
+  background: #1a1a1a;
+  color: #fff;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.yt-modal-fallback p {
+  margin: 0;
+  font-size: 16px;
+  color: #d1d5db;
+  max-width: 400px;
+}
+
+.yt-modal-fallback .btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  background: #ff0000;
+  color: #fff;
+  text-decoration: none;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.yt-modal-fallback .btn-primary:hover {
+  background: #cc0000;
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
   .yt-immersive-layout {

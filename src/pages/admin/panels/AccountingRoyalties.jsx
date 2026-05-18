@@ -4,6 +4,8 @@ import { FiArrowLeft, FiBook, FiDownload, FiInfo, FiX } from 'react-icons/fi';
 import { getRoyalties, getRoyaltyDetails, exportAccounting } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
+import DolibarrLink from '../../../components/admin/DolibarrLink';
+import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import './Accounting.css';
 
@@ -40,15 +42,18 @@ export default function AccountingRoyalties() {
 
   const update = (k, v) => setFilters(f => ({ ...f, [k]: v }));
 
-  const handleExport = async () => {
+  const handleExport = async (journalType = 'royalties') => {
     setExporting(true);
     try {
-      const r = await exportAccounting('royalties', { year: filters.year, month: filters.month });
+      const r = await exportAccounting(journalType, { year: filters.year, month: filters.month });
       const url = URL.createObjectURL(r.data);
       const a = document.createElement('a'); a.href = url;
-      a.download = `royalties-${filters.year}${filters.month ? '-' + filters.month : ''}.csv`; a.click();
+      const prefix = journalType === 'royalties_od' ? 'royalties-OD' : 'royalties';
+      a.download = `${prefix}-${filters.year}${filters.month ? '-' + filters.month : ''}.csv`; a.click();
       URL.revokeObjectURL(url);
-      toast.success('Export téléchargé');
+      toast.success(journalType === 'royalties_od'
+        ? 'Écritures OD téléchargées — importez-les dans Dolibarr (Comptabilité → Transfert)'
+        : 'Export téléchargé');
     } catch { toast.error('Erreur export'); }
     finally { setExporting(false); }
   };
@@ -74,9 +79,16 @@ export default function AccountingRoyalties() {
             <FiBook /> Royalties auteurs
           </h3>
         </div>
-        <button onClick={handleExport} disabled={exporting} className="btn btn-outline">
-          <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <DolibarrLink href={dolibarrUrls.miscJournal()} title="Journal d'opérations diverses (OD)">Journal OD</DolibarrLink>
+          <DolibarrLink href={dolibarrUrls.importAccounting()} variant="ghost" title="Importer un fichier d'écritures">Importer écritures</DolibarrLink>
+          <button onClick={() => handleExport('royalties_od')} disabled={exporting} className="btn btn-primary" title="Génère un CSV d'écritures OD (D 6512 / C 401) prêt à importer dans Dolibarr">
+            <FiDownload size={14} /> {exporting ? 'Préparation...' : 'Écritures OD pour Dolibarr'}
+          </button>
+          <button onClick={() => handleExport('royalties')} disabled={exporting} className="btn btn-outline">
+            <FiDownload size={14} /> Export détaillé CSV
+          </button>
+        </div>
       </div>
 
       <div className="ac-info-box">
@@ -169,7 +181,16 @@ export default function AccountingRoyalties() {
               <tbody>
                 {data.royalties.map(r => (
                   <tr key={r.contract_id} onClick={() => openDetail(r)} style={{ cursor: 'pointer' }}>
-                    <td className="ac-ref">{r.contract_ref}</td>
+                    <td className="ac-ref">
+                      <a
+                        href={dolibarrUrls.contract(r.contract_id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Ouvrir le contrat dans Dolibarr"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ color: '#10531a', textDecoration: 'none' }}
+                      >{r.contract_ref}</a>
+                    </td>
                     <td style={{ fontWeight: 600 }}>{r.author_name}</td>
                     <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>{r.book_title}</td>
                     <td className="ac-amount">{r.royalty_rate}%</td>

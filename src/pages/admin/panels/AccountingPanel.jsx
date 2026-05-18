@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { FiDollarSign, FiTrendingUp, FiAlertCircle, FiBriefcase, FiUsers, FiBook, FiFileText, FiCreditCard } from 'react-icons/fi';
+import { FiDollarSign, FiTrendingUp, FiAlertCircle, FiBriefcase, FiUsers, FiBook, FiFileText, FiCreditCard, FiPercent, FiBarChart2, FiShoppingBag } from 'react-icons/fi';
 import { getAccountingDashboard } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
+import DolibarrLink from '../../../components/admin/DolibarrLink';
+import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import './Accounting.css';
 
@@ -60,9 +62,14 @@ export default function AccountingPanel() {
         <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
           <FiBriefcase /> Comptabilité
         </h3>
-        <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-          Période : {fmtDate(data.period?.from)} → {fmtDate(data.period?.to)}
-        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+            Période : {fmtDate(data.period?.from)} → {fmtDate(data.period?.to)}
+          </span>
+          <DolibarrLink href={dolibarrUrls.generalLedger()} title="Grand Livre comptable">Grand Livre</DolibarrLink>
+          <DolibarrLink href={dolibarrUrls.balance()} title="Balance comptable">Balance</DolibarrLink>
+          <DolibarrLink href={dolibarrUrls.vatList()} title="Déclarations TVA">TVA</DolibarrLink>
+        </div>
       </div>
 
       {/* KPIs principaux */}
@@ -80,6 +87,24 @@ export default function AccountingPanel() {
              label="Trésorerie totale" value={formatPrice(data.treasury.total)}
              sub={`${data.treasury.accounts} comptes actifs`} />
       </div>
+
+      {/* KPIs comptables enrichis (niveau 1) */}
+      {data.vat && (
+        <div className="ac-kpi-grid">
+          <KPI variant="primary" icon={<FiPercent size={16} />}
+               label="TVA collectée mois" value={formatPrice(data.vat.collected_mtd)}
+               sub={`Cumul année : ${formatPrice(data.vat.collected_ytd)}`} />
+          <KPI variant="info" icon={<FiPercent size={16} />}
+               label="TVA déductible mois" value={formatPrice(data.vat.deductible_mtd)}
+               sub={data.purchases.count > 0 ? `${data.purchases.count} factures fournisseurs` : 'Aucun achat ce mois'} />
+          <KPI variant={data.vat.to_pay_mtd >= 0 ? 'danger' : 'success'} icon={<FiPercent size={16} />}
+               label="TVA à reverser (estim.)" value={formatPrice(Math.abs(data.vat.to_pay_mtd))}
+               sub={data.vat.to_pay_mtd >= 0 ? 'À reverser à l\'État' : 'Crédit TVA en faveur'} />
+          <KPI variant={data.result_mtd.value >= 0 ? 'success' : 'danger'} icon={<FiBarChart2 size={16} />}
+               label="Résultat mois (HT)" value={formatPrice(Math.abs(data.result_mtd.value))}
+               sub={`${data.result_mtd.label} — CA ${formatPrice(data.revenue.ht)} − Achats ${formatPrice(data.purchases.ht)}`} />
+        </div>
+      )}
 
       {/* Tuiles de navigation */}
       <div className="ac-tiles">

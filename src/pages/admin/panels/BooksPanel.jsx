@@ -1,27 +1,46 @@
-import { useState, useEffect, useCallback } from 'react';
-import { FiPlus, FiSearch, FiBook, FiAlertCircle } from 'react-icons/fi';
-import { listBooks, getBook } from '../../../api/admin';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { FiPlus, FiSearch, FiBook, FiAlertCircle, FiImage } from 'react-icons/fi';
+import { listBooks, getBook, getBookQualityStats } from '../../../api/admin';
+import { getProductImageUrl } from '../../../api/dolibarr';
 import BookForm from './BookForm';
 import './BooksPanel.css';
+
+const SEARCH_DEBOUNCE_MS = 300;
 
 export default function BooksPanel() {
   const [books, setBooks] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [limit] = useState(20);
+  const [qInput, setQInput] = useState('');
   const [q, setQ] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [selectedBook, setSelectedBook] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
-  const [mode, setMode] = useState('list'); // 'list' | 'edit' | 'create'
+  const [mode, setMode] = useState('list');
+  const [coverVersion, setCoverVersion] = useState({});
+  const [justUpdatedAt, setJustUpdatedAt] = useState(null);
 
-  const loadBooks = useCallback(async () => {
+  // Conformité globale catalogue
+  const [qualityGlobal, setQualityGlobal] = useState(null);
+
+  // Debounce input → q
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQ(qInput.trim());
+      setPage(0);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  const loadBooks = useCallback(async (signal) => {
     setLoading(true);
     try {
-      const res = await listBooks({ page, limit, q });
+      const res = await listBooks({ page, limit, q }, { signal });
       setBooks(res.data.books || []);
       setTotal(res.data.total || 0);
     } catch (err) {
+      if (err.code === 'ERR_CANCELED' || err.name === 'CanceledError') return;
       console.error('Load books failed', err);
     } finally {
       setLoading(false);
@@ -29,8 +48,21 @@ export default function BooksPanel() {
   }, [page, limit, q]);
 
   useEffect(() => {
-    loadBooks();
+    const ctrl = new AbortController();
+    loadBooks(ctrl.signal);
+    return () => ctrl.abort();
   }, [loadBooks]);
+
+  // Charge la conformité globale (mise à jour après chaque save)
+  const loadQualityStats = useCallback(() => {
+    getBookQualityStats()
+      .then((res) => setQualityGlobal(res.data))
+      .catch(() => setQualityGlobal(null));
+  }, []);
+
+  useEffect(() => {
+    loadQualityStats();
+  }, [loadQualityStats]);
 
   const handleSelect = async (id) => {
     setSelectedId(id);
@@ -50,37 +82,42 @@ export default function BooksPanel() {
     setMode('create');
   };
 
+  const flashUpdated = () => {
+    setJustUpdatedAt(Date.now());
+    setTimeout(() => setJustUpdatedAt(null), 2500);
+  };
+
   const handleSaved = () => {
     loadBooks();
+    loadQualityStats();
+    flashUpdated();
     if (mode === 'create') {
       setMode('list');
     } else if (selectedId) {
-      // Refresh detail
       getBook(selectedId).then((res) => setSelectedBook(res.data));
     }
   };
 
   const handleDeleted = () => {
     loadBooks();
+    loadQualityStats();
+    flashUpdated();
     setMode('list');
     setSelectedBook(null);
     setSelectedId(null);
   };
 
-  const totalPages = Math.ceil(total / limit);
+  const handleCoverUpdated = useCallback((bookId) => {
+    setCoverVersion((v) => ({ ...v, [bookId]: (v[bookId] || 0) + 1 }));
+  }, []);
 
-  // Quality metric: books with all key fields filled
-  const validCount = books.filter((b) =>
-    b.label && b.ref && b.publication_year && b.nombre_pages && b.editeur && b.genre_label
-  ).length;
-  const qualityPct = books.length > 0 ? Math.round((validCount / books.length) * 100) : 100;
+  const totalPages = Math.ceil(total / limit);
 
   return (
     <div className="books-panel">
-      {/* Header */}
       <div className="books-header">
         <div className="books-title">
-          <h2><FiBook /> Gestion des livres</h2>
+          <h2><FiBook aria-hidden="true" /> Gestion des livres</h2>
           <p>Saisie structurée des ouvrages avec validation rigoureuse</p>
         </div>
         <div className="books-stats">
@@ -88,40 +125,65 @@ export default function BooksPanel() {
             <span className="books-stat-value">{total.toLocaleString('fr-FR')}</span>
             <span className="books-stat-label">Livres dans le catalogue</span>
           </div>
-          <div className="books-stat">
-            <span className={`books-stat-value ${qualityPct >= 99 ? 'good' : qualityPct >= 90 ? 'warn' : 'bad'}`}>
-              {qualityPct}%
-            </span>
-            <span className="books-stat-label">Conformité (page visible)</span>
-          </div>
+          {qualityGlobal && (
+            <div className="books-stat">
+              <span className={`books-stat-value ${qualityGlobal.pct >= 95 ? 'good' : qualityGlobal.pct >= 80 ? 'warn' : 'bad'}`}>
+                {qualityGlobal.pct}%
+              </span>
+              <span className="books-stat-label">
+                Conformité globale<br/>
+                <small>({qualityGlobal.compliant.toLocaleString('fr-FR')}/{qualityGlobal.total.toLocaleString('fr-FR')})</small>
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Toolbar */}
+      {justUpdatedAt && (
+        <div className="books-flash" role="status" aria-live="polite">
+          ✓ Liste mise à jour
+        </div>
+      )}
+
       <div className="books-toolbar">
-        <div className="books-search">
-          <FiSearch />
+        <label className="books-search" htmlFor="books-search-input">
+          <FiSearch aria-hidden="true" />
+          <span className="visually-hidden">Rechercher un livre</span>
           <input
+            id="books-search-input"
             type="text"
             placeholder="Rechercher par titre, auteur ou ISBN..."
-            value={q}
-            onChange={(e) => { setQ(e.target.value); setPage(0); }}
+            value={qInput}
+            onChange={(e) => setQInput(e.target.value)}
+            aria-label="Rechercher un livre"
           />
-        </div>
-        <button className="btn btn-primary" onClick={handleCreate}>
-          <FiPlus /> Nouveau livre
+        </label>
+        <button className="btn btn-primary" onClick={handleCreate} type="button">
+          <FiPlus aria-hidden="true" /> Nouveau livre
         </button>
       </div>
 
-      {/* Split layout */}
       <div className="books-split">
-        {/* LEFT: List */}
         <div className="books-list-pane">
           {loading ? (
-            <div className="books-loading">Chargement...</div>
+            <ul className="books-list" aria-busy="true" aria-label="Chargement de la liste">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <li key={i} className="books-list-item books-list-skeleton">
+                  <div className="skeleton-cover" />
+                  <div className="skeleton-main">
+                    <div className="skeleton-line skeleton-line-title" />
+                    <div className="skeleton-line skeleton-line-author" />
+                    <div className="skeleton-pills">
+                      <span className="skeleton-pill" />
+                      <span className="skeleton-pill" />
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
           ) : books.length === 0 ? (
             <div className="books-empty">
-              <FiAlertCircle />
+              <FiAlertCircle aria-hidden="true" />
               <p>Aucun livre trouvé</p>
             </div>
           ) : (
@@ -129,19 +191,31 @@ export default function BooksPanel() {
               <ul className="books-list">
                 {books.map((b) => {
                   const hasAllFields = b.publication_year && b.nombre_pages && b.editeur && b.genre_label;
+                  const v = coverVersion[b.id] || 0;
                   return (
                     <li
                       key={b.id}
                       className={`books-list-item ${selectedId === b.id ? 'active' : ''} ${!hasAllFields ? 'incomplete' : ''}`}
                       onClick={() => handleSelect(b.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleSelect(b.id);
+                        }
+                      }}
                     >
+                      <div className="books-list-cover">
+                        <CoverImage productId={b.id} title={b.label} version={v} />
+                      </div>
                       <div className="books-list-main">
                         <strong>{b.label}</strong>
                         <span className="books-list-author">{b.auteur || 'Auteur inconnu'}</span>
                         <span className="books-list-meta">
-                          {b.genre_label && <span className="pill">{b.genre_label}</span>}
-                          {b.publication_year && <span className="pill pill-muted">{b.publication_year}</span>}
-                          {b.nombre_pages && <span className="pill pill-muted">{b.nombre_pages} p.</span>}
+                          {b.genre_label && <span className="books-pill">{b.genre_label}</span>}
+                          {b.publication_year && <span className="books-pill books-pill-muted">{b.publication_year}</span>}
+                          {b.nombre_pages && <span className="books-pill books-pill-muted">{b.nombre_pages} p.</span>}
                         </span>
                       </div>
                       <div className="books-list-side">
@@ -149,7 +223,7 @@ export default function BooksPanel() {
                         <span className="books-list-price">{parseInt(b.price_ttc || 0).toLocaleString('fr-FR')} F</span>
                         {!hasAllFields && (
                           <span className="books-list-warn" title="Métadonnées incomplètes">
-                            <FiAlertCircle size={12} />
+                            <FiAlertCircle size={12} aria-hidden="true" />
                           </span>
                         )}
                       </div>
@@ -160,20 +234,19 @@ export default function BooksPanel() {
 
               {totalPages > 1 && (
                 <div className="books-pagination">
-                  <button disabled={page === 0} onClick={() => setPage((p) => p - 1)}>‹ Précédent</button>
+                  <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} type="button">‹ Précédent</button>
                   <span>Page {page + 1} / {totalPages}</span>
-                  <button disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)}>Suivant ›</button>
+                  <button disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)} type="button">Suivant ›</button>
                 </div>
               )}
             </>
           )}
         </div>
 
-        {/* RIGHT: Detail / Form */}
         <div className="books-detail-pane">
           {mode === 'list' && !selectedBook && (
             <div className="books-placeholder">
-              <FiBook size={48} />
+              <FiBook size={48} aria-hidden="true" />
               <h3>Sélectionnez un livre</h3>
               <p>Cliquez sur un livre de la liste pour l'éditer, ou créez un nouvel ouvrage.</p>
             </div>
@@ -191,6 +264,7 @@ export default function BooksPanel() {
               onSaved={handleSaved}
               onDeleted={handleDeleted}
               onCancel={() => { setMode('list'); setSelectedBook(null); setSelectedId(null); }}
+              onCoverUpdated={handleCoverUpdated}
             />
           )}
         </div>
@@ -198,3 +272,28 @@ export default function BooksPanel() {
     </div>
   );
 }
+
+function CoverImage({ productId, title, version, size = 'list' }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [productId, version]);
+
+  if (failed) {
+    return (
+      <div className={`cover-fallback cover-fallback-${size}`} aria-label="Aucune couverture">
+        <FiImage aria-hidden="true" />
+      </div>
+    );
+  }
+  const base = getProductImageUrl(productId, title);
+  const sep = base.includes('?') ? '&' : '?';
+  return (
+    <img
+      src={`${base}${sep}v=${version || 0}`}
+      alt={title || 'Couverture du livre'}
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+export { CoverImage };

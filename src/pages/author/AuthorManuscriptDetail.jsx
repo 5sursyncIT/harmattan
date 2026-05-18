@@ -4,6 +4,7 @@ import { FiArrowLeft, FiDownload, FiCheck, FiX } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
 import ManuscriptTimeline from '../../components/common/ManuscriptTimeline';
+import NotificationBell from '../../components/author/NotificationBell';
 import './AuthorPages.css';
 
 const KIND_LABELS = {
@@ -77,6 +78,9 @@ export default function AuthorManuscriptDetail() {
             <p className="author-subtitle">
               Référence : <strong>{manuscript.ref}</strong> · Statut : <strong>{manuscript.stage_label}</strong>
             </p>
+          </div>
+          <div className="author-actions">
+            <NotificationBell />
           </div>
         </div>
 

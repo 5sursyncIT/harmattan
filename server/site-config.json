@@ -189,18 +189,12 @@
   ],
   "payment_methods": [
     {
-      "id": "orange_money",
-      "label": "Orange Money",
-      "icon": "📱",
+      "id": "paytech",
+      "label": "Paiement en ligne",
+      "subtitle": "Wave • Orange Money • Free Money • Carte bancaire",
+      "icon": "💳",
       "enabled": true,
-      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nCode marchand OM : **413513**\nMentionnez votre nom comme référence"
-    },
-    {
-      "id": "wave",
-      "label": "Wave",
-      "icon": "📱",
-      "enabled": true,
-      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nMentionnez votre nom comme référence"
+      "instructions": "Vous serez redirigé vers la plateforme sécurisée de paiement."
     },
     {
       "id": "virement",
@@ -210,11 +204,29 @@
       "instructions": "Banque : CBAO CLAIR DE LUNE\nIBAN : **SN08 SN012 01212 036199352101 46**\nSWIFT : CBAOSNDA\nRéférence : votre nom"
     },
     {
+      "id": "orange_money",
+      "label": "Orange Money (manuel)",
+      "icon": "📱",
+      "enabled": false,
+      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nCode marchand OM : **413513**\nMentionnez votre nom comme référence"
+    },
+    {
+      "id": "wave",
+      "label": "Wave (manuel)",
+      "icon": "📱",
+      "enabled": false,
+      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nMentionnez votre nom comme référence"
+    },
+    {
       "id": "cb",
-      "label": "Carte bancaire",
+      "label": "Carte bancaire (héritage)",
       "icon": "💳",
       "enabled": false,
-      "instructions": "Le paiement par carte sera bientôt disponible"
+      "instructions": "Désormais inclus dans le paiement en ligne PayTech"
     }
-  ]
+  ],
+  "admin_emails": [
+    "commandes@senharmattan.com"
+  ],
+  "whatsapp_phone": "221772422508"
 }

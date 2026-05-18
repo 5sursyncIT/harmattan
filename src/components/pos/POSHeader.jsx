@@ -4,14 +4,14 @@ import { useNavigate } from 'react-router-dom';
 import usePosAuthStore from '../../store/posAuthStore';
 import usePosSessionStore from '../../store/posSessionStore';
 import { posGetTodaySales } from '../../api/pos';
-import { FiLogOut, FiDollarSign, FiClock, FiMonitor, FiLock, FiBarChart2, FiRotateCcw, FiShield } from 'react-icons/fi';
+import { FiLogOut, FiDollarSign, FiClock, FiMonitor, FiLock, FiBarChart2, FiRotateCcw, FiShield, FiPrinter } from 'react-icons/fi';
 import './POSHeader.css';
 
 function getPosTerminal() {
   return parseInt(localStorage.getItem('pos-terminal') || '1');
 }
 
-export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, onDevices }) {
+export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, onDevices, onPrinterSettings }) {
   const staff = usePosAuthStore((s) => s.staff);
   const logout = usePosAuthStore((s) => s.logout);
   const isSessionOpen = usePosSessionStore((s) => s.isOpen);
@@ -94,6 +94,9 @@ export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, o
         <span className="pos-header-staff">{staff?.name}</span>
         <button className="pos-header-btn" onClick={onReturn} title="Retour / Avoir">
           <FiRotateCcw size={16} />
+        </button>
+        <button className="pos-header-btn" onClick={onPrinterSettings} title="Imprimante thermique">
+          <FiPrinter size={16} />
         </button>
         {staff?.role === 'manager' && (
           <button className="pos-header-btn" onClick={onDevices} title="Appareils autorisés">

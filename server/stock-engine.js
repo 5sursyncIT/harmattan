@@ -9,6 +9,8 @@
  * - KPIs de santé stock
  */
 
+import { excludedCategorySqlList } from '../src/utils/excludedCategories.js';
+
 // ─── DEMAND CALCULATION ────────────────────────────────────
 
 /**
@@ -370,7 +372,7 @@ export async function calculateCoverageAndRotation(dolibarrPool, limit = 100) {
             (SELECT c.label FROM llx_categorie c
              INNER JOIN llx_categorie_product cp ON cp.fk_categorie = c.rowid
              WHERE cp.fk_product = p.rowid
-             AND c.label NOT IN ('LIBRAIRIE','LIVRES','Accueil','Racine','Services','Livres du mois','http://senharmattan.com/')
+             AND c.label NOT IN (${excludedCategorySqlList()})
              LIMIT 1) AS category
      FROM llx_product p
      LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid

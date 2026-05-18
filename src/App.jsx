@@ -12,6 +12,8 @@ const CatalogPage = lazy(() => import('./pages/CatalogPage'));
 const ProductPage = lazy(() => import('./pages/ProductPage'));
 const CartPage = lazy(() => import('./pages/CartPage'));
 const CheckoutPage = lazy(() => import('./pages/CheckoutPage'));
+const CheckoutSuccessPage = lazy(() => import('./pages/CheckoutSuccessPage'));
+const CheckoutFailurePage = lazy(() => import('./pages/CheckoutFailurePage'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/RegisterPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
@@ -25,6 +27,8 @@ const MentionsLegalesPage = lazy(() => import('./pages/MentionsLegalesPage'));
 const OrderTrackingPage = lazy(() => import('./pages/OrderTrackingPage'));
 const SeFaireEditerPage = lazy(() => import('./pages/SeFaireEditerPage'));
 const EvenementsPage = lazy(() => import('./pages/EvenementsPage'));
+const ActualitesPage = lazy(() => import('./pages/ActualitesPage'));
+const ActualiteDetailPage = lazy(() => import('./pages/ActualiteDetailPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 const POSLoginPage = lazy(() => import('./pages/pos/POSLoginPage'));
 const POSPage = lazy(() => import('./pages/pos/POSPage'));
@@ -52,6 +56,7 @@ const ContractsList = lazy(() => import('./pages/admin/panels/ContractsList'));
 const ContractDetail = lazy(() => import('./pages/admin/panels/ContractDetail'));
 const ContractCreate = lazy(() => import('./pages/admin/panels/ContractCreate'));
 const BooksPanel = lazy(() => import('./pages/admin/panels/BooksPanel'));
+const TagsPanel = lazy(() => import('./pages/admin/panels/TagsPanel'));
 const PosManagementPanel = lazy(() => import('./pages/admin/panels/PosManagementPanel'));
 const PaymentsPanel = lazy(() => import('./pages/admin/panels/PaymentsPanel'));
 const AccountingPanel = lazy(() => import('./pages/admin/panels/AccountingPanel'));
@@ -64,6 +69,9 @@ const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboa
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
 const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'));
+const CustomersPanel = lazy(() => import('./pages/admin/panels/CustomersPanel'));
+const AuthorsPanel = lazy(() => import('./pages/admin/panels/AuthorsPanel'));
+const AdminNewsPanel = lazy(() => import('./pages/admin/panels/NewsPanel'));
 
 // Portail auteur (workflow éditorial)
 const AuthorLoginPage = lazy(() => import('./pages/author/AuthorLoginPage'));
@@ -72,6 +80,9 @@ const AuthorForgotPasswordPage = lazy(() => import('./pages/author/AuthorForgotP
 const AuthorSubmitPage = lazy(() => import('./pages/author/AuthorSubmitPage'));
 const AuthorDashboard = lazy(() => import('./pages/author/AuthorDashboard'));
 const AuthorManuscriptDetail = lazy(() => import('./pages/author/AuthorManuscriptDetail'));
+const AuthorNotificationsPage = lazy(() => import('./pages/author/AuthorNotificationsPage'));
+const AuthorPreferencesPage = lazy(() => import('./pages/author/AuthorPreferencesPage'));
+const AuthorActivatePage = lazy(() => import('./pages/author/AuthorActivatePage'));
 
 import { SiteConfigProvider } from './hooks/useSiteConfig.jsx';
 import ProtectedRoute from './components/auth/ProtectedRoute';
@@ -100,6 +111,7 @@ export default function App() {
           <Route path="/admin" element={<AdminDashboard />}>
             <Route index element={<AdminStatsPanel />} />
             <Route path="books" element={<BooksPanel />} />
+            <Route path="tags" element={<TagsPanel />} />
             <Route path="pos" element={<PosManagementPanel />} />
             <Route path="config" element={<AdminConfigPanel />} />
             <Route path="slides" element={<AdminSlidesPanel />} />
@@ -131,6 +143,9 @@ export default function App() {
             <Route path="contracts/list" element={<ContractsList />} />
             <Route path="contracts/new" element={<ContractCreate />} />
             <Route path="contracts/:id" element={<ContractDetail />} />
+            <Route path="customers" element={<CustomersPanel />} />
+            <Route path="authors" element={<AuthorsPanel />} />
+            <Route path="news" element={<AdminNewsPanel />} />
           </Route>
 
           {/* POS — fullscreen, hors Layout */}
@@ -143,15 +158,22 @@ export default function App() {
             <Route path="auteur/connexion" element={<AuthorLoginPage />} />
             <Route path="auteur/inscription" element={<AuthorRegisterPage />} />
             <Route path="auteur/mot-de-passe-oublie" element={<AuthorForgotPasswordPage />} />
+            <Route path="auteur/activer" element={<AuthorActivatePage />} />
             <Route path="auteur/dashboard" element={<AuthorProtectedRoute><AuthorDashboard /></AuthorProtectedRoute>} />
             <Route path="auteur/soumettre" element={<AuthorProtectedRoute><AuthorSubmitPage /></AuthorProtectedRoute>} />
             <Route path="auteur/manuscrits/:id" element={<AuthorProtectedRoute><AuthorManuscriptDetail /></AuthorProtectedRoute>} />
+            <Route path="auteur/notifications" element={<AuthorProtectedRoute><AuthorNotificationsPage /></AuthorProtectedRoute>} />
+            <Route path="auteur/preferences" element={<AuthorProtectedRoute><AuthorPreferencesPage /></AuthorProtectedRoute>} />
             <Route path="catalogue" element={<CatalogPage />} />
             <Route path="se-faire-editer" element={<SeFaireEditerPage />} />
             <Route path="evenements" element={<EvenementsPage />} />
+            <Route path="actualites" element={<ActualitesPage />} />
+            <Route path="actualites/:slug" element={<ActualiteDetailPage />} />
             <Route path="produit/:id" element={<ProductPage />} />
             <Route path="panier" element={<CartPage />} />
             <Route path="commande" element={<CheckoutPage />} />
+            <Route path="commande/succes" element={<CheckoutSuccessPage />} />
+            <Route path="commande/echec" element={<CheckoutFailurePage />} />
             <Route path="connexion" element={<LoginPage />} />
             <Route path="inscription" element={<RegisterPage />} />
             <Route path="mot-de-passe-oublie" element={<ForgotPasswordPage />} />
