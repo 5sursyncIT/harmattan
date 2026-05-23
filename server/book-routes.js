@@ -53,14 +53,6 @@ const excludedListSql = `(${excludedCategoryPlaceholders()})`;
 export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeBody, cache }) {
   const router = Router();
 
-  // Libraire = lecture seule sur les livres (crée/édite via admin)
-  function blockLibrarianWrite(req, res, next) {
-    if (req.admin?.role === 'librarian') {
-      return res.status(403).json({ error: 'Accès en lecture seule pour votre profil' });
-    }
-    next();
-  }
-
   async function fetchAllowedGenreIds() {
     const [rows] = await dolibarrPool.query(
       `SELECT rowid FROM llx_categorie WHERE type = 0 AND label NOT IN ${excludedListSql}`,
@@ -364,7 +356,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
   // ══════════════════════════════════════════════════════
   // POST /api/admin/books — Création avec rollback
   // ══════════════════════════════════════════════════════
-  router.post('/', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+  router.post('/', auth, csrfProtection, async (req, res) => {
     let newProductId = null;
     try {
       const allowedGenreIds = await fetchAllowedGenreIds();
@@ -429,7 +421,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
   // ══════════════════════════════════════════════════════
   // PUT /api/admin/books/:id — Édition avec diff catégories
   // ══════════════════════════════════════════════════════
-  router.put('/:id', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+  router.put('/:id', auth, csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (!id) return res.status(400).json({ error: 'ID invalide' });
@@ -496,7 +488,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
   // ══════════════════════════════════════════════════════
   // DELETE /api/admin/books/:id — Suppression (soft par défaut)
   // ══════════════════════════════════════════════════════
-  router.delete('/:id', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+  router.delete('/:id', auth, csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (!id) return res.status(400).json({ error: 'ID invalide' });
@@ -521,7 +513,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
   // ══════════════════════════════════════════════════════
   // POST /api/admin/books/:id/cover — Upload sécurisé
   // ══════════════════════════════════════════════════════
-  router.post('/:id/cover', auth, blockLibrarianWrite, csrfProtection, coverUpload.single('cover'), async (req, res) => {
+  router.post('/:id/cover', auth, csrfProtection, coverUpload.single('cover'), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (!id) return res.status(400).json({ error: 'ID invalide' });

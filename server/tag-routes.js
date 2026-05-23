@@ -189,7 +189,7 @@ export function createTagRouter({ db, auth, csrfProtection, dolibarrPool, enrich
    * body = [{ slug: 'promotion', discount_pct: 20 }, { slug: 'nouveaute' }]
    * Calcule le diff add/remove et applique atomiquement.
    */
-  router.put('/admin/books/:id/tags', auth, blockLibrarianWrite, csrfProtection, (req, res) => {
+  router.put('/admin/books/:id/tags', auth, csrfProtection, (req, res) => {
     try {
       const productId = parseInt(req.params.id);
       if (!productId) return res.status(400).json({ error: 'ID invalide' });

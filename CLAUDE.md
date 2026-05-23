@@ -113,6 +113,21 @@ In-memory cache (`server/sync.js` SimpleCache) with TTL. Cron jobs:
 
 **Admin:** `/admin` (login), `/admin/*` (stats, config, slides, faq, contacts, manuscripts, newsletter, books, pos, contracts, users, activity-log, profile)
 
+## Admin Roles (RBAC)
+
+Whitelist par rôle dans `server/admin-routes.js` (`ROLE_ALLOWED_PATHS`). `super_admin` et `admin` ont accès complet.
+
+| Rôle | Périmètre |
+|------|-----------|
+| `super_admin` | Tout + gestion utilisateurs |
+| `admin` | Tout sauf gestion utilisateurs |
+| `editor` | Livres, manuscrits, contrats, bannières, tags de curation, stats |
+| `support` | Messages, FAQ, newsletter, clients, stats |
+| `librarian` | **Livres CRUD complet** (création, édition, suppression, upload couverture, assignation des tags de curation aux livres) + Stock en lecture seule. Création/édition/suppression des tags globaux reste réservée aux éditeurs/admins (middleware `blockLibrarianWrite` conservé sur POST/PUT/DELETE `/admin/tags`). |
+| `comptable` | Comptabilité (lecture + écriture), paiements web, stats |
+| `vendeur` | POS uniquement (via PIN dédié sur `/pos/connexion`) |
+| `evaluateur` / `correcteur` / `infographiste` / `imprimeur` | Workflow éditorial — accès limité à leur étape |
+
 ## Preorder System
 
 - Preorders for unreleased books with discount pricing and estimated release dates
