@@ -27,11 +27,9 @@ function slugify(str) {
  * @param {Function} deps.auth — admin auth middleware
  * @param {Function} deps.csrfProtection — CSRF middleware
  * @param {Pool} deps.dolibarrPool — MariaDB pool pour enrichir les produits
- * @param {Function} deps.enrichProduct — enrichisseur produit Dolibarr
- * @param {Object} deps.dolibarrApi — axios client Dolibarr
  * @param {Object} deps.cache — SimpleCache
  */
-export function createTagRouter({ db, auth, csrfProtection, dolibarrPool, enrichProduct, dolibarrApi, cache }) {
+export function createTagRouter({ db, auth, csrfProtection, dolibarrPool, cache }) {
   const router = Router();
 
   function blockLibrarianWrite(req, res, next) {

@@ -43,7 +43,7 @@ export default function AuthorNotificationsPage() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { load();   }, []);
 
   const filtered = useMemo(() => {
     if (filter === 'unread') return items.filter((n) => !n.is_read);

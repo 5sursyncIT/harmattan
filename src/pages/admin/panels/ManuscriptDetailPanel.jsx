@@ -37,7 +37,7 @@ export default function ManuscriptDetailPanel() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  useEffect(() => { load();   }, [id]);
 
   const openAssign = (col) => {
     setAssignModal(col);

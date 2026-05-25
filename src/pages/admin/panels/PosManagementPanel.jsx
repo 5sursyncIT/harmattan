@@ -45,7 +45,7 @@ export default function PosManagementPanel() {
 function DevicesTab() {
   const [devices, setDevices] = useState([]);
   const [codes, setCodes] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   const [newCode, setNewCode] = useState(null);
   const [deviceName, setDeviceName] = useState('');
 
@@ -201,7 +201,7 @@ function DevicesTab() {
 
 function StaffTab() {
   const [staff, setStaff] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', pin: '', role: 'cashier' });
   const [editingId, setEditingId] = useState(null);

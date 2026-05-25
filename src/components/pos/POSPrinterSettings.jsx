@@ -27,7 +27,7 @@ export default function POSPrinterSettings({ onClose }) {
     }
   };
 
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { refresh();   }, []);
 
   const handleTest = async () => {
     setTesting(true);

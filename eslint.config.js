@@ -24,6 +24,8 @@ export default defineConfig([
     },
     rules: {
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // Pattern de chargement standard (useEffect + setLoading) toléré : downgrade en warning.
+      'react-hooks/set-state-in-effect': 'warn',
     },
   },
   {

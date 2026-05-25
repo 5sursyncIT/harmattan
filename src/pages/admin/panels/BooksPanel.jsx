@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { FiPlus, FiSearch, FiBook, FiAlertCircle, FiImage } from 'react-icons/fi';
 import { listBooks, getBook, getBookQualityStats } from '../../../api/admin';
 import { getProductImageUrl } from '../../../api/dolibarr';

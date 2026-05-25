@@ -421,6 +421,7 @@ export default function ActivityLogPanel() {
   );
 }
 
+// eslint-disable-next-line no-unused-vars
 function StatCard({ icon: Icon, label, value, color }) {
   return (
     <div className="activity-stat-card">

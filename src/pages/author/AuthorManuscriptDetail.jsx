@@ -41,7 +41,7 @@ export default function AuthorManuscriptDetail() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  useEffect(() => { load();   }, [id]);
 
   const handleValidate = async () => {
     setActionLoading(true);
