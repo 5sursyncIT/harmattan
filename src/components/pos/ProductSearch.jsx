@@ -4,6 +4,23 @@ import usePosCartStore from '../../store/posCartStore';
 import { FiSearch } from 'react-icons/fi';
 import './ProductSearch.css';
 
+// Quand le scanner code-barre est configuré en QWERTY mais l'OS en FR AZERTY,
+// les touches numériques (sans Shift) sortent en symboles : 1→&, 2→é, 3→", 4→', 5→(,
+// 6→-, 7→è, 8→_, 9→ç, 0→à. Cette fonction reconvertit en chiffres si la chaîne
+// ressemble à un faux barcode AZERTY (pas de chiffres ni lettres déjà présents).
+const AZERTY_TO_DIGIT = {
+  '&': '1', 'é': '2', '"': '3', "'": '4', '(': '5',
+  '-': '6', 'è': '7', '_': '8', 'ç': '9', 'à': '0',
+};
+function azertyToDigits(s) {
+  if (!s || s.length < 6) return s;
+  if (/[0-9a-zA-Z]/.test(s)) return s; // contient chiffres ou lettres → saisie normale
+  const chars = [...s];
+  const mapped = chars.map((c) => AZERTY_TO_DIGIT[c]);
+  if (mapped.some((m) => m === undefined)) return s; // au moins 1 char non-mappé → abandon
+  return mapped.join('');
+}
+
 export default function ProductSearch() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
@@ -55,12 +72,14 @@ export default function ProductSearch() {
 
       if (e.key === 'Enter' && barcodeBuffer.current.length >= 6) {
         e.preventDefault();
-        handleBarcodeScan(barcodeBuffer.current);
+        // Translate scanner-AZERTY garbage → digits si applicable
+        handleBarcodeScan(azertyToDigits(barcodeBuffer.current));
         barcodeBuffer.current = '';
         return;
       }
 
-      if (/^[0-9a-zA-Z-]$/.test(e.key)) {
+      // Accepte chiffres/lettres normaux + symboles AZERTY-sans-Shift des chiffres
+      if (/^[0-9a-zA-Z\-&é"'(_èçà]$/.test(e.key)) {
         barcodeBuffer.current += e.key;
         clearTimeout(barcodeTimer.current);
         barcodeTimer.current = setTimeout(() => {
@@ -74,7 +93,8 @@ export default function ProductSearch() {
   }, [handleBarcodeScan]);
 
   const handleChange = (e) => {
-    const val = e.target.value;
+    // Si l'input ressemble à une lecture scanner AZERTY (ex: "çè_é&'"àà..."), on retraduit
+    const val = azertyToDigits(e.target.value);
     setQuery(val);
     clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => doSearch(val), 300);
@@ -107,12 +127,6 @@ export default function ProductSearch() {
           </div>
         )}
         {loading && <div className="pos-search-spinner" />}
-      </div>
-
-      <div className="pos-search-hints">
-        <span className="pos-search-hint">Recherche titre / ISBN</span>
-        <span className="pos-search-hint">Scan code-barres</span>
-        <span className="pos-search-hint">Ajout instantané</span>
       </div>
 
       {showResults && results.length > 0 && (

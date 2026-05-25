@@ -32,19 +32,12 @@ api.interceptors.request.use(async (config) => {
       config.headers['X-CSRF-Token'] = token;
     }
   }
-  // Attach POS device token + session token (for /api/pos/* routes)
+  // Attach POS device token (for /api/pos/* routes). La session POS est portée
+  // par un cookie HttpOnly envoyé automatiquement — plus de header de session.
   if (config.url?.startsWith('/pos/')) {
     const deviceToken = localStorage.getItem('pos-device-token');
     if (deviceToken) {
       config.headers['X-POS-Device'] = deviceToken;
-    }
-    try {
-      const stored = JSON.parse(localStorage.getItem('senharmattan-pos-auth') || '{}');
-      if (stored.state?.token) {
-        config.headers['X-POS-Token'] = stored.state.token;
-      }
-    } catch (err) {
-      console.warn('POS store read error:', err);
     }
   }
   return config;
@@ -106,7 +99,7 @@ api.interceptors.response.use(
       try {
         const store = JSON.parse(localStorage.getItem('senharmattan-pos-auth') || '{}');
         if (store.state?.isAuthenticated) {
-          localStorage.setItem('senharmattan-pos-auth', JSON.stringify({ state: { staff: null, token: null, isAuthenticated: false }, version: 0 }));
+          localStorage.setItem('senharmattan-pos-auth', JSON.stringify({ state: { staff: null, isAuthenticated: false }, version: 0 }));
           if (window.location.pathname.startsWith('/pos') && !window.location.pathname.includes('connexion')) {
             window.location.href = '/pos/connexion';
           }
@@ -189,6 +182,8 @@ export const changePassword = (data) => api.put('/auth/password', data);
 export const forgotPassword = (email) => api.post('/auth/forgot-password', { email });
 
 export const resetPassword = (data) => api.post('/auth/reset-password', data);
+
+export const logoutCustomer = () => api.post('/auth/logout');
 
 // Customer orders & invoices
 export const getCustomerOrders = (customerId) => api.get(`/customers/${customerId}/orders`);

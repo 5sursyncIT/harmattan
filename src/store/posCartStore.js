@@ -2,13 +2,48 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 function calcLineTotal(price, qty, discount) {
-  return qty * price * (1 - (discount || 0) / 100);
+  // Le franc CFA (XOF) n'a pas de décimales — arrondir chaque total de ligne à l'entier.
+  return Math.round(qty * price * (1 - (discount || 0) / 100));
+}
+
+// Identifiant unique de vente — sert de clé d'idempotence côté serveur.
+// crypto.getRandomValues fonctionne aussi en contexte non sécurisé (HTTP).
+function genSaleId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    try { return crypto.randomUUID(); } catch { /* fallback ci-dessous */ }
+  }
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 const usePosCartStore = create(persist((set, get) => ({
   items: [],
   customer: null,
   held: [],
+  saleId: null,
+  selectedItemId: null,
+
+  setSelectedItem: (id) => set({ selectedItemId: id }),
+
+  getSelectedItem: () => {
+    const id = get().selectedItemId;
+    if (!id) return null;
+    return get().items.find((i) => i.product_id === id) || null;
+  },
+
+  setPrice: (productId, price) => {
+    const p = Math.max(0, parseInt(price, 10) || 0);
+    set({
+      items: get().items.map((i) =>
+        i.product_id === productId
+          ? { ...i, price_ttc: p, line_total: calcLineTotal(p, i.qty, i.discount) }
+          : i
+      ),
+    });
+  },
 
   addItem: (product) => {
     const items = get().items;
@@ -32,16 +67,21 @@ const usePosCartStore = create(persist((set, get) => ({
             price_ttc: parseFloat(product.price_ttc),
             qty: 1,
             discount: 0,
-            line_total: parseFloat(product.price_ttc),
+            line_total: calcLineTotal(parseFloat(product.price_ttc), 1, 0),
             stock: product.stock_reel,
+            is_free: product.is_free === true,
           },
         ],
+        saleId: get().saleId || genSaleId(),
       });
     }
   },
 
   removeItem: (productId) => {
-    set({ items: get().items.filter((i) => i.product_id !== productId) });
+    set({
+      items: get().items.filter((i) => i.product_id !== productId),
+      selectedItemId: get().selectedItemId === productId ? null : get().selectedItemId,
+    });
   },
 
   updateQty: (productId, qty) => {
@@ -71,15 +111,17 @@ const usePosCartStore = create(persist((set, get) => ({
 
   setCustomer: (customer) => set({ customer }),
 
-  clearTicket: () => set({ items: [], customer: null }),
+  clearTicket: () => set({ items: [], customer: null, saleId: null, selectedItemId: null }),
 
   holdTicket: () => {
-    const { items, customer, held } = get();
+    const { items, customer, held, saleId } = get();
     if (items.length === 0) return;
     set({
-      held: [...held, { items, customer, timestamp: Date.now() }],
+      held: [...held, { items, customer, saleId, timestamp: Date.now() }],
       items: [],
       customer: null,
+      saleId: null,
+      selectedItemId: null,
     });
   },
 
@@ -87,7 +129,15 @@ const usePosCartStore = create(persist((set, get) => ({
     const held = [...get().held];
     if (index < 0 || index >= held.length) return;
     const ticket = held.splice(index, 1)[0];
-    set({ items: ticket.items, customer: ticket.customer, held });
+    set({ items: ticket.items, customer: ticket.customer, saleId: ticket.saleId || null, held });
+  },
+
+  // Garantit un identifiant de vente stable (pour les paniers déjà persistés
+  // avant l'introduction de l'idempotence).
+  ensureSaleId: () => {
+    let id = get().saleId;
+    if (!id) { id = genSaleId(); set({ saleId: id }); }
+    return id;
   },
 
   getTotal: () => get().items.reduce((sum, i) => sum + i.line_total, 0),

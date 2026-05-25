@@ -282,8 +282,13 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
 
   router.get('/products', auth, async (req, res) => {
     try {
-      const { q, abc, coverage_max, sort = 'coverage', order = 'ASC', page = 1, limit = 50 } = req.query;
-      const products = await calculateCoverageAndRotation(dolibarrPool, 500);
+      const { q, abc, coverage_max, sort = 'coverage', order = 'ASC', page = 1, limit = 50, scan_limit } = req.query;
+      // scan_limit borne le top-N produits chargés depuis Dolibarr (triés par ventes 30j).
+      // Default 2000 couvre la plupart des catalogues actifs ; max 10000 pour éviter
+      // de saturer Dolibarr sur un fond très large. Le filtrage q/abc se fait ensuite
+      // en JS sur les résultats. Pour chercher un produit hors top-ventes, augmenter scan_limit.
+      const scanN = Math.min(10000, Math.max(100, parseInt(scan_limit) || 2000));
+      const products = await calculateCoverageAndRotation(dolibarrPool, scanN);
 
       // Enrichir avec politiques locales
       const policies = db.prepare('SELECT * FROM stock_policies').all();
@@ -532,7 +537,7 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
 // SUPPLIERS ROUTER
 // ═══════════════════════════════════════════════════════════
 
-export function createSuppliersRouter({ db, auth, csrfProtection }) {
+export function createSuppliersRouter({ db, dolibarrPool, auth, csrfProtection }) {
   const router = Router();
 
   router.get('/', auth, (req, res) => {
@@ -540,17 +545,34 @@ export function createSuppliersRouter({ db, auth, csrfProtection }) {
     res.json(suppliers);
   });
 
-  router.get('/:id', auth, (req, res) => {
+  router.get('/:id', auth, async (req, res) => {
     const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id);
     if (!supplier) return res.status(404).json({ error: 'Fournisseur introuvable' });
-    const products = db.prepare(
-      `SELECT sp.*, p.ref, p.label, p.stock, p.price_ttc
-       FROM supplier_products sp
-       LEFT JOIN (SELECT rowid AS id, ref, label, stock, price_ttc FROM llx_product) p ON p.id = sp.product_id
-       WHERE sp.supplier_id = ?`
+    // Liens fournisseur ↔ produit en local (SQLite).
+    const links = db.prepare(
+      `SELECT * FROM supplier_products WHERE supplier_id = ?`
     ).all(req.params.id);
-    // Note: the LEFT JOIN above won't work across SQLite/MySQL boundary.
-    // We'll enrich with MySQL data in a future iteration.
+
+    // Enrichissement depuis Dolibarr (MySQL) — requête séparée car
+    // better-sqlite3 ne peut pas joindre une table externe.
+    let products = links;
+    if (links.length > 0) {
+      try {
+        const ids = links.map((l) => l.product_id);
+        const placeholders = ids.map(() => '?').join(',');
+        const [rows] = await dolibarrPool.query(
+          `SELECT rowid AS id, ref, label, stock, price_ttc FROM llx_product WHERE rowid IN (${placeholders})`,
+          ids,
+        );
+        const prodMap = new Map(rows.map((r) => [r.id, r]));
+        products = links.map((l) => {
+          const p = prodMap.get(l.product_id) || {};
+          return { ...l, ref: p.ref || null, label: p.label || null, stock: p.stock ?? null, price_ttc: p.price_ttc ?? null };
+        });
+      } catch (err) {
+        console.warn('[SUPPLIERS] Enrichissement Dolibarr échoué:', err.message);
+      }
+    }
     res.json({ ...supplier, products });
   });
 

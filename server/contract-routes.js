@@ -3,6 +3,7 @@ import 'dotenv/config';
 import axios from 'axios';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import { transition as wfTransition } from './manuscript-workflow.js';
 
 // ─── Shared admin Dolibarr API client ────────────────────
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -143,7 +144,11 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   function auth(req, res, next) {
     const session = req.cookies?.admin_session;
     if (!session) return res.status(401).json({ error: 'Non authentifié' });
-    const admin = db.prepare('SELECT * FROM admin_users WHERE session_token = ?').get(session);
+    // Le token brut du cookie est haché avant lookup — la base stocke sha256(token).
+    const tokenHash = crypto.createHash('sha256').update(String(session)).digest('hex');
+    const admin = db.prepare(
+      "SELECT * FROM admin_users WHERE session_token = ? AND (session_expires_at IS NULL OR session_expires_at > datetime('now'))"
+    ).get(tokenHash);
     if (!admin) return res.status(401).json({ error: 'Session invalide' });
     if (!CONTRACT_ALLOWED_ROLES.includes(admin.role || 'admin')) {
       return res.status(403).json({ error: 'Accès non autorisé pour votre profil' });
@@ -538,7 +543,11 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'create_contract', `Contrat créé pour "${data.book_title}" (${TYPE_LABELS[data.contract_type]})`);
 
-      // Store manuscript link if provided
+      // Store manuscript link if provided + propage l'avancement workflow.
+      // Sans cette propagation, un contrat créé depuis l'écran "Contrats" restait
+      // visible en table annexe (contract_manuscript_links) mais le manuscrit
+      // restait bloqué dans son stage précédent (typiquement evaluation_done),
+      // alors que le hook auto fait bien la transition vers contract_pending.
       if (data.manuscript_id) {
         try {
           db.exec(`CREATE TABLE IF NOT EXISTS contract_manuscript_links (
@@ -546,6 +555,24 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
             PRIMARY KEY (contract_id, manuscript_id)
           )`);
           db.prepare('INSERT OR IGNORE INTO contract_manuscript_links (contract_id, manuscript_id) VALUES (?, ?)').run(contractId, data.manuscript_id);
+
+          // Lie le contract_id sur le manuscrit (idempotent), même si la transition
+          // ci-dessous échoue (stage incompatible) on garde au moins la trace.
+          db.prepare('UPDATE manuscripts SET contract_id = ? WHERE id = ?')
+            .run(contractId, data.manuscript_id);
+
+          // Avance vers contract_pending si la transition est autorisée depuis le
+          // stage courant. La fonction est idempotente (no-op si déjà au stage cible)
+          // et lève si la transition n'est pas légale — dans ce cas on log et on
+          // continue : le contrat a bien été créé, c'est juste l'avancement qui n'est pas applicable.
+          try {
+            wfTransition(db, parseInt(data.manuscript_id), 'contract_pending',
+              { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
+              { note: `Contrat manuel #${contractId} créé (${TYPE_LABELS[data.contract_type] || data.contract_type})` }
+            );
+          } catch (wfErr) {
+            console.warn('[CONTRACTS] Transition manuscrit ignorée:', wfErr.message);
+          }
         } catch (linkErr) {
           console.warn('Contract manuscript link warning:', linkErr.message);
         }

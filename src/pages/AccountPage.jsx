@@ -5,7 +5,7 @@ import {
   FiMail, FiPhone, FiMapPin, FiEdit2, FiSave, FiX, FiEye, FiDownload
 } from 'react-icons/fi';
 import useAuthStore from '../store/authStore';
-import { updateProfile, changePassword, getCustomerOrders, getCustomerInvoices, getInvoicePdfUrl } from '../api/dolibarr';
+import { updateProfile, changePassword, getCustomerOrders, getCustomerInvoices, getInvoicePdfUrl, logoutCustomer } from '../api/dolibarr';
 import { formatPrice } from '../utils/formatters';
 import toast from 'react-hot-toast';
 import './AccountPage.css';
@@ -36,7 +36,8 @@ export default function AccountPage() {
     return null;
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try { await logoutCustomer(); } catch (e) { void e; }
     logout();
     toast.success('Déconnexion réussie');
     navigate('/');

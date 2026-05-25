@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { FiShoppingCart, FiMinus, FiPlus, FiArrowLeft, FiMaximize2, FiMinimize2 } from 'react-icons/fi';
 import { createPreorder, getProduct, getProductImageUrl } from '../api/dolibarr';
-import { formatPrice, stripHtml } from '../utils/formatters';
+import { formatPrice, stripHtml, slugify } from '../utils/formatters';
 import useCartStore from '../store/cartStore';
 import useAuthStore from '../store/authStore';
 import useSiteConfig from '../hooks/useSiteConfig.jsx';
@@ -320,7 +320,7 @@ export default function ProductPage() {
 
             {author && (
               <p className="product-author">
-                Par <Link to={`/catalogue?author=${encodeURIComponent(author)}`} className="product-author-link">{author}</Link>
+                Par <Link to={`/auteur/${slugify(author)}`} className="product-author-link">{author}</Link>
               </p>
             )}
 

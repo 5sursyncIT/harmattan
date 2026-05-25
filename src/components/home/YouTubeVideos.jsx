@@ -163,20 +163,24 @@ export default function YouTubeVideos() {
  *   1. Tente youtube-nocookie.com (privacy-enhanced, généralement plus permissif)
  *   2. Si l'iframe ne se charge pas dans 4s OU émet onError, on bascule sur www.youtube.com
  *   3. Si toujours en échec, on affiche un lien direct "Ouvrir sur YouTube"
+ *
+ * YouTube renvoie l'erreur 153 quand le lecteur embed ne reçoit pas de Referer.
+ * L'attribut referrerPolicy ci-dessous laisse passer l'origine du site sans
+ * exposer l'URL complète de la page.
  */
 function YouTubePlayerModal({ videoId, onClose }) {
   const [domain, setDomain] = useState('youtube-nocookie.com');
   const [errored, setErrored] = useState(false);
 
-  // Origin sans le port pour youtube embed (certaines configurations le requièrent)
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  // Ne pas passer `origin=` : ce paramètre n'est utile qu'avec l'IFrame Player
+  // API (enablejsapi=1 + handler postMessage). Sans handler côté parent, YouTube
+  // récents renvoient "Erreur 153 - Erreur de configuration du lecteur vidéo".
   const params = new URLSearchParams({
     autoplay: '1',
     rel: '0',
     modestbranding: '1',
     color: 'white',
     playsinline: '1',
-    ...(origin ? { origin } : {}),
   });
   const src = `https://www.${domain}/embed/${videoId}?${params.toString()}`;
   const fallbackUrl = `https://www.youtube.com/watch?v=${videoId}`;
@@ -217,7 +221,7 @@ function YouTubePlayerModal({ videoId, onClose }) {
             title="Lecteur vidéo YouTube"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
-            loading="lazy"
+            referrerPolicy="strict-origin-when-cross-origin"
             onError={() => {
               if (domain === 'youtube-nocookie.com') {
                 setDomain('youtube.com');

@@ -360,7 +360,7 @@ function ManuscriptForm() {
       const fd = new FormData();
       Object.entries(form).forEach(([key, value]) => fd.append(key, value));
       if (file) fd.append('file', file);
-      await api.post('/admin/manuscripts', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      await api.post('/manuscripts/submit', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
       setSent(true);
       setForm(getInitialForm());
       setFile(null);

@@ -9,6 +9,7 @@
  */
 
 import { Router } from 'express';
+import { runTransfer, getTransferSummary } from './accounting-engine.js';
 
 // ─── LABELS FRANÇAIS ─────────────────────────────────────────
 const PAYMENT_METHOD_LABELS = {
@@ -38,7 +39,11 @@ function normalizeIsbn(isbn) {
 }
 
 function escCsv(v) {
-  const s = String(v ?? '');
+  let s = String(v ?? '');
+  // Neutralisation de l'injection de formules CSV : une cellule commençant par
+  // =, +, -, @, tabulation ou retour chariot peut être interprétée comme une
+  // formule par Excel/LibreOffice. On la préfixe d'une apostrophe.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -67,9 +72,22 @@ function parseDateRange(req) {
 
 // ─── ROUTER FACTORY ──────────────────────────────────────────
 
-export function createAccountingRouter({ db, dolibarrPool, cache, auth }) {
+export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProtection }) {
   const router = Router();
   const CACHE_TTL = 60; // 1 minute pour les journaux
+  const noCsrf = csrfProtection || ((req, res, next) => next());
+
+  // Invalide les caches dépendant des écritures
+  function invalidateAccountingCache() {
+    cache.set('accounting:dashboard', null, 1);
+    cache.set('accounting:treasury', null, 1);
+  }
+
+  // Année comptable courante par défaut
+  function currentYearRange() {
+    const y = new Date().getFullYear();
+    return { date_from: `${y}-01-01`, date_to: `${y}-12-31` };
+  }
 
   // ═══════════════════════════════════════════════════════════
   // DASHBOARD COMPTABLE
@@ -1049,6 +1067,75 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth }) {
         ], odRows);
         filename = `royalties-OD-${d_from}-${d_to}.csv`;
       }
+      else if (journal === 'fec') {
+        // Fichier des Écritures Comptables — format normalisé expert-comptable
+        const [rows] = await dolibarrPool.query(
+          `SELECT piece_num, doc_date, doc_ref, code_journal, journal_label,
+                  numero_compte, label_compte, subledger_account, subledger_label,
+                  label_operation, debit, credit, lettering_code, date_lettering,
+                  date_validated
+           FROM llx_accounting_bookkeeping
+           WHERE entity = 1 AND doc_date BETWEEN ? AND ?
+           ORDER BY piece_num, rowid`,
+          [date_from, date_to]
+        );
+        const fecDate = (d) => d ? (d instanceof Date ? d : new Date(d)).toISOString().split('T')[0].replace(/-/g, '') : '';
+        const fecAmt = (v) => String(Math.round(Number(v || 0) * 100) / 100).replace('.', ',');
+        const header = ['JournalCode', 'JournalLib', 'EcritureNum', 'EcritureDate', 'CompteNum',
+          'CompteLib', 'CompAuxNum', 'CompAuxLib', 'PieceRef', 'PieceDate', 'EcritureLib',
+          'Debit', 'Credit', 'EcritureLet', 'DateLet', 'ValidDate', 'Montantdevise', 'Idevise'];
+        const lines = rows.map(r => [
+          r.code_journal || 'OD', r.journal_label || '', r.piece_num, fecDate(r.doc_date),
+          r.numero_compte, r.label_compte || '', r.subledger_account || '', r.subledger_label || '',
+          r.doc_ref || '', fecDate(r.doc_date), (r.label_operation || '').replace(/[\t\n\r]/g, ' '),
+          fecAmt(r.debit), fecAmt(r.credit), r.lettering_code || '', fecDate(r.date_lettering),
+          fecDate(r.date_validated), '', '',
+        ].join('\t'));
+        csv = '﻿' + header.join('\t') + '\n' + lines.join('\n');
+        filename = `FEC-${date_from}-${date_to}.txt`;
+      }
+      else if (journal === 'ledger') {
+        const [rows] = await dolibarrPool.query(
+          `SELECT doc_date, piece_num, code_journal, numero_compte, label_compte,
+                  subledger_label, doc_ref, label_operation, debit, credit
+           FROM llx_accounting_bookkeeping
+           WHERE entity = 1 AND doc_date BETWEEN ? AND ?
+           ORDER BY numero_compte, doc_date, piece_num`,
+          [date_from, date_to]
+        );
+        csv = toCsv([
+          { label: 'Compte', key: 'numero_compte' },
+          { label: 'Libellé compte', key: 'label_compte' },
+          { label: 'Date', get: r => r.doc_date?.toISOString?.().split('T')[0] || r.doc_date },
+          { label: 'Pièce', key: 'piece_num' },
+          { label: 'Journal', key: 'code_journal' },
+          { label: 'Référence', key: 'doc_ref' },
+          { label: 'Libellé', key: 'label_operation' },
+          { label: 'Tiers', key: 'subledger_label' },
+          { label: 'Débit', get: r => Math.round(Number(r.debit)) },
+          { label: 'Crédit', get: r => Math.round(Number(r.credit)) },
+        ], rows);
+        filename = `grand-livre-${date_from}-${date_to}.csv`;
+      }
+      else if (journal === 'balance') {
+        const [rows] = await dolibarrPool.query(
+          `SELECT numero_compte, label_compte,
+                  COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit
+           FROM llx_accounting_bookkeeping
+           WHERE entity = 1 AND doc_date BETWEEN ? AND ?
+           GROUP BY numero_compte ORDER BY numero_compte`,
+          [date_from, date_to]
+        );
+        csv = toCsv([
+          { label: 'Compte', key: 'numero_compte' },
+          { label: 'Libellé', key: 'label_compte' },
+          { label: 'Total débit', get: r => Math.round(Number(r.debit)) },
+          { label: 'Total crédit', get: r => Math.round(Number(r.credit)) },
+          { label: 'Solde débiteur', get: r => Math.max(0, Math.round(Number(r.debit) - Number(r.credit))) },
+          { label: 'Solde créditeur', get: r => Math.max(0, Math.round(Number(r.credit) - Number(r.debit))) },
+        ], rows);
+        filename = `balance-${date_from}-${date_to}.csv`;
+      }
       else {
         return res.status(400).json({ error: 'Journal inconnu' });
       }
@@ -1065,6 +1152,619 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth }) {
     } catch (err) {
       console.error('[ACCOUNTING] Export error:', err.message);
       res.status(500).json({ error: 'Erreur export' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // PLAN COMPTABLE (SYSCOHADA)
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/chart-of-accounts', auth, async (req, res) => {
+    try {
+      const { search, account_class } = req.query;
+      let where = 'WHERE entity = 1 AND active = 1';
+      const params = [];
+      if (account_class) { where += ' AND LEFT(account_number, 1) = ?'; params.push(String(account_class)); }
+      if (search) {
+        where += ' AND (account_number LIKE ? OR label LIKE ?)';
+        const s = `%${String(search).replace(/[%_]/g, '')}%`;
+        params.push(s, s);
+      }
+      const [rows] = await dolibarrPool.query(
+        `SELECT account_number, label, LEFT(account_number, 1) AS account_class
+         FROM llx_accounting_account ${where}
+         ORDER BY account_number LIMIT 2000`,
+        params
+      );
+      const [classes] = await dolibarrPool.query(
+        `SELECT LEFT(account_number, 1) AS c, COUNT(*) AS nb
+         FROM llx_accounting_account WHERE entity = 1 AND active = 1
+         GROUP BY c ORDER BY c`
+      );
+      const CLASS_NAMES = {
+        1: 'Comptes de ressources durables', 2: 'Comptes d\'actif immobilisé',
+        3: 'Comptes de stocks', 4: 'Comptes de tiers', 5: 'Comptes de trésorerie',
+        6: 'Comptes de charges', 7: 'Comptes de produits', 8: 'Comptes de résultats',
+      };
+      res.json({
+        accounts: rows.map(r => ({ number: r.account_number, label: r.label, class: r.account_class })),
+        classes: classes.map(c => ({ id: c.c, name: CLASS_NAMES[c.c] || `Classe ${c.c}`, count: Number(c.nb) })),
+      });
+    } catch (err) {
+      console.error('[ACCOUNTING] Chart of accounts error:', err.message);
+      res.status(500).json({ error: 'Erreur plan comptable' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // TRANSFERT EN COMPTABILITÉ
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/transfer/status', auth, async (req, res) => {
+    try {
+      res.json(await getTransferSummary(dolibarrPool));
+    } catch (err) {
+      console.error('[ACCOUNTING] Transfer status error:', err.message);
+      res.status(500).json({ error: 'Erreur état du grand livre' });
+    }
+  });
+
+  router.post('/transfer', auth, noCsrf, async (req, res) => {
+    try {
+      const def = currentYearRange();
+      const date_from = req.body?.date_from || def.date_from;
+      const date_to = req.body?.date_to || def.date_to;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date_from) || !/^\d{4}-\d{2}-\d{2}$/.test(date_to)) {
+        return res.status(400).json({ error: 'Dates invalides' });
+      }
+      const result = await runTransfer(dolibarrPool, { date_from, date_to, userId: req.admin?.dolibarr_user_id || 0 });
+      invalidateAccountingCache();
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.admin.username, 'accounting_transfer', `Transfert ${date_from} → ${date_to} : ${result.inserted} lignes`);
+      } catch { /* ignore */ }
+      res.json(result);
+    } catch (err) {
+      console.error('[ACCOUNTING] Transfer error:', err.message);
+      res.status(500).json({ error: 'Erreur transfert en comptabilité : ' + err.message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // GRAND LIVRE
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/ledger', auth, async (req, res) => {
+    try {
+      const { date_from = firstDayOfMonth(), date_to = today(), account, journal, page = 1, limit = 100 } = req.query;
+      const pageInt = Math.max(1, parseInt(page));
+      const limitInt = Math.min(parseInt(limit) || 100, 500);
+      const offset = (pageInt - 1) * limitInt;
+
+      let where = 'WHERE entity = 1 AND doc_date BETWEEN ? AND ?';
+      const params = [date_from, date_to];
+      if (account) { where += ' AND numero_compte LIKE ?'; params.push(`${String(account).replace(/[%_]/g, '')}%`); }
+      if (journal) { where += ' AND code_journal = ?'; params.push(journal); }
+
+      const [[totals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS nb, COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit
+         FROM llx_accounting_bookkeeping ${where}`, params
+      );
+
+      // Report à nouveau (solde avant la période) si un compte est filtré
+      let opening = 0;
+      if (account) {
+        const [[op]] = await dolibarrPool.query(
+          `SELECT COALESCE(SUM(debit - credit), 0) AS solde
+           FROM llx_accounting_bookkeeping
+           WHERE entity = 1 AND doc_date < ? AND numero_compte LIKE ?`,
+          [date_from, `${String(account).replace(/[%_]/g, '')}%`]
+        );
+        opening = Math.round(Number(op.solde));
+      }
+
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid, piece_num, doc_date, doc_ref, doc_type, code_journal, journal_label,
+                numero_compte, label_compte, subledger_account, subledger_label,
+                label_operation, debit, credit, sens, import_key
+         FROM llx_accounting_bookkeeping ${where}
+         ORDER BY numero_compte, doc_date, piece_num, rowid
+         LIMIT ? OFFSET ?`,
+        [...params, limitInt, offset]
+      );
+
+      res.json({
+        opening,
+        entries: rows.map(r => ({
+          id: r.rowid, piece: r.piece_num, date: r.doc_date, ref: r.doc_ref,
+          journal: r.code_journal, account: r.numero_compte, account_label: r.label_compte,
+          subledger: r.subledger_label || r.subledger_account || '',
+          label: r.label_operation,
+          debit: Math.round(Number(r.debit)), credit: Math.round(Number(r.credit)),
+          is_manual: !r.import_key,
+        })),
+        totals: {
+          nb: Number(totals.nb),
+          debit: Math.round(Number(totals.debit)),
+          credit: Math.round(Number(totals.credit)),
+        },
+        page: pageInt,
+        pages: Math.ceil(Number(totals.nb) / limitInt),
+      });
+    } catch (err) {
+      console.error('[ACCOUNTING] Ledger error:', err.message);
+      res.status(500).json({ error: 'Erreur grand livre' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // BALANCE GÉNÉRALE
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/balance', auth, async (req, res) => {
+    try {
+      const { date_from = firstDayOfMonth(), date_to = today(), account_class } = req.query;
+      let classClause = '';
+      const params = [date_from, date_from, date_to, date_from, date_to, date_to];
+      if (account_class) { classClause = ' AND LEFT(numero_compte, 1) = ?'; params.push(String(account_class)); }
+
+      const [rows] = await dolibarrPool.query(
+        `SELECT numero_compte, MAX(label_compte) AS label,
+                COALESCE(SUM(CASE WHEN doc_date < ? THEN debit - credit ELSE 0 END), 0) AS opening,
+                COALESCE(SUM(CASE WHEN doc_date BETWEEN ? AND ? THEN debit ELSE 0 END), 0) AS p_debit,
+                COALESCE(SUM(CASE WHEN doc_date BETWEEN ? AND ? THEN credit ELSE 0 END), 0) AS p_credit
+         FROM llx_accounting_bookkeeping
+         WHERE entity = 1 AND doc_date <= ?${classClause}
+         GROUP BY numero_compte
+         HAVING opening <> 0 OR p_debit <> 0 OR p_credit <> 0
+         ORDER BY numero_compte`,
+        params
+      );
+
+      const accounts = rows.map(r => {
+        const opening = Math.round(Number(r.opening));
+        const pDebit = Math.round(Number(r.p_debit));
+        const pCredit = Math.round(Number(r.p_credit));
+        const solde = opening + pDebit - pCredit;
+        return {
+          number: r.numero_compte, label: r.label,
+          class: r.numero_compte.charAt(0),
+          opening, period_debit: pDebit, period_credit: pCredit,
+          solde_debit: solde > 0 ? solde : 0,
+          solde_credit: solde < 0 ? -solde : 0,
+        };
+      });
+      const totals = accounts.reduce((t, a) => ({
+        period_debit: t.period_debit + a.period_debit,
+        period_credit: t.period_credit + a.period_credit,
+        solde_debit: t.solde_debit + a.solde_debit,
+        solde_credit: t.solde_credit + a.solde_credit,
+      }), { period_debit: 0, period_credit: 0, solde_debit: 0, solde_credit: 0 });
+
+      res.json({ period: { from: date_from, to: date_to }, accounts, totals });
+    } catch (err) {
+      console.error('[ACCOUNTING] Balance error:', err.message);
+      res.status(500).json({ error: 'Erreur balance générale' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // COMPTE DE RÉSULTAT (classes 6 & 7)
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/income-statement', auth, async (req, res) => {
+    try {
+      const def = currentYearRange();
+      const date_from = req.query.date_from || def.date_from;
+      const date_to = req.query.date_to || def.date_to;
+
+      const [rows] = await dolibarrPool.query(
+        `SELECT numero_compte, MAX(label_compte) AS label,
+                COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit
+         FROM llx_accounting_bookkeeping
+         WHERE entity = 1 AND doc_date BETWEEN ? AND ? AND LEFT(numero_compte, 1) IN ('6', '7')
+         GROUP BY numero_compte ORDER BY numero_compte`,
+        [date_from, date_to]
+      );
+
+      const charges = [];
+      const produits = [];
+      let totalCharges = 0;
+      let totalProduits = 0;
+      for (const r of rows) {
+        const debit = Math.round(Number(r.debit));
+        const credit = Math.round(Number(r.credit));
+        if (r.numero_compte.charAt(0) === '6') {
+          const amount = debit - credit;
+          charges.push({ number: r.numero_compte, label: r.label, amount });
+          totalCharges += amount;
+        } else {
+          const amount = credit - debit;
+          produits.push({ number: r.numero_compte, label: r.label, amount });
+          totalProduits += amount;
+        }
+      }
+      res.json({
+        period: { from: date_from, to: date_to },
+        charges, produits,
+        total_charges: totalCharges,
+        total_produits: totalProduits,
+        result: totalProduits - totalCharges,
+      });
+    } catch (err) {
+      console.error('[ACCOUNTING] Income statement error:', err.message);
+      res.status(500).json({ error: 'Erreur compte de résultat' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // BILAN (classes 1 à 5)
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/balance-sheet', auth, async (req, res) => {
+    try {
+      const date_to = req.query.date_to || today();
+
+      const [rows] = await dolibarrPool.query(
+        `SELECT numero_compte, MAX(label_compte) AS label,
+                COALESCE(SUM(debit - credit), 0) AS solde
+         FROM llx_accounting_bookkeeping
+         WHERE entity = 1 AND doc_date <= ? AND LEFT(numero_compte, 1) IN ('1','2','3','4','5')
+         GROUP BY numero_compte ORDER BY numero_compte`,
+        [date_to]
+      );
+      // Résultat de l'exercice (classes 6/7) jusqu'à la date
+      const [[rstat]] = await dolibarrPool.query(
+        `SELECT COALESCE(SUM(CASE WHEN LEFT(numero_compte,1)='7' THEN credit - debit
+                                  ELSE -(debit - credit) END), 0) AS result
+         FROM llx_accounting_bookkeeping
+         WHERE entity = 1 AND doc_date <= ? AND LEFT(numero_compte, 1) IN ('6', '7')`,
+        [date_to]
+      );
+      const result = Math.round(Number(rstat.result));
+
+      const actif = [];
+      const passif = [];
+      let totalActif = 0;
+      let totalPassif = 0;
+      for (const r of rows) {
+        const solde = Math.round(Number(r.solde));
+        if (solde === 0) continue;
+        const cls = r.numero_compte.charAt(0);
+        // Classes 2/3 : actif. Classes 4/5 : selon le sens. Classe 1 : passif.
+        if (cls === '2' || cls === '3' || ((cls === '4' || cls === '5') && solde > 0)) {
+          actif.push({ number: r.numero_compte, label: r.label, amount: solde });
+          totalActif += solde;
+        } else {
+          const amount = -solde;
+          passif.push({ number: r.numero_compte, label: r.label, amount });
+          totalPassif += amount;
+        }
+      }
+      passif.push({ number: '—', label: 'Résultat de l\'exercice', amount: result, is_result: true });
+      totalPassif += result;
+
+      res.json({
+        date: date_to,
+        actif, passif,
+        total_actif: totalActif,
+        total_passif: totalPassif,
+        result,
+        ecart: totalActif - totalPassif,
+      });
+    } catch (err) {
+      console.error('[ACCOUNTING] Balance sheet error:', err.message);
+      res.status(500).json({ error: 'Erreur bilan' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // ÉCRITURES MANUELLES (journal OD)
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/entries', auth, async (req, res) => {
+    try {
+      const { date_from = `${new Date().getFullYear()}-01-01`, date_to = today() } = req.query;
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid, piece_num, doc_date, doc_ref, code_journal,
+                numero_compte, label_compte, subledger_account, subledger_label,
+                label_operation, debit, credit, date_validated
+         FROM llx_accounting_bookkeeping
+         WHERE entity = 1 AND code_journal = 'OD' AND (import_key IS NULL OR import_key = '')
+           AND doc_date BETWEEN ? AND ?
+         ORDER BY doc_date DESC, piece_num DESC, rowid`,
+        [date_from, date_to]
+      );
+      const byPiece = new Map();
+      for (const r of rows) {
+        if (!byPiece.has(r.piece_num)) {
+          byPiece.set(r.piece_num, {
+            piece: r.piece_num, date: r.doc_date, ref: r.doc_ref,
+            label: r.label_operation, validated: !!r.date_validated, lines: [],
+          });
+        }
+        byPiece.get(r.piece_num).lines.push({
+          account: r.numero_compte, account_label: r.label_compte,
+          subledger: r.subledger_label || r.subledger_account || '',
+          label: r.label_operation,
+          debit: Math.round(Number(r.debit)), credit: Math.round(Number(r.credit)),
+        });
+      }
+      res.json({ entries: [...byPiece.values()] });
+    } catch (err) {
+      console.error('[ACCOUNTING] Entries error:', err.message);
+      res.status(500).json({ error: 'Erreur écritures' });
+    }
+  });
+
+  router.post('/entries', auth, noCsrf, async (req, res) => {
+    try {
+      const { date, ref, label, lines } = req.body || {};
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date invalide' });
+      if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'Au moins 2 lignes requises' });
+
+      let totalDebit = 0;
+      let totalCredit = 0;
+      const clean = [];
+      for (const l of lines) {
+        const account = String(l.account || '').trim();
+        const debit = Math.max(0, Math.round(Number(l.debit) || 0));
+        const credit = Math.max(0, Math.round(Number(l.credit) || 0));
+        if (!account) return res.status(400).json({ error: 'Compte manquant sur une ligne' });
+        if (debit > 0 && credit > 0) return res.status(400).json({ error: 'Une ligne ne peut être à la fois au débit et au crédit' });
+        if (debit === 0 && credit === 0) return res.status(400).json({ error: 'Montant manquant sur une ligne' });
+        totalDebit += debit;
+        totalCredit += credit;
+        clean.push({ account, debit, credit, subledger: String(l.subledger || '').trim(), label: String(l.label || label || '').trim() });
+      }
+      if (totalDebit !== totalCredit) {
+        return res.status(400).json({ error: `Écriture déséquilibrée : débit ${totalDebit} ≠ crédit ${totalCredit}` });
+      }
+
+      // Vérifie l'existence des comptes
+      const accountNums = [...new Set(clean.map(l => l.account))];
+      const [accRows] = await dolibarrPool.query(
+        `SELECT account_number, label FROM llx_accounting_account
+         WHERE entity = 1 AND account_number IN (${accountNums.map(() => '?').join(',')})`,
+        accountNums
+      );
+      const accMap = new Map(accRows.map(a => [String(a.account_number), a.label]));
+      for (const num of accountNums) {
+        if (!accMap.has(num)) return res.status(400).json({ error: `Compte inconnu : ${num}` });
+      }
+
+      const [[mx]] = await dolibarrPool.query(
+        `SELECT COALESCE(MAX(piece_num), 0) + 1 AS p FROM llx_accounting_bookkeeping WHERE entity = 1`
+      );
+      const piece = Number(mx.p);
+      const userId = req.admin?.dolibarr_user_id || 0;
+      const opLabel = (label || ref || 'Écriture OD').slice(0, 250);
+
+      const values = clean.map(l => [
+        1, piece, date, 'mvt', ref || '', 0, 0,
+        l.subledger || '', l.subledger || '', '',
+        l.account, accMap.get(l.account) || l.account,
+        l.label || opLabel, l.debit, l.credit, l.debit || l.credit,
+        l.debit > 0 ? 'D' : 'C', userId, new Date(), 'OD', 'Opérations diverses', null,
+      ]);
+      await dolibarrPool.query(
+        `INSERT INTO llx_accounting_bookkeeping
+         (entity, piece_num, doc_date, doc_type, doc_ref, fk_doc, fk_docdet,
+          thirdparty_code, subledger_account, subledger_label, numero_compte, label_compte,
+          label_operation, debit, credit, montant, sens, fk_user_author, date_creation,
+          code_journal, journal_label, import_key) VALUES ?`,
+        [values]
+      );
+      invalidateAccountingCache();
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.admin.username, 'accounting_entry_create', `Écriture OD #${piece} : ${opLabel}`);
+      } catch { /* ignore */ }
+      res.json({ ok: true, piece });
+    } catch (err) {
+      console.error('[ACCOUNTING] Entry create error:', err.message);
+      res.status(500).json({ error: 'Erreur création écriture' });
+    }
+  });
+
+  router.delete('/entries/:piece', auth, noCsrf, async (req, res) => {
+    try {
+      const piece = parseInt(req.params.piece);
+      if (!piece) return res.status(400).json({ error: 'Pièce invalide' });
+      const [r] = await dolibarrPool.query(
+        `DELETE FROM llx_accounting_bookkeeping
+         WHERE entity = 1 AND piece_num = ? AND code_journal = 'OD'
+           AND (import_key IS NULL OR import_key = '') AND date_validated IS NULL`,
+        [piece]
+      );
+      if (!r.affectedRows) return res.status(404).json({ error: 'Écriture introuvable ou non supprimable' });
+      invalidateAccountingCache();
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.admin.username, 'accounting_entry_delete', `Suppression écriture OD #${piece}`);
+      } catch { /* ignore */ }
+      res.json({ ok: true, deleted: r.affectedRows });
+    } catch (err) {
+      console.error('[ACCOUNTING] Entry delete error:', err.message);
+      res.status(500).json({ error: 'Erreur suppression écriture' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // FACTURES FOURNISSEURS & CHARGES
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/suppliers', auth, async (req, res) => {
+    try {
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid AS id, nom AS name, code_fournisseur AS code
+         FROM llx_societe WHERE entity = 1 AND fournisseur >= 1 AND status = 1
+         ORDER BY nom LIMIT 500`
+      );
+      res.json({ suppliers: rows });
+    } catch (err) {
+      console.error('[ACCOUNTING] Suppliers error:', err.message);
+      res.status(500).json({ error: 'Erreur fournisseurs' });
+    }
+  });
+
+  router.get('/supplier-invoices', auth, async (req, res) => {
+    try {
+      const { date_from = `${new Date().getFullYear()}-01-01`, date_to = today() } = req.query;
+      const [rows] = await dolibarrPool.query(
+        `SELECT f.rowid AS id, f.ref, f.ref_supplier, f.datef, f.date_lim_reglement,
+                f.total_ht, f.total_tva, f.total_ttc, f.fk_statut, f.paye, f.libelle,
+                s.nom AS supplier,
+                COALESCE(pf.paid, 0) AS paid
+         FROM llx_facture_fourn f
+         LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
+         LEFT JOIN (SELECT fk_facturefourn, SUM(amount) AS paid
+                    FROM llx_paiementfourn_facturefourn GROUP BY fk_facturefourn) pf
+           ON pf.fk_facturefourn = f.rowid
+         WHERE f.entity = 1 AND f.datef BETWEEN ? AND ?
+         ORDER BY f.datef DESC, f.rowid DESC`,
+        [date_from, date_to]
+      );
+      const [[totals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS nb, COALESCE(SUM(total_ht), 0) AS ht,
+                COALESCE(SUM(total_tva), 0) AS tva, COALESCE(SUM(total_ttc), 0) AS ttc
+         FROM llx_facture_fourn WHERE entity = 1 AND datef BETWEEN ? AND ?`,
+        [date_from, date_to]
+      );
+      res.json({
+        invoices: rows.map(r => ({
+          id: r.id, ref: r.ref, ref_supplier: r.ref_supplier, label: r.libelle,
+          date: r.datef, date_due: r.date_lim_reglement, supplier: r.supplier,
+          total_ht: Math.round(Number(r.total_ht)),
+          total_tva: Math.round(Number(r.total_tva)),
+          total_ttc: Math.round(Number(r.total_ttc)),
+          paid: Math.round(Number(r.paid)),
+          remaining: Math.round(Number(r.total_ttc) - Number(r.paid)),
+          status: Number(r.fk_statut), is_paid: Number(r.paye) === 1,
+        })),
+        totals: {
+          nb: Number(totals.nb), ht: Math.round(Number(totals.ht)),
+          tva: Math.round(Number(totals.tva)), ttc: Math.round(Number(totals.ttc)),
+        },
+      });
+    } catch (err) {
+      console.error('[ACCOUNTING] Supplier invoices error:', err.message);
+      res.status(500).json({ error: 'Erreur factures fournisseurs' });
+    }
+  });
+
+  router.post('/supplier-invoices', auth, noCsrf, async (req, res) => {
+    try {
+      const { supplier_id, date, ref_supplier, label, total_ht, vat_rate = 0, date_due } = req.body || {};
+      if (!supplier_id) return res.status(400).json({ error: 'Fournisseur requis' });
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date invalide' });
+      const ht = Math.round(Number(total_ht) || 0);
+      if (ht <= 0) return res.status(400).json({ error: 'Montant HT invalide' });
+      const rate = Number(vat_rate) || 0;
+      const tva = Math.round(ht * rate / 100);
+      const ttc = ht + tva;
+
+      const [[soc]] = await dolibarrPool.query(
+        `SELECT rowid, nom FROM llx_societe WHERE rowid = ? AND entity = 1`, [supplier_id]
+      );
+      if (!soc) return res.status(400).json({ error: 'Fournisseur introuvable' });
+
+      // Référence interne : FA + année + séquence
+      const year = date.slice(0, 4);
+      const [[seq]] = await dolibarrPool.query(
+        `SELECT COUNT(*) + 1 AS n FROM llx_facture_fourn WHERE entity = 1 AND YEAR(datec) = ?`, [year]
+      );
+      const ref = `FA${year}-${String(seq.n).padStart(5, '0')}`;
+      const userId = req.admin?.dolibarr_user_id || 0;
+      const dueDate = date_due && /^\d{4}-\d{2}-\d{2}$/.test(date_due) ? date_due : date;
+
+      const [ins] = await dolibarrPool.query(
+        `INSERT INTO llx_facture_fourn
+         (ref, entity, ref_supplier, type, fk_soc, datec, datef, date_lim_reglement,
+          libelle, total_ht, total_tva, total_ttc, fk_statut, paye, fk_user_author)
+         VALUES (?, 1, ?, 0, ?, NOW(), ?, ?, ?, ?, ?, ?, 1, 0, ?)`,
+        [ref, ref_supplier || '', supplier_id, date, dueDate,
+         (label || '').slice(0, 250), ht, tva, ttc, userId]
+      );
+      const invoiceId = ins.insertId;
+
+      // Ligne de détail
+      try {
+        await dolibarrPool.query(
+          `INSERT INTO llx_facture_fourn_det
+           (fk_facture_fourn, description, qty, tva_tx, total_ht, tva, total_ttc, rang)
+           VALUES (?, ?, 1, ?, ?, ?, ?, 1)`,
+          [invoiceId, (label || 'Charge').slice(0, 250), rate, ht, tva, ttc]
+        );
+      } catch (e) { console.warn('[ACCOUNTING] facture_fourn_det:', e.message); }
+
+      invalidateAccountingCache();
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.admin.username, 'supplier_invoice_create', `Facture fournisseur ${ref} — ${soc.nom} : ${ttc}`);
+      } catch { /* ignore */ }
+      res.json({ ok: true, id: invoiceId, ref });
+    } catch (err) {
+      console.error('[ACCOUNTING] Supplier invoice create error:', err.message);
+      res.status(500).json({ error: 'Erreur création facture fournisseur' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // DÉCLARATION TVA
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/vat-report', auth, async (req, res) => {
+    try {
+      const def = currentYearRange();
+      const date_from = req.query.date_from || firstDayOfMonth();
+      const date_to = req.query.date_to || today();
+      void def;
+
+      // TVA collectée (ventes) par taux
+      const [collected] = await dolibarrPool.query(
+        `SELECT fd.tva_tx AS rate, COALESCE(SUM(fd.total_ht), 0) AS base,
+                COALESCE(SUM(fd.total_tva), 0) AS tva
+         FROM llx_facturedet fd
+         JOIN llx_facture f ON f.rowid = fd.fk_facture
+         WHERE f.entity = 1 AND f.fk_statut IN (1, 2) AND f.datef BETWEEN ? AND ?
+         GROUP BY fd.tva_tx ORDER BY fd.tva_tx`,
+        [date_from, date_to]
+      );
+      // TVA déductible (achats) par taux
+      let deductible = [];
+      try {
+        const [d] = await dolibarrPool.query(
+          `SELECT fd.tva_tx AS rate, COALESCE(SUM(fd.total_ht), 0) AS base,
+                  COALESCE(SUM(fd.tva), 0) AS tva
+           FROM llx_facture_fourn_det fd
+           JOIN llx_facture_fourn f ON f.rowid = fd.fk_facture_fourn
+           WHERE f.entity = 1 AND f.fk_statut IN (1, 2) AND f.datef BETWEEN ? AND ?
+           GROUP BY fd.tva_tx ORDER BY fd.tva_tx`,
+          [date_from, date_to]
+        );
+        deductible = d;
+      } catch (e) { void e; }
+
+      const mapRows = (rows) => rows.map(r => ({
+        rate: Number(r.rate), base: Math.round(Number(r.base)), tva: Math.round(Number(r.tva)),
+      }));
+      const collectedRows = mapRows(collected);
+      const deductibleRows = mapRows(deductible);
+      const totalCollected = collectedRows.reduce((s, r) => s + r.tva, 0);
+      const totalDeductible = deductibleRows.reduce((s, r) => s + r.tva, 0);
+
+      res.json({
+        period: { from: date_from, to: date_to },
+        collected: collectedRows,
+        deductible: deductibleRows,
+        total_collected: totalCollected,
+        total_deductible: totalDeductible,
+        net: totalCollected - totalDeductible,
+      });
+    } catch (err) {
+      console.error('[ACCOUNTING] VAT report error:', err.message);
+      res.status(500).json({ error: 'Erreur déclaration TVA' });
     }
   });
 

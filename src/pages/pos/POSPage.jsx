@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
-import { FiLayers, FiPauseCircle, FiShoppingCart, FiCheckCircle, FiSmartphone, FiGrid, FiSidebar } from 'react-icons/fi';
-import { posGetCurrentSession, posCreateQuote, posCreateSale } from '../../api/pos';
+import { FiSmartphone, FiGrid, FiSidebar } from 'react-icons/fi';
+import { posGetCurrentSession, posCreateQuote, posCreateSale, posGetTodaySales } from '../../api/pos';
 import { syncOfflineSales, getPendingSales } from '../../utils/offlineQueue';
 import usePosCartStore from '../../store/posCartStore';
 import usePosSessionStore from '../../store/posSessionStore';
 import POSHeader from '../../components/pos/POSHeader';
+import POSActionsPanel from '../../components/pos/POSActionsPanel';
 import ProductSearch from '../../components/pos/ProductSearch';
 import CategoryBar from '../../components/pos/CategoryBar';
 import ProductGrid from '../../components/pos/ProductGrid';
 import POSCart from '../../components/pos/POSCart';
+import POSNumpad from '../../components/pos/POSNumpad';
 import PaymentPanel from '../../components/pos/PaymentPanel';
 import POSReceipt from '../../components/pos/POSReceipt';
 import POSQuoteReceipt from '../../components/pos/POSQuoteReceipt';
@@ -16,6 +18,8 @@ import CustomerSelect from '../../components/pos/CustomerSelect';
 import CashRegister from '../../components/pos/CashRegister';
 import POSChangePin from '../../components/pos/POSChangePin';
 import POSReturn from '../../components/pos/POSReturn';
+import POSHistory from '../../components/pos/POSHistory';
+import POSFreeProduct from '../../components/pos/POSFreeProduct';
 import DeviceManager from '../../components/pos/DeviceManager';
 import POSPrinterSettings from '../../components/pos/POSPrinterSettings';
 import usePosPrinterStore from '../../store/posPrinterStore';
@@ -30,6 +34,10 @@ export default function POSPage() {
   const [showPayment, setShowPayment] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
   const [showReturn, setShowReturn] = useState(false);
+  const [returnInitialRef, setReturnInitialRef] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
+  const [showFreeProduct, setShowFreeProduct] = useState(false);
+  const [paymentSplitMode, setPaymentSplitMode] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [showCustomer, setShowCustomer] = useState(false);
@@ -46,19 +54,13 @@ export default function POSPage() {
   });
 
   const clearTicket = usePosCartStore((s) => s.clearTicket);
+  const setDiscount = usePosCartStore((s) => s.setDiscount);
   const items = usePosCartStore((s) => s.items);
-  const held = usePosCartStore((s) => s.held);
   const getItemCount = usePosCartStore((s) => s.getItemCount);
   const openSessionStore = usePosSessionStore((s) => s.openSession);
   const closeSessionStore = usePosSessionStore((s) => s.closeSession);
   const itemCount = getItemCount();
   const ticketTotal = items.reduce((sum, item) => sum + item.line_total, 0);
-  const statCards = [
-    { icon: <FiLayers size={16} />, label: 'Lignes ticket', value: items.length },
-    { icon: <FiShoppingCart size={16} />, label: 'Articles', value: itemCount },
-    { icon: <FiPauseCircle size={16} />, label: 'Tickets en attente', value: held.length },
-    { icon: <FiCheckCircle size={16} />, label: 'Montant ticket', value: `${Math.round(ticketTotal).toLocaleString('fr-FR')} F` },
-  ];
   const toolbarActions = [
     {
       key: 'touch',
@@ -115,13 +117,14 @@ export default function POSPage() {
   // Sync offline sales when connection comes back
   useEffect(() => {
     const trySync = () => {
-      if (getPendingSales().length > 0) {
-        syncOfflineSales(
-          posCreateSale,
-          (result) => toast.success(`Vente hors ligne synchronisée: ${result.invoice_ref}`),
-          () => {}
-        );
-      }
+      if (getPendingSales().length === 0) return;
+      syncOfflineSales(posCreateSale, {
+        onSuccess: (result) => toast.success(`Vente hors ligne synchronisée : ${result.invoice_ref}`),
+        onPermanentFail: (sale) => toast.error(
+          `Vente hors ligne refusée (${sale.last_error || 'erreur serveur'}) — à régulariser avec le manager`,
+          { duration: 10000 }
+        ),
+      });
     };
     window.addEventListener('online', trySync);
     trySync(); // also try on mount
@@ -159,6 +162,40 @@ export default function POSPage() {
     }
   };
 
+  const handleNewAction = () => {
+    if (!items.length) return;
+    if (confirm('Vider le ticket en cours ?')) clearTicket();
+  };
+
+  const handleGlobalDiscount = () => {
+    if (!items.length) return;
+    const val = prompt('Remise globale en % (0-100) appliquée à toutes les lignes :', '0');
+    if (val === null) return;
+    const pct = Math.max(0, Math.min(100, parseInt(val, 10) || 0));
+    items.forEach((item) => setDiscount(item.product_id, pct));
+    toast.success(`Remise ${pct}% appliquée à ${items.length} ligne${items.length > 1 ? 's' : ''}`);
+  };
+
+  const handleCashReport = async () => {
+    try {
+      const res = await posGetTodaySales();
+      const sales = res.data || [];
+      const total = sales.reduce((s, v) => s + parseFloat(v.total_ttc || 0), 0);
+      toast.success(`Aujourd'hui : ${sales.length} ventes · ${Math.round(total).toLocaleString('fr-FR')} F`, { duration: 5000 });
+    } catch {
+      toast.error('Impossible de récupérer le rapport de caisse');
+    }
+  };
+
+  const handlePayCash = () => {
+    if (!items.length) return;
+    setShowPayment(true);
+  };
+
+  const handleSoon = (label) => () => {
+    toast(`${label} — bientôt disponible`, { icon: '🚧' });
+  };
+
   return (
     <div className={`pos-page ${touchMode ? 'touch-mode' : ''} panel-${activePanel}`}>
       <POSHeader
@@ -170,31 +207,25 @@ export default function POSPage() {
       />
 
       <div className="pos-body">
-        <div className="pos-left">
-          <div className="pos-left-top">
-            <section className="pos-search-shell">
-              <div className="pos-shell-heading">
-                <div>
-                  <span className="pos-shell-eyebrow">Encaissement</span>
-                  <h1 className="pos-shell-title">Point de vente</h1>
-                </div>
-                <span className={`pos-session-badge ${session ? 'open' : 'closed'}`}>
-                  {session ? 'Session active' : 'Session fermée'}
-                </span>
-              </div>
-              <ProductSearch />
-            </section>
+        <div className="pos-ticket-col">
+          <POSCart
+            onPay={() => {
+              setPaymentSplitMode(false);
+              setActivePanel('ticket');
+              setShowPayment(true);
+            }}
+            onQuote={handleQuote}
+            onSelectCustomer={() => setShowCustomer(true)}
+            onBackToCatalog={() => setActivePanel('catalog')}
+            showBackButton={activePanel === 'ticket'}
+            isProMode={activePanel === 'ticket'}
+          />
+        </div>
 
-            <section className="pos-stats-grid" aria-label="Résumé du ticket">
-              {statCards.map(({ icon, label, value }) => (
-                <div key={label} className="pos-stat-card">
-                  <span className="pos-stat-icon">{icon}</span>
-                  <span className="pos-stat-label">{label}</span>
-                  <strong className="pos-stat-value">{value}</strong>
-                </div>
-              ))}
-            </section>
-          </div>
+        <div className="pos-catalog-col">
+          <section className="pos-search-shell">
+            <ProductSearch />
+          </section>
 
           <section className="pos-toolbar" aria-label="Options d’affichage POS">
             {toolbarActions.map((action) => (
@@ -212,32 +243,24 @@ export default function POSPage() {
           </section>
 
           <section className="pos-catalog-shell">
-            <div className="pos-shell-heading pos-shell-heading-compact">
-              <div>
-                <span className="pos-shell-eyebrow">Catalogue</span>
-                <h2 className="pos-shell-title pos-shell-title-sm">Ajout rapide des ouvrages</h2>
-              </div>
-              <span className="pos-catalog-badge">
-                {selectedCategory ? 'Catégorie filtrée' : 'Toutes catégories'}
-              </span>
-            </div>
             <CategoryBar selected={selectedCategory} onSelect={setSelectedCategory} />
             <ProductGrid category={selectedCategory} />
           </section>
         </div>
 
-        <div className="pos-right">
-          <POSCart
-            onPay={() => {
-              setActivePanel('ticket');
-              setShowPayment(true);
-            }}
-            onQuote={handleQuote}
-            onSelectCustomer={() => setShowCustomer(true)}
-            onBackToCatalog={() => setActivePanel('catalog')}
-            showBackButton={activePanel === 'ticket'}
-            isProMode={activePanel === 'ticket'}
+        <div className="pos-actions-col">
+          <POSActionsPanel
+            onNew={handleNewAction}
+            onHistory={() => setShowHistory(true)}
+            onFreeProduct={() => setShowFreeProduct(true)}
+            onGlobalDiscount={handleGlobalDiscount}
+            onSplit={() => { setPaymentSplitMode(true); setActivePanel('ticket'); setShowPayment(true); }}
+            onPay={() => { setPaymentSplitMode(false); setActivePanel('ticket'); setShowPayment(true); }}
+            onPayCash={handlePayCash}
+            onCashReport={handleCashReport}
+            onCloseRegister={() => setShowCashRegister(true)}
           />
+          <POSNumpad />
         </div>
       </div>
 
@@ -253,8 +276,9 @@ export default function POSPage() {
 
       {showPayment && (
         <PaymentPanel
-          onClose={() => setShowPayment(false)}
-          onComplete={handlePaymentComplete}
+          onClose={() => { setShowPayment(false); setPaymentSplitMode(false); }}
+          onComplete={(sale) => { setPaymentSplitMode(false); handlePaymentComplete(sale); }}
+          splitMode={paymentSplitMode}
         />
       )}
 
@@ -283,7 +307,21 @@ export default function POSPage() {
       )}
 
       {showReturn && (
-        <POSReturn onClose={() => setShowReturn(false)} />
+        <POSReturn
+          onClose={() => { setShowReturn(false); setReturnInitialRef(''); }}
+          initialRef={returnInitialRef}
+        />
+      )}
+
+      {showHistory && (
+        <POSHistory
+          onClose={() => setShowHistory(false)}
+          onReturn={(ref) => { setReturnInitialRef(ref); setShowReturn(true); }}
+        />
+      )}
+
+      {showFreeProduct && (
+        <POSFreeProduct onClose={() => setShowFreeProduct(false)} />
       )}
 
       {showDevices && (

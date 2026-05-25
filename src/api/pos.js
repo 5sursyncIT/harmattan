@@ -27,6 +27,8 @@ export const posCreateSale = (data) => api.post('/pos/sales', {
 
 export const posGetTodaySales = () => api.get('/pos/sales/today', { params: { terminal: getTerminal() } });
 
+export const posGetSalesHistory = (params = {}) => api.get('/pos/sales/history', { params });
+
 export const posGetConfig = () => api.get('/pos/config', { params: { terminal: getTerminal() } });
 
 export const posOpenSession = (data) => api.post('/pos/session/open', { ...data, terminal: getTerminal() });
@@ -48,7 +50,7 @@ export const posChangePin = (currentPin, newPin) => api.put('/pos/auth/change-pi
 
 export const posLookupInvoice = (ref) => api.get(`/pos/invoices/lookup/${ref}`);
 
-export const posCreateReturn = (data) => api.post('/pos/returns', data);
+export const posCreateReturn = (data) => api.post('/pos/returns', { ...data, terminal: getTerminal() });
 
 // Device management
 export const posEnrollDevice = (code, device_name) => api.post('/pos/devices/enroll', { code, device_name });

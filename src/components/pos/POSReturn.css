@@ -45,6 +45,18 @@
 .pos-return-item-qty input { width: 40px; padding: 2px 4px; text-align: center; border: 1px solid #ddd; border-radius: 4px; }
 .pos-return-item-price { font-weight: 600; min-width: 70px; text-align: right; }
 
+.pos-return-item.exhausted { opacity: 0.5; }
+.pos-return-item-label small { color: #c0392b; font-weight: 600; }
+
+.pos-return-refund { margin-bottom: 12px; }
+.pos-return-refund-label { font-size: 0.85rem; color: #555; margin-bottom: 6px; }
+.pos-return-method-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.pos-return-method-btn {
+  padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px;
+  background: #fff; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+}
+.pos-return-method-btn.active { background: #10531a; color: #fff; border-color: #10531a; }
+
 .pos-return-reason {
   width: 100%; padding: 10px 12px; border: 1px solid #ddd;
   border-radius: 8px; font-size: 0.9rem; margin-bottom: 12px;

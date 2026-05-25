@@ -6,6 +6,7 @@ export const EMPTY_BOOK = Object.freeze({
   title: '',
   author_nom: '',
   author_prenom: '',
+  authors: [], // Phase 4 : [{ id, display_name, slug }]
   isbn: '',
   editeur: "L'Harmattan Sénégal",
   publication_year: new Date().getFullYear(),
@@ -28,7 +29,8 @@ export function hydrateBook(book) {
       : book.genre_id
         ? [parseInt(book.genre_id, 10)].filter((n) => !Number.isNaN(n))
         : [];
-  return { ...EMPTY_BOOK, ...book, genre_ids: ids };
+  const authors = Array.isArray(book.authors) ? book.authors : [];
+  return { ...EMPTY_BOOK, ...book, genre_ids: ids, authors };
 }
 
 /**

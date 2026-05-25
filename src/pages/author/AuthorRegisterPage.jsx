@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
 import useAuthorAuthStore from '../../store/authorAuthStore';
+import { AuthScopeBadge, AuthScopeSwitch } from '../AuthScope';
 import '../AuthPages.css';
 
 export default function AuthorRegisterPage() {
@@ -32,6 +33,7 @@ export default function AuthorRegisterPage() {
     <div className="auth-page">
       <div className="container">
         <div className="auth-card">
+          <AuthScopeBadge scope="author" />
           <h1>Créer mon espace auteur</h1>
           <p className="auth-subtitle">Soumettez vos manuscrits et suivez leur évolution</p>
 
@@ -75,6 +77,8 @@ export default function AuthorRegisterPage() {
           <p className="auth-link">
             Déjà inscrit ? <Link to="/auteur/connexion">Se connecter</Link>
           </p>
+
+          <AuthScopeSwitch scope="author" />
         </div>
       </div>
     </div>

@@ -9,6 +9,14 @@ import { existsSync } from 'fs';
 import rateLimit from 'express-rate-limit';
 import { generateManuscriptRef } from './manuscript-workflow.js';
 import { notifyTransition } from './manuscript-emails.js';
+import {
+  ROLES,
+  validRoles,
+  FULL_ACCESS_ROLES,
+  ROLE_ALLOWED_PATHS,
+  serializeRolesForClient,
+} from './roles-config.js';
+import { generateBase32Secret, verifyTotp, buildOtpAuthUrl } from './totp.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -83,14 +91,30 @@ function writeConfig(config) {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+// Hache un token de session admin — le token brut n'est jamais stocké en base.
+function hashSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
 // ─── ADMIN AUTH MIDDLEWARE ───────────────────────────────────
 export function adminAuth(db) {
   return (req, res, next) => {
     const session = req.cookies?.admin_session;
     if (!session) return res.status(401).json({ error: 'Non authentifié' });
 
-    const admin = db.prepare('SELECT * FROM admin_users WHERE session_token = ?').get(session);
+    const admin = db.prepare(
+      "SELECT * FROM admin_users WHERE session_token = ? AND (session_expires_at IS NULL OR session_expires_at > datetime('now'))"
+    ).get(hashSessionToken(session));
     if (!admin) return res.status(401).json({ error: 'Session invalide' });
+
+    // Compte désactivé entre-temps → invalider la session et refuser.
+    if (admin.is_active === 0) {
+      try {
+        db.prepare('UPDATE admin_users SET session_token = NULL, session_expires_at = NULL WHERE id = ?').run(admin.id);
+      } catch (e) { void e; }
+      res.clearCookie('admin_session');
+      return res.status(403).json({ error: 'Compte désactivé' });
+    }
 
     req.admin = admin;
     next();
@@ -114,104 +138,47 @@ export function blockLibrarian(req, res, next) {
 // ─── CREATE ROUTER ──────────────────────────────────────────
 export { setupAdminRoutes };
 export function createAdminRouter(opts) { return setupAdminRoutes(null, opts); }
-function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure = false, authLimiter, siteUrl = '' }) {
+function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure = false, authLimiter, manuscriptSubmitLimiter, siteUrl = '' }) {
   const app = appRef || appFromOpts;
   const auth = adminAuth(db);
 
   // ─── Role-based access control ─────────────────────────────
-  // Chaque rôle restreint a une whitelist de paths autorisés.
-  // super_admin et admin ont accès à tout (null = aucune restriction).
-  const COMMON_PATHS = [
-    /^\/api\/admin\/me$/,
-    /^\/api\/admin\/password$/,
-    /^\/api\/admin\/logout$/,
-    /^\/api\/admin\/login$/,
-    /^\/api\/admin\/config$/, // GET lecture seule pour le front
-  ];
-  const WORKFLOW_READ_PATHS = [
-    /^\/api\/admin\/manuscripts\/assigned(\/.*)?$/,
-    /^\/api\/admin\/manuscripts\/v2\/\d+$/,
-    /^\/api\/admin\/manuscripts\/v2\/\d+\/files(\/.*)?$/,
-    /^\/api\/admin\/notifications(\/.*)?$/,
-    /^\/api\/admin\/activity-log$/,
-  ];
-  const ROLE_ALLOWED_PATHS = {
-    editor: [
-      ...COMMON_PATHS,
-      /^\/api\/admin\/books(\/.*)?$/,
-      /^\/api\/admin\/tags(\/.*)?$/,
-      /^\/api\/admin\/stats(\/.*)?$/,
-      /^\/api\/admin\/slides(\/.*)?$/,
-      /^\/api\/admin\/manuscripts(\/.*)?$/,
-      /^\/api\/admin\/editorial(\/.*)?$/,
-      /^\/api\/admin\/covers(\/.*)?$/,
-      /^\/api\/admin\/authors(\/.*)?$/,
-      /^\/api\/admin\/news(\/.*)?$/,
-      /^\/api\/admin\/notifications(\/.*)?$/,
-    ],
-    support: [
-      ...COMMON_PATHS,
-      /^\/api\/admin\/stats(\/.*)?$/,
-      /^\/api\/admin\/contact(\/.*)?$/,
-      /^\/api\/admin\/faq(\/.*)?$/,
-      /^\/api\/admin\/newsletter(\/.*)?$/,
-      /^\/api\/admin\/customers(\/.*)?$/,
-      /^\/api\/admin\/authors(\/.*)?$/,
-      /^\/api\/admin\/news(\/.*)?$/,
-      /^\/api\/admin\/notifications(\/.*)?$/,
-    ],
-    librarian: [
-      ...COMMON_PATHS,
-      /^\/api\/admin\/books(\/.*)?$/,
-      /^\/api\/admin\/tags(\/.*)?$/,
-      /^\/api\/admin\/stock(\/.*)?$/,
-      /^\/api\/admin\/notifications(\/.*)?$/,
-    ],
-    comptable: [
-      ...COMMON_PATHS,
-      /^\/api\/admin\/accounting(\/.*)?$/,
-      /^\/api\/admin\/stats(\/.*)?$/,
-      /^\/api\/admin\/payments(\/.*)?$/,
-      /^\/api\/admin\/notifications(\/.*)?$/,
-    ],
-    vendeur: [
-      ...COMMON_PATHS,
-      // Vendeur = POS uniquement (via /api/pos/* qui a son propre système d'auth par PIN)
-    ],
-    evaluateur: [
-      ...COMMON_PATHS,
-      ...WORKFLOW_READ_PATHS,
-      /^\/api\/admin\/evaluations(\/.*)?$/,
-    ],
-    correcteur: [
-      ...COMMON_PATHS,
-      ...WORKFLOW_READ_PATHS,
-      /^\/api\/admin\/corrections(\/.*)?$/,
-    ],
-    infographiste: [
-      ...COMMON_PATHS,
-      ...WORKFLOW_READ_PATHS,
-      /^\/api\/admin\/covers(\/.*)?$/,
-    ],
-    imprimeur: [
-      ...COMMON_PATHS,
-      ...WORKFLOW_READ_PATHS,
-      /^\/api\/admin\/printing(\/.*)?$/,
-    ],
-  };
+  // ROLE_ALLOWED_PATHS / FULL_ACCESS_ROLES sont importés depuis roles-config.js
+  // (source unique de vérité, partagée avec l'UI via GET /api/admin/roles).
   app.use('/api/admin', (req, res, next) => {
+    const path = req.originalUrl.split('?')[0];
+    // Login/logout/me sont les « portes » de l'auth — elles ne peuvent jamais
+    // être bloquées par la RBAC sinon un cookie périmé enferme l'utilisateur
+    // (il ne peut plus se reconnecter sans pouvoir d'abord se déconnecter).
+    if (/^\/api\/admin\/(login|logout|me)$/.test(path)) return next();
+
     const session = req.cookies?.admin_session;
+    // Pas de session → l'auth par-route (adminAuth) s'en charge.
     if (!session) return next();
-    const admin = db.prepare('SELECT role FROM admin_users WHERE session_token = ?').get(session);
-    const allowedPaths = ROLE_ALLOWED_PATHS[admin?.role];
+    const admin = db.prepare('SELECT role FROM admin_users WHERE session_token = ?').get(hashSessionToken(session));
+    // Session périmée / introuvable → laisser passer, l'auth par-route refusera
+    // proprement (et permettra à /login d'écraser le cookie mort).
+    if (!admin) return next();
+
+    const role = admin.role;
+    if (FULL_ACCESS_ROLES.includes(role)) {
+      return next();
+    }
+    const allowedPaths = ROLE_ALLOWED_PATHS[role];
     if (allowedPaths) {
-      const path = req.originalUrl.split('?')[0];
-      const allowed = allowedPaths.some((re) => re.test(path));
+      const method = req.method.toUpperCase();
+      const allowed = allowedPaths.some((entry) => {
+        if (entry instanceof RegExp) return entry.test(path);
+        if (!entry.re.test(path)) return false;
+        return !entry.methods || entry.methods.includes(method);
+      });
       if (!allowed) {
         return res.status(403).json({ error: 'Accès non autorisé pour votre profil' });
       }
+      return next();
     }
-    next();
+    // Rôle non listé (et pas full-access) → refus.
+    return res.status(403).json({ error: 'Accès non autorisé pour votre profil' });
   });
 
   // Create admin_users table
@@ -229,6 +196,22 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // Add email column if missing — utilisée par les notifications workflow auprès des acteurs métiers
   // (évaluateur, correcteur, infographiste, imprimeur)
   try { db.exec('ALTER TABLE admin_users ADD COLUMN email TEXT'); } catch (e) { void e; }
+  // Add session_expires_at column if missing — expiration serveur des sessions admin.
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN session_expires_at TEXT'); } catch (e) { void e; }
+  // Statut actif/désactivé : un compte désactivé ne peut plus se connecter.
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN is_active INTEGER DEFAULT 1'); } catch (e) { void e; }
+  // Dernière connexion réussie (timestamp + IP).
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN last_login_at TEXT'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN last_login_ip TEXT'); } catch (e) { void e; }
+  // Renouvellement de mot de passe forcé (flag posé par super_admin).
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN must_change_password INTEGER DEFAULT 0'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN password_changed_at TEXT'); } catch (e) { void e; }
+  // 2FA (TOTP RFC 6238) — secret en Base32, drapeau d'activation.
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN totp_secret TEXT'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN totp_enabled INTEGER DEFAULT 0'); } catch (e) { void e; }
+  // Token éphémère utilisé entre l'étape 1 (mot de passe) et l'étape 2 (TOTP) du login.
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN totp_pending_token TEXT'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE admin_users ADD COLUMN totp_pending_expires_at TEXT'); } catch (e) { void e; }
 
   // Activity log table
   db.exec(`CREATE TABLE IF NOT EXISTS admin_activity_log (
@@ -442,40 +425,98 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     const defaultPwd = process.env.ADMIN_DEFAULT_PASSWORD || crypto.randomBytes(16).toString('hex');
     const hash = bcrypt.hashSync(defaultPwd, 12);
     db.prepare("INSERT INTO admin_users (username, password, role) VALUES (?, ?, 'super_admin')").run('admin', hash);
-    console.warn(`[ADMIN] Compte admin créé. Mot de passe: ${defaultPwd} — CHANGEZ-LE IMMÉDIATEMENT`);
+    console.warn('[ADMIN] Compte admin créé — mot de passe = valeur de la variable d\'environnement ADMIN_DEFAULT_PASSWORD. CHANGEZ-LE IMMÉDIATEMENT.');
   }
 
   // ─── AUTH ROUTES ────────────────────────────────────────────
 
   const adminLoginLimiter = authLimiter || rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'Trop de tentatives, réessayez dans 15 minutes' }, validate: { xForwardedForHeader: false } });
+
+  // Crée la session active pour `admin` et pose le cookie. Centralisé pour
+  // partager le code entre login simple et étape 2 du 2FA.
+  function openAdminSession(req, res, admin) {
+    const token = crypto.randomBytes(32).toString('hex');
+    const ip = (req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+    db.prepare(
+      "UPDATE admin_users SET session_token = ?, session_expires_at = datetime('now', '+24 hours'), last_login_at = datetime('now'), last_login_ip = ?, totp_pending_token = NULL, totp_pending_expires_at = NULL WHERE id = ?"
+    ).run(hashSessionToken(token), ip || null, admin.id);
+    res.cookie('admin_session', token, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: cookieSecure,
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+  }
+
   app.post('/api/admin/login', adminLoginLimiter, csrfProtection, (req, res) => {
     const { username, password } = req.body;
     const admin = db.prepare('SELECT * FROM admin_users WHERE username = ?').get(username);
     if (!admin || !bcrypt.compareSync(password, admin.password)) {
       return res.status(401).json({ error: 'Identifiants invalides' });
     }
+    if (admin.is_active === 0) {
+      return res.status(403).json({ error: 'Compte désactivé. Contactez un administrateur.' });
+    }
 
-    const token = crypto.randomBytes(32).toString('hex');
-    db.prepare('UPDATE admin_users SET session_token = ? WHERE id = ?').run(token, admin.id);
+    // Si la 2FA est activée, ne pas ouvrir de session : émettre un token
+    // intermédiaire valable 5 min pour la 2ᵉ étape.
+    if (admin.totp_enabled === 1 && admin.totp_secret) {
+      const pendingToken = crypto.randomBytes(24).toString('hex');
+      db.prepare(
+        "UPDATE admin_users SET totp_pending_token = ?, totp_pending_expires_at = datetime('now', '+5 minutes') WHERE id = ?"
+      ).run(hashSessionToken(pendingToken), admin.id);
+      return res.json({ requires2FA: true, pendingToken });
+    }
 
-    res.cookie('admin_session', token, {
-      httpOnly: true,
-      sameSite: 'strict',
-      secure: cookieSecure,
-      maxAge: 24 * 60 * 60 * 1000, // 24h
-    });
+    openAdminSession(req, res, admin);
     logActivity(admin.username, 'login', 'Connexion admin');
-    res.json({ success: true, username: admin.username, role: admin.role || 'admin' });
+    res.json({
+      success: true,
+      username: admin.username,
+      role: admin.role || 'admin',
+      mustChangePassword: admin.must_change_password === 1,
+    });
+  });
+
+  // Étape 2 du login quand la 2FA est activée.
+  app.post('/api/admin/login/2fa', adminLoginLimiter, csrfProtection, (req, res) => {
+    const { pendingToken, code } = req.body;
+    if (!pendingToken || !code) {
+      return res.status(400).json({ error: 'Token et code requis' });
+    }
+    const admin = db.prepare(
+      "SELECT * FROM admin_users WHERE totp_pending_token = ? AND totp_pending_expires_at > datetime('now')"
+    ).get(hashSessionToken(pendingToken));
+    if (!admin || admin.is_active === 0 || !admin.totp_secret) {
+      return res.status(401).json({ error: 'Étape de vérification expirée. Reconnectez-vous.' });
+    }
+    if (!verifyTotp(admin.totp_secret, code)) {
+      return res.status(401).json({ error: 'Code à 6 chiffres invalide' });
+    }
+    openAdminSession(req, res, admin);
+    logActivity(admin.username, 'login', 'Connexion admin (2FA)');
+    res.json({
+      success: true,
+      username: admin.username,
+      role: admin.role || 'admin',
+      mustChangePassword: admin.must_change_password === 1,
+    });
   });
 
   app.post('/api/admin/logout', auth, (req, res) => {
-    db.prepare('UPDATE admin_users SET session_token = NULL WHERE id = ?').run(req.admin.id);
+    db.prepare('UPDATE admin_users SET session_token = NULL, session_expires_at = NULL WHERE id = ?').run(req.admin.id);
     res.clearCookie('admin_session');
     res.json({ success: true });
   });
 
   app.get('/api/admin/me', auth, (req, res) => {
-    res.json({ username: req.admin.username, role: req.admin.role || 'admin' });
+    res.json({
+      username: req.admin.username,
+      role: req.admin.role || 'admin',
+      email: req.admin.email || null,
+      mustChangePassword: req.admin.must_change_password === 1,
+      totpEnabled: req.admin.totp_enabled === 1,
+    });
   });
 
   app.put('/api/admin/password', auth, csrfProtection, (req, res) => {
@@ -486,8 +527,58 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     if (!newPassword || newPassword.length < 8 || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
       return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères, une majuscule et un chiffre' });
     }
+    if (newPassword === current) {
+      return res.status(400).json({ error: 'Le nouveau mot de passe doit être différent de l\'ancien' });
+    }
     const hash = bcrypt.hashSync(newPassword, 12);
-    db.prepare('UPDATE admin_users SET password = ? WHERE id = ?').run(hash, req.admin.id);
+    db.prepare("UPDATE admin_users SET password = ?, must_change_password = 0, password_changed_at = datetime('now') WHERE id = ?").run(hash, req.admin.id);
+    logActivity(req.admin.username, 'password_change', 'Mot de passe modifié');
+    res.json({ success: true });
+  });
+
+  // ─── 2FA (TOTP) ─────────────────────────────────────────────
+  // L'utilisateur gère sa propre 2FA. setup → verify pour activer.
+
+  app.post('/api/admin/2fa/setup', auth, csrfProtection, (req, res) => {
+    if (req.admin.totp_enabled === 1) {
+      return res.status(400).json({ error: '2FA déjà activée. Désactivez-la avant de la reconfigurer.' });
+    }
+    const secret = generateBase32Secret(20);
+    // On stocke le secret immédiatement mais sans activer ; activation = /verify.
+    db.prepare('UPDATE admin_users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(secret, req.admin.id);
+    const otpauthUrl = buildOtpAuthUrl({
+      issuer: "L'Harmattan Sénégal Admin",
+      account: req.admin.username,
+      secret,
+    });
+    res.json({ secret, otpauthUrl });
+  });
+
+  app.post('/api/admin/2fa/verify', auth, csrfProtection, (req, res) => {
+    const { code } = req.body;
+    if (!req.admin.totp_secret) {
+      return res.status(400).json({ error: 'Aucun secret en attente. Relancez la configuration.' });
+    }
+    if (!verifyTotp(req.admin.totp_secret, code)) {
+      return res.status(400).json({ error: 'Code invalide. Vérifiez l\'heure de votre appareil.' });
+    }
+    db.prepare('UPDATE admin_users SET totp_enabled = 1 WHERE id = ?').run(req.admin.id);
+    logActivity(req.admin.username, '2fa_enable', '2FA activée');
+    res.json({ success: true });
+  });
+
+  app.post('/api/admin/2fa/disable', auth, csrfProtection, (req, res) => {
+    const { password, code } = req.body;
+    if (!password || !bcrypt.compareSync(password, req.admin.password)) {
+      return res.status(400).json({ error: 'Mot de passe incorrect' });
+    }
+    // Si 2FA active, demander aussi un code valide pour empêcher la désactivation
+    // depuis une session volée.
+    if (req.admin.totp_enabled === 1 && !verifyTotp(req.admin.totp_secret, code)) {
+      return res.status(400).json({ error: 'Code 2FA requis et valide pour désactiver' });
+    }
+    db.prepare('UPDATE admin_users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(req.admin.id);
+    logActivity(req.admin.username, '2fa_disable', '2FA désactivée');
     res.json({ success: true });
   });
 
@@ -518,14 +609,34 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     }
   });
 
+  // Liste blanche des sections de configuration modifiables via l'API.
+  // Déduite des clés réellement présentes dans site-config.json.
+  const ALLOWED_CONFIG_KEYS = new Set([
+    'contact',
+    'social',
+    'youtube_channel_id',
+    'hero_slides',
+    'upcoming_books',
+    'faq',
+    'smtp',
+    'manuscript_genres',
+    'payment_methods',
+    'admin_emails',
+    'whatsapp_phone',
+  ]);
+
   // Admin: update config section
   app.put('/api/admin/config', auth, csrfProtection, (req, res) => {
     try {
       const config = readConfig();
       const updates = req.body;
 
-      // Merge updates into config
+      // Merge updates into config — uniquement les clés autorisées (anti mass-assignment).
       for (const [key, value] of Object.entries(updates)) {
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+        if (!ALLOWED_CONFIG_KEYS.has(key)) {
+          return res.status(400).json({ error: `Section de configuration non autorisée: ${key}` });
+        }
         config[key] = value;
       }
 
@@ -636,8 +747,13 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // ─── MANUSCRIPT SUBMISSION (PUBLIC) ─────────────────────────
-
-  app.post('/api/admin/manuscripts', csrfProtection, manuscriptUpload.single('file'), (req, res) => {
+  // Endpoint public consommé par le formulaire "Se faire éditer". Le chemin
+  // historique /api/admin/manuscripts est conservé pour ne pas casser les
+  // intégrations existantes, mais le chemin canonique est désormais
+  // /api/manuscripts/submit (plus clair, et plus facile à reconnaître pour
+  // les outils de sécurité qui scannent /admin).
+  // Rate limit explicite : upload coûteux, surface de spam.
+  const submitManuscriptHandler = (req, res) => {
     try {
       const { firstname, lastname, email, phone, title, genre, synopsis, biography, message } = req.body;
       if (!firstname || !lastname || !email || !title) {
@@ -675,7 +791,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       const ref = generateManuscriptRef(db);
       const tmpPath = req.file.path;
       const fileName = req.file.originalname;
-      let manuscriptId, finalPath;
+      let manuscriptId;
       try {
         const tx = db.transaction(() => {
           const result = db.prepare(
@@ -714,7 +830,6 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         });
         const out = tx();
         manuscriptId = out.id;
-        finalPath = out.fp;
       } catch (err) {
         console.error('[MANUSCRIPT] DB error:', err.message);
         return res.status(500).json({ error: 'Erreur enregistrement manuscrit' });
@@ -757,7 +872,15 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       console.error('POST /manuscripts error:', err.message);
       res.status(500).json({ error: 'Erreur soumission manuscrit' });
     }
-  });
+  };
+  // Le limiter est optionnel pour rester rétrocompatible si setupAdminRoutes
+  // est appelé sans ce paramètre (tests, anciens montages).
+  const submitMiddlewares = [csrfProtection];
+  if (manuscriptSubmitLimiter) submitMiddlewares.push(manuscriptSubmitLimiter);
+  submitMiddlewares.push(manuscriptUpload.single('file'));
+  app.post('/api/manuscripts/submit', ...submitMiddlewares, submitManuscriptHandler);
+  // Alias legacy — déconseillé pour les nouvelles intégrations.
+  app.post('/api/admin/manuscripts', ...submitMiddlewares, submitManuscriptHandler);
 
   // Admin: list manuscripts
   app.get('/api/admin/manuscripts', auth, (req, res) => {
@@ -933,28 +1056,59 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   // ─── ADMIN USERS MANAGEMENT ────────────────────────────────
 
+  // Définition des rôles et matrice de permissions — accessible à tout admin
+  // authentifié (la matrice est purement informative pour l'UI).
+  app.get('/api/admin/roles', auth, (req, res) => {
+    res.json(serializeRolesForClient());
+  });
+
+  // Construit l'objet exposé au client à partir d'une ligne admin_users (sans
+  // les champs sensibles password / session_token / totp_secret).
+  function publicUser(u) {
+    if (!u) return null;
+    const isOnline = !!(u.session_token && (!u.session_expires_at || new Date(u.session_expires_at) > new Date()));
+    return {
+      id: u.id,
+      username: u.username,
+      role: u.role,
+      email: u.email || null,
+      created_at: u.created_at,
+      is_active: u.is_active !== 0,
+      last_login_at: u.last_login_at || null,
+      last_login_ip: u.last_login_ip || null,
+      must_change_password: u.must_change_password === 1,
+      totp_enabled: u.totp_enabled === 1,
+      session_active: isOnline,
+    };
+  }
+
   app.get('/api/admin/users', auth, requireSuperAdmin, (req, res) => {
-    const users = db.prepare("SELECT id, username, role, email, created_at FROM admin_users").all();
-    res.json(users);
+    const users = db.prepare(
+      "SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users ORDER BY id ASC"
+    ).all();
+    res.json(users.map(publicUser));
   });
 
   app.post('/api/admin/users', auth, requireSuperAdmin, csrfProtection, (req, res) => {
     try {
-      const { username, password, role = 'admin', email } = req.body;
+      const { username, password, role = 'admin', email, mustChangePassword } = req.body;
       if (!username || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
       if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
         return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères, une majuscule et un chiffre' });
       }
-      const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
       const safeRole = validRoles.includes(role) ? role : 'admin';
       const cleanEmail = email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? email.trim() : null;
       const existing = db.prepare('SELECT id FROM admin_users WHERE username = ?').get(username);
       if (existing) return res.status(400).json({ error: 'Ce nom d\'utilisateur existe déjà' });
 
       const hash = bcrypt.hashSync(password, 12);
-      const result = db.prepare('INSERT INTO admin_users (username, password, role, email) VALUES (?, ?, ?, ?)').run(username, hash, safeRole, cleanEmail);
-      logActivity(req.admin.username, 'create_admin', `Création admin: ${username} (${safeRole})${cleanEmail ? ` <${cleanEmail}>` : ''}`);
-      res.json({ id: result.lastInsertRowid, username, role: safeRole, email: cleanEmail });
+      const forceReset = mustChangePassword ? 1 : 0;
+      const result = db.prepare(
+        "INSERT INTO admin_users (username, password, role, email, must_change_password, password_changed_at) VALUES (?, ?, ?, ?, ?, datetime('now'))"
+      ).run(username, hash, safeRole, cleanEmail, forceReset);
+      logActivity(req.admin.username, 'create_admin', `Création admin: ${username} (${safeRole})${cleanEmail ? ` <${cleanEmail}>` : ''}${forceReset ? ' [renouvellement forcé]' : ''}`);
+      const fresh = db.prepare('SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users WHERE id = ?').get(result.lastInsertRowid);
+      res.json(publicUser(fresh));
     } catch (err) {
       console.error('Create admin error:', err.message);
       res.status(500).json({ error: 'Erreur création administrateur' });
@@ -988,7 +1142,6 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
       // Changement de rôle
       if (role) {
-        const validRoles = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
         if (!validRoles.includes(role)) {
           return res.status(400).json({ error: 'Rôle invalide' });
         }
@@ -1014,6 +1167,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         const hash = bcrypt.hashSync(password, 12);
         updates.push('password = ?');
         values.push(hash);
+        updates.push("password_changed_at = datetime('now')");
         // Invalider la session active pour forcer une reconnexion avec le nouveau mot de passe
         updates.push('session_token = NULL');
       }
@@ -1026,7 +1180,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       db.prepare(`UPDATE admin_users SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
       // Relire le user pour renvoyer l'état à jour
-      const updated = db.prepare('SELECT id, username, role, email, created_at FROM admin_users WHERE id = ?').get(id);
+      const updated = db.prepare('SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users WHERE id = ?').get(id);
 
       const changes = [];
       if (username && username.trim() !== target.username) changes.push(`username→${username.trim()}`);
@@ -1035,11 +1189,79 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       if (password) changes.push('mdp réinitialisé');
       logActivity(req.admin.username, 'update_admin', `Modification admin ${target.username}: ${changes.join(', ')}`);
 
-      res.json(updated);
+      res.json(publicUser(updated));
     } catch (err) {
       console.error('Update admin error:', err.message);
       res.status(500).json({ error: 'Erreur mise à jour administrateur' });
     }
+  });
+
+  // Activer / désactiver un compte
+  app.patch('/api/admin/users/:id/active', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { is_active } = req.body;
+      const target = db.prepare('SELECT id, username FROM admin_users WHERE id = ?').get(id);
+      if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+      if (target.username === req.admin.username) {
+        return res.status(400).json({ error: 'Vous ne pouvez pas désactiver votre propre compte' });
+      }
+      const newActive = is_active ? 1 : 0;
+      // Si on désactive, on coupe aussi la session active.
+      if (newActive === 0) {
+        db.prepare('UPDATE admin_users SET is_active = 0, session_token = NULL, session_expires_at = NULL WHERE id = ?').run(id);
+      } else {
+        db.prepare('UPDATE admin_users SET is_active = 1 WHERE id = ?').run(id);
+      }
+      logActivity(req.admin.username, newActive ? 'activate_admin' : 'deactivate_admin', `${newActive ? 'Activation' : 'Désactivation'} de ${target.username}`);
+      const fresh = db.prepare('SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users WHERE id = ?').get(id);
+      res.json(publicUser(fresh));
+    } catch (err) {
+      console.error('Toggle admin active error:', err.message);
+      res.status(500).json({ error: 'Erreur changement statut' });
+    }
+  });
+
+  // Forcer la déconnexion d'un utilisateur (révoque sa session)
+  app.post('/api/admin/users/:id/force-logout', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+    const id = parseInt(req.params.id);
+    const target = db.prepare('SELECT id, username FROM admin_users WHERE id = ?').get(id);
+    if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    if (target.username === req.admin.username) {
+      return res.status(400).json({ error: 'Utilisez le bouton « Déconnexion » pour votre propre session' });
+    }
+    db.prepare('UPDATE admin_users SET session_token = NULL, session_expires_at = NULL WHERE id = ?').run(id);
+    logActivity(req.admin.username, 'force_logout', `Déconnexion forcée de ${target.username}`);
+    const fresh = db.prepare('SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users WHERE id = ?').get(id);
+    res.json(publicUser(fresh));
+  });
+
+  // Forcer le renouvellement du mot de passe au prochain login
+  app.post('/api/admin/users/:id/force-password-reset', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+    const id = parseInt(req.params.id);
+    const target = db.prepare('SELECT id, username FROM admin_users WHERE id = ?').get(id);
+    if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    if (target.username === req.admin.username) {
+      return res.status(400).json({ error: 'Changez votre propre mot de passe via votre profil' });
+    }
+    db.prepare('UPDATE admin_users SET must_change_password = 1 WHERE id = ?').run(id);
+    logActivity(req.admin.username, 'force_password_reset', `Renouvellement de mot de passe imposé à ${target.username}`);
+    const fresh = db.prepare('SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users WHERE id = ?').get(id);
+    res.json(publicUser(fresh));
+  });
+
+  // Désactiver la 2FA d'un autre utilisateur (clé d'urgence pour super_admin)
+  app.post('/api/admin/users/:id/reset-2fa', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+    const id = parseInt(req.params.id);
+    const target = db.prepare('SELECT id, username, totp_enabled FROM admin_users WHERE id = ?').get(id);
+    if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    if (target.username === req.admin.username) {
+      return res.status(400).json({ error: 'Désactivez votre propre 2FA depuis votre profil' });
+    }
+    db.prepare('UPDATE admin_users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(id);
+    logActivity(req.admin.username, 'reset_2fa', `2FA réinitialisée pour ${target.username}`);
+    const fresh = db.prepare('SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users WHERE id = ?').get(id);
+    res.json(publicUser(fresh));
   });
 
   app.delete('/api/admin/users/:id', auth, requireSuperAdmin, csrfProtection, (req, res) => {

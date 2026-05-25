@@ -310,14 +310,16 @@ export async function calculateStockKPIs(dolibarrPool) {
      GROUP BY e.rowid`
   );
 
-  // Valeur stock au prix public
+  // Valeur stock au prix public — basé sur p.stock global (source de vérité unique).
+  // Évite les doublons que produisait l'agrégat depuis llx_product_stock (un produit
+  // présent dans N dépôts y apparaît N fois), et garde les KPIs cohérents avec les
+  // requêtes ruptures/stock_bas plus bas qui interrogent aussi p.stock.
   const [[stockValue]] = await dolibarrPool.query(
-    `SELECT COALESCE(SUM(ps.reel * p.price_ttc), 0) AS value_public,
-            COUNT(DISTINCT ps.fk_product) AS total_products,
-            COALESCE(SUM(ps.reel), 0) AS total_units
-     FROM llx_product_stock ps
-     JOIN llx_product p ON p.rowid = ps.fk_product
-     WHERE p.tosell = 1 AND ps.reel > 0`
+    `SELECT COALESCE(SUM(p.stock * p.price_ttc), 0) AS value_public,
+            COUNT(*) AS total_products,
+            COALESCE(SUM(p.stock), 0) AS total_units
+     FROM llx_product p
+     WHERE p.tosell = 1 AND p.stock > 0`
   );
 
   // Produits en rupture

@@ -9,6 +9,7 @@ import { EXCLUDED_CATEGORIES_SET } from '../../../utils/excludedCategories.js';
 import { hydrateBook, decodeEntities } from '../../../utils/bookForm.js';
 import ConfirmModal from '../../../components/common/ConfirmModal.jsx';
 import AuthorAutocomplete from '../../../components/common/AuthorAutocomplete.jsx';
+import MultiAuthorPicker from '../../../components/common/MultiAuthorPicker.jsx';
 import CoverUploader from '../../../components/common/CoverUploader.jsx';
 import { useFormBinder } from '../../../hooks/useFormField.js';
 
@@ -158,12 +159,23 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
     setShowConfirm(null);
     setSaving(true);
     try {
-      const payload = { ...form, genre_id: form.genre_ids[0] || '' };
+      const payload = {
+        ...form,
+        genre_id: form.genre_ids[0] || '',
+        author_ids: (form.authors || []).map((a) => a.id), // Phase 4 : envoi des FK
+      };
       let bookId;
       if (isEdit) {
-        await updateBook(form.id, payload);
+        const res = await updateBook(form.id, payload);
         bookId = form.id;
-        toast.success('Livre mis à jour');
+        // 207 Multi-Status : sync genres partielle, prévenir l'admin
+        if (res?.status === 207 || res?.data?.warning === 'genres_partial_sync') {
+          const failed = res?.data?.genres_failures || {};
+          const n = (failed.link?.length || 0) + (failed.unlink?.length || 0);
+          toast.error(`Livre enregistré mais ${n} genre(s) n'ont pas pu être synchronisés. Voir la fiche pour confirmer.`, { duration: 8000 });
+        } else {
+          toast.success('Livre mis à jour');
+        }
       } else {
         const res = await createBook(payload);
         bookId = res.data.id;
@@ -244,22 +256,43 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
         <input type="text" {...bind('title')} maxLength={200} placeholder="Titre de l'ouvrage" />
       </Field>
 
-      <div className="book-form-row">
-        <Field label="Nom auteur" required error={errors.author} grow>
-          <AuthorAutocomplete
-            value={form.author_nom}
-            onChange={(v) => bind('author_nom').onChange(v)}
-            onSelect={selectAuthorSuggestion}
-            extraQuery={form.author_prenom}
-            onBlur={() => validateField('author')}
-            maxLength={80}
-            placeholder="Rechercher un auteur existant..."
-          />
-        </Field>
-        <Field label="Prénom auteur" grow>
-          <input type="text" {...bind('author_prenom')} maxLength={80} placeholder="Papa" />
-        </Field>
-      </div>
+      <Field label="Auteur(s)" required error={errors.author}>
+        <MultiAuthorPicker
+          value={form.authors || []}
+          onChange={(newAuthors) => {
+            // Maintient la rétrocompat : author_nom = display_names joints (pour validation et display)
+            const display = newAuthors.map((a) => a.display_name).filter(Boolean).join(' ; ');
+            setForm((f) => ({
+              ...f,
+              authors: newAuthors,
+              author_nom: display,
+              author_prenom: '',
+            }));
+            setErrors((e) => ({ ...e, author: undefined }));
+          }}
+        />
+      </Field>
+
+      {/* Fallback texte libre si l'auteur n'est dans aucun référentiel : on garde
+          l'AuthorAutocomplete pour les cas legacy (livres importés sans match SQLite). */}
+      {(!form.authors || form.authors.length === 0) && (
+        <div className="book-form-row">
+          <Field label="Nom auteur (texte libre, fallback)" error={errors.author} grow>
+            <AuthorAutocomplete
+              value={form.author_nom}
+              onChange={(v) => bind('author_nom').onChange(v)}
+              onSelect={selectAuthorSuggestion}
+              extraQuery={form.author_prenom}
+              onBlur={() => validateField('author')}
+              maxLength={80}
+              placeholder="Ou tapez librement si l'auteur n'est pas encore référencé…"
+            />
+          </Field>
+          <Field label="Prénom auteur" grow>
+            <input type="text" {...bind('author_prenom')} maxLength={80} placeholder="Papa" />
+          </Field>
+        </div>
+      )}
 
       <Field label="ISBN" required error={errors.isbn}>
         <div className="book-isbn-wrap">
@@ -336,7 +369,7 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
       </div>
 
       <Field label="Prix TTC (FCFA)" required error={errors.price_ttc}>
-        <input type="number" {...bind('price_ttc')} min="1" step="0.01" />
+        <input type="number" {...bind('price_ttc')} min="1" step="1" inputMode="numeric" />
       </Field>
 
       <Field label="Sous-titre">

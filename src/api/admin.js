@@ -19,6 +19,7 @@ api.interceptors.response.use(
 
 // Auth
 export const adminLogin = (username, password) => api.post('/admin/login', { username, password });
+export const adminLogin2FA = (pendingToken, code) => api.post('/admin/login/2fa', { pendingToken, code });
 export const adminLogout = () => api.post('/admin/logout');
 export const adminMe = () => api.get('/admin/me');
 export const adminChangePassword = (current, newPassword) => api.put('/admin/password', { current, newPassword });
@@ -100,6 +101,16 @@ export const getAdminUsers = () => api.get('/admin/users');
 export const createAdminUser = (data) => api.post('/admin/users', data);
 export const updateAdminUser = (id, data) => api.put(`/admin/users/${id}`, data);
 export const deleteAdminUser = (id) => api.delete(`/admin/users/${id}`);
+export const setAdminUserActive = (id, isActive) => api.patch(`/admin/users/${id}/active`, { is_active: isActive });
+export const forceLogoutAdminUser = (id) => api.post(`/admin/users/${id}/force-logout`);
+export const forcePasswordResetAdminUser = (id) => api.post(`/admin/users/${id}/force-password-reset`);
+export const resetAdminUser2FA = (id) => api.post(`/admin/users/${id}/reset-2fa`);
+export const getAdminRoles = () => api.get('/admin/roles');
+
+// 2FA (TOTP) — pour l'utilisateur connecté
+export const setup2FA = () => api.post('/admin/2fa/setup');
+export const verify2FA = (code) => api.post('/admin/2fa/verify', { code });
+export const disable2FA = (password, code) => api.post('/admin/2fa/disable', { password, code });
 
 // Activity log
 export const getActivityLog = (params = {}) => api.get('/admin/activity-log', { params });
@@ -117,6 +128,7 @@ export const exportSubscribers = () => '/api/admin/newsletter/export';
 // Orders & Payments
 export const confirmOrderPayment = (orderId) => api.post(`/admin/orders/${orderId}/confirm-payment`);
 export const getAdminPayments = (params = {}) => api.get('/admin/payments', { params });
+export const getPaymentOrphans = () => api.get('/admin/payments/orphans');
 export const rejectPayment = (id, reason = '') => api.post(`/admin/payments/${id}/reject`, { reason });
 
 // Stock & Réapprovisionnement
@@ -154,9 +166,12 @@ export const getAdminCustomers = (params = {}) => api.get('/admin/customers', { 
 export const getAdminCustomer = (id) => api.get(`/admin/customers/${id}`);
 export const resetCustomerPassword = (id) => api.post(`/admin/customers/${id}/reset-password`);
 
-export const getAdminAuthors = (params = {}) => api.get('/admin/authors', { params });
+export const getAdminAuthors = (params = {}, config = {}) => api.get('/admin/authors', { params, ...config });
 export const getAdminAuthor = (id) => api.get(`/admin/authors/${id}`);
+export const createAdminAuthor = (data) => api.post('/admin/authors', data);
 export const resetAuthorPassword = (id) => api.post(`/admin/authors/${id}/reset-password`);
+export const updateAdminAuthor = (id, data) => api.put(`/admin/authors/${id}`, data);
+export const notifyAuthorRoyalties = (id) => api.post(`/admin/authors/${id}/notify-royalties`);
 
 // ─── News / Actualités ─────────────────────────────────
 export const listNewsArticles = (params = {}) => api.get('/admin/news', { params });

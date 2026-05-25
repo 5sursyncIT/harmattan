@@ -6,7 +6,7 @@
  */
 
 const MAX_TITLE = 200;
-const MAX_AUTHOR = 80;
+const MAX_AUTHOR = 255; // varchar(255) côté Dolibarr extrafield, autorise multi-auteurs joints
 const MAX_PUBLISHER = 100;
 const MAX_SUBTITLE = 200;
 const MAX_DESCRIPTION = 5000;
@@ -157,10 +157,9 @@ export function validatePrice(price) {
   if (!Number.isFinite(n) || n <= 0) {
     return { valid: false, error: 'Le prix doit être un nombre positif' };
   }
-  // Vérifie qu'on n'a pas plus de 2 décimales
-  const rounded = Math.round(n * 100) / 100;
-  if (Math.abs(rounded - n) > 1e-9) {
-    return { valid: false, error: 'Le prix doit être positif avec au maximum 2 décimales' };
+  // FCFA/XOF : devise sans subdivision décimale, prix obligatoirement entier
+  if (!Number.isInteger(n)) {
+    return { valid: false, error: 'Le prix doit être un entier (FCFA sans décimale)' };
   }
   return { valid: true };
 }

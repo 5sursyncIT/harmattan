@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { FiSearch, FiRefreshCw, FiMail, FiEye, FiX, FiKey, FiCheckCircle, FiExternalLink, FiFileText } from 'react-icons/fi';
+import { FiSearch, FiRefreshCw, FiMail, FiEye, FiX, FiKey, FiCheckCircle, FiExternalLink, FiFileText, FiEdit2, FiDollarSign, FiGlobe } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import {
   getAdminAuthors, getAdminAuthor, resetAuthorPassword,
+  updateAdminAuthor, notifyAuthorRoyalties,
 } from '../../../api/admin';
 
 const STAGE_LABELS = {
@@ -45,18 +46,40 @@ function StageBadge({ stage }) {
   );
 }
 
-function AuthorDetailModal({ id, onClose }) {
+function AuthorDetailModal({ id, onClose, onSaved }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [notifyLoading, setNotifyLoading] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false;
+    setLoading(true);
     getAdminAuthor(id)
-      .then((r) => { if (!cancelled) setData(r.data); })
+      .then((r) => {
+        if (cancelled) return;
+        setData(r.data);
+        setForm({
+          display_name: r.data.author.display_name || `${r.data.author.firstname} ${r.data.author.lastname}`.trim(),
+          slug: r.data.author.slug || '',
+          bio: r.data.author.bio || '',
+          photo_url: r.data.author.photo_url || '',
+          website: r.data.author.website || '',
+          social_twitter: r.data.author.social_twitter || '',
+          social_instagram: r.data.author.social_instagram || '',
+          social_linkedin: r.data.author.social_linkedin || '',
+          social_facebook: r.data.author.social_facebook || '',
+          public_listed: !!r.data.author.public_listed,
+        });
+      })
       .catch(() => { if (!cancelled) toast.error('Erreur de chargement'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [id]);
+
+  useEffect(() => { load(); }, [load]);
 
   const handleReset = async () => {
     if (!window.confirm('Envoyer un email de réinitialisation de mot de passe à cet auteur ?')) return;
@@ -66,6 +89,44 @@ function AuthorDetailModal({ id, onClose }) {
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur envoi');
     }
+  };
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const res = await updateAdminAuthor(id, form);
+      toast.success(`Profil mis à jour (slug: ${res.data.slug})`);
+      setEditing(false);
+      load();
+      onSaved?.();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur sauvegarde');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleNotifyRoyalties = async () => {
+    if (!window.confirm('Envoyer à cet auteur un email récapitulatif de ses royalties dues sur l\'exercice en cours ?')) return;
+    setNotifyLoading(true);
+    try {
+      const res = await notifyAuthorRoyalties(id);
+      if (res.data.books === 0) {
+        toast.success(`Email envoyé à ${res.data.email} (aucune royaltie due)`);
+      } else {
+        toast.success(`Email envoyé à ${res.data.email} — ${res.data.books} livre(s), ${res.data.total_due.toLocaleString('fr-FR')} XOF dus`);
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur envoi');
+    } finally {
+      setNotifyLoading(false);
+    }
+  };
+
+  const handleChange = (key) => (e) => {
+    const val = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    setForm((f) => ({ ...f, [key]: val }));
   };
 
   return (
@@ -117,8 +178,76 @@ function AuthorDetailModal({ id, onClose }) {
               ) : <p style={{ color: '#6b7280', margin: 0 }}>Aucun manuscrit soumis.</p>}
             </section>
 
+            <section className="admin-modal-section">
+              <h4>
+                <FiGlobe /> Profil public
+                {data.author.public_listed && data.author.slug && (
+                  <span style={{ marginLeft: 12, fontSize: 12, color: '#10531a', fontWeight: 600 }}>
+                    Visible · <a href={`/auteur/${data.author.slug}`} target="_blank" rel="noreferrer" style={{ color: '#10531a' }}>/auteur/{data.author.slug}</a>
+                  </span>
+                )}
+              </h4>
+              {!editing ? (
+                <div className="admin-info-grid">
+                  <div><strong>Affichage</strong><span>{data.author.display_name || '—'}</span></div>
+                  <div><strong>Slug</strong><span>{data.author.slug || '—'}</span></div>
+                  <div><strong>Public</strong><span>{data.author.public_listed ? 'Oui' : 'Non'}</span></div>
+                  <div><strong>Site web</strong><span>{data.author.website ? <a href={data.author.website} target="_blank" rel="noreferrer">{data.author.website}</a> : '—'}</span></div>
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <strong>Biographie</strong>
+                    <span style={{ whiteSpace: 'pre-wrap' }}>{data.author.bio || '—'}</span>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleSave} style={{ display: 'grid', gap: 14 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <label>
+                      <strong style={{ display: 'block', marginBottom: 4 }}>Nom d'affichage</strong>
+                      <input type="text" value={form.display_name} onChange={handleChange('display_name')} style={{ width: '100%' }} />
+                    </label>
+                    <label>
+                      <strong style={{ display: 'block', marginBottom: 4 }}>Slug URL</strong>
+                      <input type="text" value={form.slug} onChange={handleChange('slug')} placeholder="prenom-nom" style={{ width: '100%' }} />
+                    </label>
+                  </div>
+                  <label>
+                    <strong style={{ display: 'block', marginBottom: 4 }}>Photo (URL)</strong>
+                    <input type="url" value={form.photo_url} onChange={handleChange('photo_url')} placeholder="https://…/photo.jpg" style={{ width: '100%' }} />
+                  </label>
+                  <label>
+                    <strong style={{ display: 'block', marginBottom: 4 }}>Biographie</strong>
+                    <textarea value={form.bio} onChange={handleChange('bio')} rows={6} maxLength={5000} style={{ width: '100%' }} />
+                  </label>
+                  <label>
+                    <strong style={{ display: 'block', marginBottom: 4 }}>Site web</strong>
+                    <input type="url" value={form.website} onChange={handleChange('website')} placeholder="https://…" style={{ width: '100%' }} />
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <label><strong style={{ display: 'block', marginBottom: 4 }}>Twitter / X</strong><input type="url" value={form.social_twitter} onChange={handleChange('social_twitter')} style={{ width: '100%' }} /></label>
+                    <label><strong style={{ display: 'block', marginBottom: 4 }}>Instagram</strong><input type="url" value={form.social_instagram} onChange={handleChange('social_instagram')} style={{ width: '100%' }} /></label>
+                    <label><strong style={{ display: 'block', marginBottom: 4 }}>LinkedIn</strong><input type="url" value={form.social_linkedin} onChange={handleChange('social_linkedin')} style={{ width: '100%' }} /></label>
+                    <label><strong style={{ display: 'block', marginBottom: 4 }}>Facebook</strong><input type="url" value={form.social_facebook} onChange={handleChange('social_facebook')} style={{ width: '100%' }} /></label>
+                  </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <input type="checkbox" checked={form.public_listed} onChange={handleChange('public_listed')} />
+                    <strong>Publier dans l'annuaire des auteurs</strong>
+                  </label>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button type="button" className="btn btn-ghost" onClick={() => setEditing(false)}>Annuler</button>
+                    <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Sauvegarde…' : 'Enregistrer'}</button>
+                  </div>
+                </form>
+              )}
+            </section>
+
             <div className="admin-modal-actions">
-              <button className="btn btn-outline" onClick={handleReset}><FiKey /> Envoyer un lien de réinitialisation MDP</button>
+              {!editing && (
+                <button className="btn btn-primary" onClick={() => setEditing(true)}><FiEdit2 /> Éditer profil public</button>
+              )}
+              <button className="btn btn-outline" onClick={handleNotifyRoyalties} disabled={notifyLoading}>
+                <FiDollarSign /> {notifyLoading ? 'Envoi…' : 'Envoyer récap royalties'}
+              </button>
+              <button className="btn btn-outline" onClick={handleReset}><FiKey /> Reset MDP</button>
               {data.author.dolibarr_thirdparty_id && (
                 <a
                   className="btn btn-outline"
@@ -157,6 +286,7 @@ export default function AuthorsPanel() {
       .finally(() => setLoading(false));
   }, [q, page]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   return (
@@ -209,6 +339,9 @@ export default function AuthorsPanel() {
                   <td>
                     <strong>{a.firstname} {a.lastname}</strong>
                     {!a.email_verified && <span style={{ marginLeft: 6, fontSize: 11, color: '#dc2626' }}>(email non vérifié)</span>}
+                    {a.public_listed ? (
+                      <span style={{ marginLeft: 6, fontSize: 10, padding: '2px 6px', background: '#dcfce7', color: '#166534', borderRadius: 999, fontWeight: 700 }}>PUBLIC</span>
+                    ) : null}
                   </td>
                   <td><a href={`mailto:${a.email}`} style={{ color: '#10531a' }}>{a.email}</a></td>
                   <td>{a.phone || '—'}</td>

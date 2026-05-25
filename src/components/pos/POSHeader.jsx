@@ -3,13 +3,9 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import usePosAuthStore from '../../store/posAuthStore';
 import usePosSessionStore from '../../store/posSessionStore';
-import { posGetTodaySales } from '../../api/pos';
+import { posGetTodaySales, posGetConfig, posLogout } from '../../api/pos';
 import { FiLogOut, FiDollarSign, FiClock, FiMonitor, FiLock, FiBarChart2, FiRotateCcw, FiShield, FiPrinter } from 'react-icons/fi';
 import './POSHeader.css';
-
-function getPosTerminal() {
-  return parseInt(localStorage.getItem('pos-terminal') || '1');
-}
 
 export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, onDevices, onPrinterSettings }) {
   const staff = usePosAuthStore((s) => s.staff);
@@ -17,13 +13,18 @@ export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, o
   const isSessionOpen = usePosSessionStore((s) => s.isOpen);
   const navigate = useNavigate();
   const [time, setTime] = useState(new Date());
-  const [terminal, setTerminal] = useState(getPosTerminal);
-  const [editing, setEditing] = useState(false);
+  const [terminal, setTerminal] = useState(null);
   const [todaySales, setTodaySales] = useState({ count: 0, total: 0 });
 
   useEffect(() => {
     const interval = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Le numéro de terminal est défini par le serveur (lié à l'appareil enrôlé),
+  // il n'est plus modifiable depuis le poste.
+  useEffect(() => {
+    posGetConfig().then((res) => setTerminal(res.data?.terminal ?? null)).catch(() => {});
   }, []);
 
   // Fetch today's sales summary every 30s
@@ -40,17 +41,14 @@ export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, o
     fetchSales();
     const interval = setInterval(fetchSales, 30000);
     return () => clearInterval(interval);
-  }, [terminal]);
+  }, []);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // Appel serveur indispensable : seul le serveur peut effacer le cookie
+    // HttpOnly de session et supprimer la session en base.
+    try { await posLogout(); } catch { /* hors ligne — on déconnecte localement quand même */ }
     logout();
     navigate('/pos/connexion');
-  };
-
-  const changeTerminal = (num) => {
-    setTerminal(num);
-    localStorage.setItem('pos-terminal', String(num));
-    setEditing(false);
   };
 
   return (
@@ -60,19 +58,9 @@ export default function POSHeader({ onOpenCashRegister, onChangePin, onReturn, o
           <img src="/images/logo.png" alt="Logo L'Harmattan" className="pos-header-logo" />
           <span>L'Harmattan Sénégal</span>
         </div>
-        {editing ? (
-          <div className="pos-terminal-picker">
-            {[1, 2, 3, 4, 5].map((n) => (
-              <button key={n} className={`pos-terminal-opt ${n === terminal ? 'active' : ''}`} onClick={() => changeTerminal(n)}>
-                {n}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <button className="pos-header-terminal" onClick={() => setEditing(true)}>
-            <FiMonitor size={12} /> Terminal {terminal}
-          </button>
-        )}
+        <div className="pos-header-terminal">
+          <FiMonitor size={12} /> Terminal {terminal ?? '—'}
+        </div>
       </div>
 
       <div className="pos-header-center">

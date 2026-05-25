@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { FiEye, FiEyeOff, FiCheck } from 'react-icons/fi';
 import { resetPassword } from '../api/dolibarr';
+import { AuthScopeBadge } from './AuthScope';
 import './AuthPages.css';
 
 export default function ResetPasswordPage() {
@@ -70,6 +71,7 @@ export default function ResetPasswordPage() {
     <div className="auth-page">
       <div className="container">
         <div className="auth-card">
+          <AuthScopeBadge scope="client" />
           <h1>Nouveau mot de passe</h1>
           <p style={{ color: '#666', marginBottom: 20 }}>
             Choisissez un nouveau mot de passe pour <strong>{email}</strong>

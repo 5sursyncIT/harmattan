@@ -9,7 +9,7 @@ export default function CheckoutFailurePage() {
   const [searchParams] = useSearchParams();
   const orderRef = searchParams.get('ref') || searchParams.get('order_ref');
   const config = useSiteConfig();
-  const phone = config?.whatsapp_phone || '221772422508';
+  const phone = config?.whatsapp_phone || '221709530240';
 
   const helpUrl = buildWhatsAppOrderUrl(
     phone,

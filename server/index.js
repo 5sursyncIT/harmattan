@@ -35,6 +35,11 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
+// Un seul proxy Apache local en amont — nécessaire pour que req.ip / rate-limit
+// se basent sur le vrai client (X-Forwarded-For).
+app.set('trust proxy', 1);
+// Ne pas divulguer la techno serveur.
+app.disable('x-powered-by');
 
 // --- DOLIBARR MYSQL CONNECTION ---
 const dolibarrPool = mysql.createPool({
@@ -264,19 +269,29 @@ const SITE_URL = process.env.SITE_URL || `http://38.242.229.122:${PORT}`;
 // Helmet — HTTP security headers
 app.use(helmet({
   contentSecurityPolicy: IS_PROD ? {
-    reportOnly: true, // Passer à false une fois HTTPS configuré
+    reportOnly: false, // CSP réellement appliquée (HTTPS en place via Apache)
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      // 'unsafe-inline' + 'unsafe-eval' nécessaires pour le bundle Vite/React
+      // (script d'init inline + lib utilisant new Function). Le reste de la CSP
+      // reste strict — pas de chargement de scripts externes hors 'self'.
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https://i.ytimg.com", "blob:"],
       connectSrc: ["'self'"],
       frameSrc: ["'self'", "https://www.youtube.com", "https://www.youtube-nocookie.com"],
-      upgradeInsecureRequests: null, // Désactivé tant que HTTPS n'est pas configuré
+      upgradeInsecureRequests: [], // Réactivé : HTTPS configuré
     },
   } : false,
   crossOriginEmbedderPolicy: false,
+  // YouTube embed (iframe cross-origin) déclenche "Erreur 153 - Configuration du
+  // lecteur vidéo" quand le Referer est masqué. Helmet met no-referrer par
+  // défaut ; YouTube demande au moins l'origine du site pour les lecteurs embed.
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  // On relâche aussi COOP/CORP pour les embeds tiers.
+  crossOriginOpenerPolicy: false,
+  crossOriginResourcePolicy: false,
 }));
 
 // CORS — restrict origins
@@ -293,7 +308,14 @@ app.use(cors({
 
 app.use(compression());
 app.use(cookieParser());
-app.use(express.json({ limit: '1mb' }));
+// `verify` capture le buffer brut pour vérifier les signatures HMAC sans dépendre
+// de l'ordre des clés ou de l'échappement Unicode après re-stringification.
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => {
+    if (buf && buf.length) req.rawBody = buf;
+  },
+}));
 
 // ─── RATE LIMITING ──────────────────────────────────────────
 
@@ -314,7 +336,6 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Trop de tentatives, réessayez dans 15 minutes' },
-  validate: { xForwardedForHeader: false },
 });
 
 // Strict rate limit for newsletter: 5 per hour
@@ -322,7 +343,6 @@ const newsletterLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
   message: { error: 'Trop de demandes d\'inscription, réessayez plus tard' },
-  validate: { xForwardedForHeader: false },
 });
 
 // Order creation: 10 per hour
@@ -330,7 +350,6 @@ const orderLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
   message: { error: 'Trop de commandes, réessayez plus tard' },
-  validate: { xForwardedForHeader: false },
 });
 
 // Sync trigger: 2 per hour
@@ -338,10 +357,29 @@ const syncLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 2,
   message: { error: 'Sync déjà déclenché récemment' },
-  validate: { xForwardedForHeader: false },
+});
+
+// Soumission publique de manuscrits (upload PDF/DOCX) : 5 par heure par IP.
+// L'upload est coûteux et la route est publique → cible privilégiée de spam.
+const manuscriptSubmitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de soumissions, réessayez dans une heure' },
 });
 
 // ─── CSRF PROTECTION ────────────────────────────────────────
+
+// Comparaison constant-time sûre : retourne false si longueurs différentes
+// (crypto.timingSafeEqual lève une RangeError sinon).
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 // Generate CSRF secret per session (stored in cookie)
 const CSRF_SECRET = crypto.randomBytes(32).toString('hex');
@@ -379,7 +417,7 @@ function csrfProtection(req, res, next) {
     .update(sessionId)
     .digest('hex');
 
-  if (!crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
+  if (!safeEqual(token, expected)) {
     return res.status(403).json({ error: 'Token CSRF invalide' });
   }
 
@@ -486,6 +524,13 @@ function enrichProduct(p, hasImage) {
   };
 }
 
+// Hache un token de session avant lookup/insertion en DB — le token brut ne
+// vit que dans le cookie HttpOnly de l'utilisateur. En cas de fuite SQLite,
+// les tokens stockés ne sont pas rejouables.
+export function hashCustomerSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
 // ─── CUSTOMER AUTH MIDDLEWARE ────────────────────────────────
 function requireCustomerAuth(req, res, next) {
   const token = req.cookies?.customer_session;
@@ -493,7 +538,7 @@ function requireCustomerAuth(req, res, next) {
 
   const session = db.prepare(
     "SELECT cs.customer_id, c.* FROM customer_sessions cs JOIN customers c ON c.id = cs.customer_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
-  ).get(token);
+  ).get(hashCustomerSessionToken(token));
   if (!session) return res.status(401).json({ error: 'Session expirée' });
 
   req.customer = session;
@@ -550,6 +595,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS book_tag_products (
 db.exec(`CREATE INDEX IF NOT EXISTS idx_btp_tag ON book_tag_products(tag_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_btp_product ON book_tag_products(product_id)`);
 
+// Junction livre ↔ auteur SQLite (Phase 1 du refactor auteur, 2026-05-24)
+// `pe.auteur` Dolibarr reste source de vérité lecture publique. Cette table est
+// remplie en dual-write par BookForm save quand le nom matche un author SQLite.
+db.exec(`CREATE TABLE IF NOT EXISTS book_authors (
+  product_id INTEGER NOT NULL,
+  author_id INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT 'author',
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (product_id, author_id, role),
+  FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_ba_product ON book_authors(product_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_ba_author ON book_authors(author_id)`);
+
 // Seed les 4 tags système si absents
 const SYSTEM_TAGS = [
   { slug: 'notre_selection', label: 'Notre sélection', color: '#ea580c', icon: 'FiStar', sort_order: 1, description: "Les livres choisis par l'équipe éditoriale" },
@@ -599,18 +659,25 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
     }
 
     // Validate via HMAC signature (preferred) or direct secret match
-    const bodyStr = JSON.stringify(req.body);
-    const expectedSignature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(bodyStr).digest('hex');
+    // Comparaisons constant-time (safeEqual) pour éviter les timing attacks.
+    // IMPORTANT : signer/vérifier sur le body BRUT (rawBody), pas sur la re-stringification
+    // qui peut différer du JSON original (ordre des clés, échappement Unicode).
+    const rawBuf = req.rawBody || Buffer.from(JSON.stringify(req.body));
+    const expectedSignature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(rawBuf).digest('hex');
 
-    if (headerSignature && headerSignature !== expectedSignature) {
+    if (headerSignature && !safeEqual(headerSignature, expectedSignature)) {
       // Also try with raw body if JSON.stringify differs
-      if (headerSecret !== WEBHOOK_SECRET) {
+      if (!safeEqual(headerSecret, WEBHOOK_SECRET)) {
         console.warn('[WEBHOOK] Invalid signature/secret');
         return res.status(401).json({ error: 'Invalid webhook signature' });
       }
-    } else if (!headerSignature && headerSecret !== WEBHOOK_SECRET) {
-      console.warn('[WEBHOOK] Invalid secret');
-      return res.status(401).json({ error: 'Invalid webhook secret' });
+      console.warn('[WEBHOOK] Authentification via secret en clair (signature absente/invalide)');
+    } else if (!headerSignature) {
+      if (!safeEqual(headerSecret, WEBHOOK_SECRET)) {
+        console.warn('[WEBHOOK] Invalid secret');
+        return res.status(401).json({ error: 'Invalid webhook secret' });
+      }
+      console.warn('[WEBHOOK] Authentification via secret en clair (signature absente)');
     }
 
     // ── Parse payload ──
@@ -740,11 +807,21 @@ app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtectio
 import { createAuthorRouter } from './author-routes.js';
 const { router: authorRouter, requireAuthorAuth } = createAuthorRouter({
   db, csrfProtection, sanitizeBody, authLimiter, transporter,
-  cookieSecure: COOKIE_SECURE, siteUrl: SITE_URL,
+  cookieSecure: COOKIE_SECURE, siteUrl: SITE_URL, dolibarrPool,
 });
 app.use('/api/author', authorRouter);
-// eslint-disable-next-line no-unused-vars
+ 
 const _requireAuthorAuth = requireAuthorAuth;
+
+// ─── ESPACE PUBLIC DES AUTEURS (annuaire + profil) ─────────
+import { createAuthorPublicRouter, ensureAuthorPublicSchema } from './author-public-routes.js';
+try {
+  ensureAuthorPublicSchema(db);
+  console.log('[PUBLIC-AUTHORS] Schéma étendu (slug/bio/photo/socials) OK');
+} catch (err) {
+  console.error('[PUBLIC-AUTHORS] Init schéma:', err.message);
+}
+app.use('/api/authors', createAuthorPublicRouter({ db, dolibarrPool, cache }));
 
 // ─── ADMIN MODULE ───────────────────────────────────────────
 const siteConfigPath = join(__dirname, 'site-config.json');
@@ -872,7 +949,7 @@ async function sendPreorderReleaseEmail(preorder, paymentMethods = getEnabledPay
 }
 import { setupAdminRoutes, adminAuth } from './admin-routes.js';
 try {
-  setupAdminRoutes(app, { db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure: COOKIE_SECURE, authLimiter, siteUrl: SITE_URL });
+  setupAdminRoutes(app, { db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure: COOKIE_SECURE, authLimiter, manuscriptSubmitLimiter, siteUrl: SITE_URL });
   console.log('[ADMIN] Admin routes mounted');
 } catch (err) {
   console.error('[ADMIN] Failed to mount admin routes:', err);
@@ -891,7 +968,6 @@ try {
 // ─── MANUSCRIPT WORKFLOW (admin) — monté APRÈS setupAdminRoutes
 // pour bénéficier du middleware RBAC global sur /api/admin
 import { createManuscriptRouter } from './manuscript-routes.js';
-import { generateSignatureUrl } from './contract-routes.js';
 import { transition as wfTransition } from './manuscript-workflow.js';
 import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences } from './manuscript-emails.js';
 
@@ -931,8 +1007,12 @@ async function createContractDraft(manuscript) {
     }
   }
 
-  // Créer le contrat brouillon via Dolibarr REST API
-  const TEMPLATE_FILE = 'template_harmattan_2024';
+  // Créer le contrat brouillon via Dolibarr REST API.
+  // Type par défaut : edition_simple (papier seul) — le plus prudent ; l'éditeur
+  // peut ensuite basculer vers edition_numerique / edition_complete dans le brouillon
+  // s'il choisit ces formules. Aligné avec ACTIVE_CONTRACT_TYPES de contract-routes.js.
+  const CONTRACT_TYPE = 'edition_simple';
+  const TEMPLATE_FILE = 'template_edition_simple';
   const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${TEMPLATE_FILE}.odt`;
   try {
     const contractRes = await dolibarrApi.post('/contracts', {
@@ -940,12 +1020,18 @@ async function createContractDraft(manuscript) {
       date_contrat: Math.floor(Date.now() / 1000),
       model_pdf: modelPdf,
       array_options: {
-        options_contract_type: 'harmattan_2024',
+        // Defaults alignés avec DEFAULTS_BY_TYPE[edition_simple] dans contract-routes.js
+        options_contract_type: CONTRACT_TYPE,
         options_book_title: manuscript.title,
         options_royalty_rate_print: 8,
-        options_royalty_rate_digital: 15,
+        options_royalty_rate_digital: 0,
         options_royalty_threshold: 500,
         options_free_author_copies: 10,
+        options_tirage_initial: 100,
+        options_format_ouvrage: '15 × 21 cm',
+        options_prix_public_previsionnel: 8000,
+        options_nombre_pages_estime: 200,
+        options_exemplaires_sp: 5,
       },
     });
     const contractId = contractRes.data;
@@ -961,22 +1047,13 @@ async function createContractDraft(manuscript) {
     // Transition → contract_pending + stockage du contract_id
     wfTransition(db, manuscript.id, 'contract_pending',
       { role: 'system', label: 'workflow' },
-      { note: `Contrat Dolibarr #${contractId} créé`, updates: { contract_id: contractId } }
+      { note: `Contrat Dolibarr #${contractId} créé (${CONTRACT_TYPE})`, updates: { contract_id: contractId } }
     );
 
-    // Email auteur avec le lien de signature (best-effort)
-    try {
-      const [[contractRow]] = await dolibarrPool.query('SELECT ref FROM llx_contrat WHERE rowid = ?', [contractId]);
-      if (contractRow?.ref) {
-        const signatureUrl = generateSignatureUrl(contractRow.ref);
-        transporter?.sendMail({
-          from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
-          to: author.email,
-          subject: `Contrat d'édition ${contractRow.ref} — signature en ligne`,
-          html: `<p>Bonjour ${author.firstname},</p><p>Votre contrat d'édition est prêt. Vous pouvez le signer en ligne via ce lien sécurisé :</p><p><a href="${signatureUrl}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Signer mon contrat</a></p><p>Référence : <strong>${contractRow.ref}</strong></p>`,
-        }).catch((err) => console.error('[WORKFLOW] Signature email error:', err.message));
-      }
-    } catch (err) { console.warn('[WORKFLOW] Signature link fetch warning:', err.message); }
+    // Note : à ce stade le contrat est en brouillon — sa référence est provisoire
+    // (« (PROV…) ») et le PDF définitif n'est pas généré. Le lien de signature
+    // doit être envoyé manuellement par l'éditeur après validation du brouillon
+    // (route POST /api/admin/contracts/:id/send-signature), pas ici.
 
     return { contract_id: contractId, thirdparty_id: thirdpartyId };
   } catch (err) {
@@ -1101,14 +1178,7 @@ setInterval(async () => {
 
 // ─── PAYMENT CONFIRMATION (admin confirms payment → invoice created) ────
 const confirmPaymentAuth = adminAuth(db);
-// Le comptable est en lecture seule : bloquer les actions d'écriture sur les paiements
-function blockComptableWrite(req, res, next) {
-  if (req.admin?.role === 'comptable') {
-    return res.status(403).json({ error: 'Accès en lecture seule pour le profil comptable' });
-  }
-  next();
-}
-app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, blockComptableWrite, csrfProtection, async (req, res) => {
+app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtection, async (req, res) => {
   try {
     const orderId = req.params.id;
 
@@ -1134,11 +1204,49 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, blockCompt
       }
     } catch { /* continue — table may not exist or link not found */ }
 
+    // ── Revalidation stock juste avant création facture ──
+    // Entre la commande et la confirmation paiement, le POS peut avoir vendu les
+    // mêmes exemplaires. On revérifie p.stock pour tous les produits physiques
+    // avant de valider la facture, sinon on crée une commande "facturée" sur du
+    // stock qui n'existe pas.
+    try {
+      const productLines = (order.lines || []).filter((l) => l.fk_product);
+      const productIds = productLines.map((l) => parseInt(l.fk_product));
+      if (productIds.length > 0) {
+        const placeholders = productIds.map(() => '?').join(',');
+        const [stockRows] = await dolibarrPool.query(
+          `SELECT rowid AS id, label, stock, fk_product_type FROM llx_product WHERE rowid IN (${placeholders})`,
+          productIds,
+        );
+        const stockMap = new Map(stockRows.map((r) => [r.id, r]));
+        for (const line of productLines) {
+          const pid = parseInt(line.fk_product);
+          const row = stockMap.get(pid);
+          if (!row || row.fk_product_type !== 0) continue;
+          const available = Number(row.stock) || 0;
+          const qty = parseFloat(line.qty) || 0;
+          if (available < qty) {
+            return res.status(409).json({
+              error: available <= 0 ? 'Article en rupture — paiement non confirmable' : 'Stock insuffisant pour confirmer cette commande',
+              product_id: pid,
+              product_label: row.label,
+              requested: qty,
+              available: Math.max(0, available),
+            });
+          }
+        }
+      }
+    } catch (stockErr) {
+      console.warn('[CONFIRM-PAYMENT] Stock recheck failed, allowing:', stockErr.message);
+    }
+
     // Create invoice from order lines
     const invoiceRes = await dolibarrApi.post('/invoices', {
       socid: parseInt(order.socid),
       date: new Date().toISOString().split('T')[0],
       type: 0,
+      // Tag canal de vente (cohérent avec /orders et avec module_source='takepos' du POS).
+      module_source: 'ecommerce',
       lines: (order.lines || []).map((line) => ({
         fk_product: line.fk_product ? parseInt(line.fk_product) : null,
         qty: parseFloat(line.qty),
@@ -1154,8 +1262,9 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, blockCompt
 
     const invoiceId = invoiceRes.data;
 
-    // Validate the invoice
-    await dolibarrApi.post(`/invoices/${invoiceId}/validate`);
+    // Validate the invoice — idwarehouse:4 (Rayon) déclenche le décrément stock
+    // sur le même dépôt que le POS, source de vérité pour la disponibilité physique.
+    await dolibarrApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
     const invoice = await dolibarrApi.get(`/invoices/${invoiceId}`);
 
     // Mettre à jour le suivi de paiement local
@@ -1208,8 +1317,22 @@ app.get('/api/admin/payments', paymentMgmtAuth, (req, res) => {
   res.json({ payments, total, page: Math.max(1, parseInt(page)), pages: Math.ceil(total / limitInt) });
 });
 
+// Paiements confirmés sans facture liée — incident à arbitrer manuellement.
+// Cas typique : IPN PayTech a confirmé le paiement, mais la création de facture
+// a échoué (timeout Dolibarr, stock insuffisant, etc.). L'admin doit voir cette
+// liste pour relancer la facturation ou rembourser le client.
+app.get('/api/admin/payments/orphans', paymentMgmtAuth, (req, res) => {
+  const rows = db.prepare(
+    `SELECT * FROM order_payments
+     WHERE payment_status = 'confirmed' AND (invoice_ref IS NULL OR invoice_ref = '')
+     ORDER BY confirmed_at DESC, created_at DESC
+     LIMIT 200`
+  ).all();
+  res.json({ payments: rows, total: rows.length });
+});
+
 // Rejeter un paiement
-app.post('/api/admin/payments/:id/reject', paymentMgmtAuth, blockComptableWrite, csrfProtection, (req, res) => {
+app.post('/api/admin/payments/:id/reject', paymentMgmtAuth, csrfProtection, (req, res) => {
   const payment = db.prepare('SELECT * FROM order_payments WHERE id = ?').get(req.params.id);
   if (!payment) return res.status(404).json({ error: 'Paiement introuvable' });
   if (payment.payment_status !== 'pending') return res.status(400).json({ error: 'Seuls les paiements en attente peuvent être rejetés' });
@@ -1250,6 +1373,7 @@ try {
     csrfProtection,
     sanitizeBody,
     cache,
+    db,
   }));
   console.log('[BOOKS] Book routes mounted');
 } catch (err) {
@@ -1282,6 +1406,7 @@ try {
   app.use('/api', createPaytechRouter({
     db,
     dolibarrApi,
+    dolibarrPool,
     csrfProtection,
     requireCustomerAuth,
     cache,
@@ -1347,10 +1472,20 @@ try {
 import { createAccountingRouter } from './accounting-routes.js';
 try {
   const accountingAuth = adminAuth(db);
-  app.use('/api/admin/accounting', createAccountingRouter({ db, dolibarrPool, cache, auth: accountingAuth }));
+  app.use('/api/admin/accounting', createAccountingRouter({ db, dolibarrPool, cache, auth: accountingAuth, csrfProtection }));
   console.log('[ACCOUNTING] Accounting routes mounted');
 } catch (err) {
   console.error('[ACCOUNTING] Failed to mount accounting routes:', err);
+}
+
+// ─── GESTION FACTURES / RÉGULARISATIONS ─────────────────────
+import { createInvoicesRouter } from './invoices-routes.js';
+try {
+  const invoicesAuth = adminAuth(db);
+  app.use('/api/admin/invoices', createInvoicesRouter({ db, dolibarrPool, auth: invoicesAuth, csrfProtection }));
+  console.log('[INVOICES] Invoice management routes mounted');
+} catch (err) {
+  console.error('[INVOICES] Failed to mount invoice routes:', err);
 }
 
 // ─── STOCK & REAPPROVISIONNEMENT MODULE ─────────────────────
@@ -1359,7 +1494,7 @@ import { runDailyBatch, runClassificationBatch } from './stock-engine.js';
 try {
   const stockAuth = adminAuth(db);
   app.use('/api/admin/stock', createStockRouter({ db, dolibarrPool, auth: stockAuth, csrfProtection }));
-  app.use('/api/admin/suppliers', createSuppliersRouter({ db, auth: stockAuth, csrfProtection }));
+  app.use('/api/admin/suppliers', createSuppliersRouter({ db, dolibarrPool, auth: stockAuth, csrfProtection }));
   console.log('[STOCK] Stock & suppliers routes mounted');
 } catch (err) {
   console.error('[STOCK] Failed to mount stock routes:', err);
@@ -1512,12 +1647,15 @@ app.get('/api/products', async (req, res) => {
 
     if (hasAdvancedFilters || category) {
       // Build MySQL query for advanced filtering
-      const conditions = ['p.entity = 1', 'p.fk_product_type = 0'];
+      // tosell=1 : exclure les produits masqués par l'admin
+      const conditions = ['p.entity = 1', 'p.fk_product_type = 0', 'p.tosell = 1'];
       const params = [];
 
       if (q) {
-        conditions.push('(p.label LIKE ? OR p.ref LIKE ? OR p.description LIKE ?)');
-        params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+        // Recherche full-text : titre, ISBN/ref, code-barre, description courte/longue, auteur
+        conditions.push('(p.label LIKE ? OR p.ref LIKE ? OR p.barcode LIKE ? OR p.description LIKE ? OR pe.longdescript LIKE ? OR pe.auteur LIKE ?)');
+        const pat = `%${q}%`;
+        params.push(pat, pat, pat, pat, pat, pat);
       }
 
       if (author) {
@@ -1609,9 +1747,13 @@ app.get('/api/products', async (req, res) => {
 
     // Simple query — use Dolibarr API directly
     const apiParams = { limit: limitInt, page: pageInt, sortfield: sort, sortorder: order };
+    // tosell=1 : exclure les produits masqués par l'admin (filtre inconditionnel)
+    const tosellFilter = `(t.tosell:=:1)`;
     if (q) {
       const safeQ = safeSqlFilter(q);
-      apiParams.sqlfilters = `(t.label:like:'%${safeQ}%') or (t.ref:like:'%${safeQ}%')`;
+      apiParams.sqlfilters = `${tosellFilter} and ((t.label:like:'%${safeQ}%') or (t.ref:like:'%${safeQ}%'))`;
+    } else {
+      apiParams.sqlfilters = tosellFilter;
     }
     const prodRes = await dolibarrApi.get('/products', { params: apiParams });
     data = prodRes.data;
@@ -1702,7 +1844,7 @@ app.get('/api/products/featured', async (req, res) => {
         if (withImage.length >= limit) break;
         try {
           const prodRes = await dolibarrApi.get('/products', {
-            params: { sqlfilters: `(t.ref:=:'${safeSqlFilter(ref)}')`, limit: 1 },
+            params: { sqlfilters: `(t.tosell:=:1) and (t.ref:=:'${safeSqlFilter(ref)}')`, limit: 1 },
           });
           if (prodRes.data && prodRes.data.length > 0) {
             const p = prodRes.data[0];
@@ -1720,7 +1862,7 @@ app.get('/api/products/featured', async (req, res) => {
       const existingIds = new Set(withImage.map((p) => p.id));
       try {
         const prodRes = await dolibarrApi.get('/products', {
-          params: { limit: remaining + 10, page: 0, sortfield: 't.rowid', sortorder: 'DESC' },
+          params: { limit: remaining + 10, page: 0, sortfield: 't.rowid', sortorder: 'DESC', sqlfilters: `(t.tosell:=:1)` },
         });
         for (const p of prodRes.data || []) {
           if (withImage.length >= limit) break;
@@ -1779,6 +1921,9 @@ app.get('/api/products/livre-du-mois', async (req, res) => {
       try {
         const prodRes = await dolibarrApi.get(`/products/${pid}`);
         const p = prodRes.data;
+
+        // Skip si masqué par l'admin (tosell=0)
+        if (!p || Number(p.status) !== 1) continue;
 
         // Get product category
         let category = '';
@@ -1902,6 +2047,12 @@ app.get('/api/products/:id', async (req, res) => {
     ]);
 
     const p = prodRes.data;
+
+    // Refuser si produit masqué par l'admin (tosell=0)
+    // L'API Dolibarr expose `status` (=tosell). Tolère les types string/number.
+    if (p && Number(p.status) !== 1) {
+      return res.status(404).json({ error: 'Produit non disponible' });
+    }
 
     let stockDetails = [];
     const sw = stockResult?.data?.stock_warehouses;
@@ -2255,8 +2406,68 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
       return res.status(400).json({ error: 'Données de commande incomplètes' });
     }
 
-    // Use dolibarr_id if logged-in customer provided it, otherwise search/create
-    let customerId = customer.dolibarr_id || null;
+    // ── Validation des quantités (entier entre 1 et 100) ──
+    const MAX_QTY = 100;
+    for (const item of items) {
+      const qty = Number(item.quantity);
+      if (!Number.isInteger(qty) || qty < 1 || qty > MAX_QTY) {
+        return res.status(400).json({ error: `Quantité invalide pour un article (entier entre 1 et ${MAX_QTY})` });
+      }
+    }
+
+    // ── Contrôle de disponibilité stock (anti-survente face au POS) ──
+    // p.stock = source de vérité globale Dolibarr. Le POS décrémente p.stock à
+    // chaque validation de facture (idwarehouse=4), donc une commande web qui
+    // demande plus que p.stock disponible doit être refusée avant création.
+    // Note: il subsiste une fenêtre entre /api/orders et la confirmation paiement
+    // (facture créée plus tard) — la réservation locale serait l'étape suivante.
+    try {
+      const productIds = items.map((it) => parseInt(it.id, 10)).filter(Number.isInteger);
+      if (productIds.length === items.length && productIds.length > 0) {
+        const placeholders = productIds.map(() => '?').join(',');
+        const [stockRows] = await dolibarrPool.query(
+          `SELECT rowid AS id, label, stock, fk_product_type FROM llx_product WHERE rowid IN (${placeholders})`,
+          productIds,
+        );
+        const stockMap = new Map(stockRows.map((r) => [r.id, r]));
+        for (const item of items) {
+          const pid = parseInt(item.id, 10);
+          const row = stockMap.get(pid);
+          // fk_product_type !== 0 = service (pas de stock physique) → on laisse passer.
+          if (!row || row.fk_product_type !== 0) continue;
+          const available = Number(row.stock) || 0;
+          const qty = Number(item.quantity);
+          if (available < qty) {
+            return res.status(409).json({
+              error: available <= 0 ? 'Article en rupture de stock' : 'Stock insuffisant pour cet article',
+              product_id: pid,
+              product_label: row.label,
+              requested: qty,
+              available: Math.max(0, available),
+            });
+          }
+        }
+      }
+    } catch (stockErr) {
+      console.warn('[ORDERS] Stock check failed, allowing order:', stockErr.message);
+      // En cas d'erreur de lecture stock, on n'empêche pas la commande — la
+      // facture/paiement ultérieurs détecteront le problème côté Dolibarr.
+    }
+
+    // ── Résolution du tiers Dolibarr (socid) ──
+    // SÉCURITÉ : on n'accepte JAMAIS de dolibarr_id/socid venu du body.
+    // Si la requête est authentifiée → on utilise le dolibarr_id de la session.
+    // Sinon (checkout invité) → on résout/crée le tiers à partir de l'email.
+    let customerId = null;
+    const sessionToken = req.cookies?.customer_session;
+    if (sessionToken) {
+      const session = db.prepare(
+        "SELECT c.* FROM customer_sessions cs JOIN customers c ON c.id = cs.customer_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+      ).get(hashCustomerSessionToken(sessionToken));
+      if (session && session.dolibarr_id) {
+        customerId = session.dolibarr_id;
+      }
+    }
 
     if (!customerId) {
       try {
@@ -2300,18 +2511,48 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
     }
 
     // Create order
-    const orderLines = items.map((item) => ({
-      fk_product: parseInt(item.id),
-      qty: item.quantity,
-      subprice: parseFloat(item.price_ttc),
-      tva_tx: 0,
-      product_type: 0,
-    }));
+    // SÉCURITÉ : le prix de chaque ligne est récupéré côté serveur depuis
+    // Dolibarr — tout price_ttc/subprice envoyé par le client est ignoré.
+    const orderLines = [];
+    let serverTotal = 0;
+    for (const item of items) {
+      const productId = parseInt(item.id, 10);
+      if (!Number.isInteger(productId) || productId < 1) {
+        return res.status(400).json({ error: 'Identifiant produit invalide' });
+      }
+      let trustedPrice;
+      try {
+        const productRes = await dolibarrApi.get(`/products/${productId}`);
+        trustedPrice = parseFloat(productRes.data?.price_ttc || productRes.data?.price || 0);
+      } catch (err) {
+        console.warn(`Product price lookup failed (id=${productId}):`, err.response?.data || err.message);
+        return res.status(400).json({ error: `Produit introuvable (ID: ${productId})` });
+      }
+      if (!(trustedPrice > 0)) {
+        return res.status(400).json({ error: `Prix indisponible pour le produit ${productId}` });
+      }
+      const qty = Number(item.quantity);
+      serverTotal += trustedPrice * qty;
+      orderLines.push({
+        fk_product: productId,
+        qty,
+        subprice: trustedPrice,
+        tva_tx: 0,
+        product_type: 0,
+      });
+    }
+
+    console.log(`[ORDERS] Total recalculé côté serveur: ${serverTotal} XOF (${orderLines.length} ligne(s))`);
 
     const orderRes = await dolibarrApi.post('/orders', {
       socid: parseInt(customerId),
       date: new Date().toISOString().split('T')[0],
       lines: orderLines,
+      // module_source='ecommerce' tague la commande comme issue du site web
+      // (par symétrie avec 'takepos' utilisé par le POS). Permet aux stats
+      // Dolibarr de distinguer les canaux de vente. Copié sur la facture
+      // par createfromorder.
+      module_source: 'ecommerce',
       note_private: `Paiement: ${payment_method} | Tel: ${customer.phone}`,
       note_public: `Commande en ligne - ${payment_method}`,
       mode_reglement_id: getPaymentModeId(payment_method),
@@ -2579,6 +2820,7 @@ app.post('/api/preorders/:reference/cancel', orderLimiter, csrfProtection, sanit
 // Order tracking — requires authentication + ownership check
 app.get('/api/orders/:id', requireCustomerAuth, async (req, res) => {
   try {
+    if (!/^\d+$/.test(req.params.id)) return res.status(400).json({ error: 'ID invalide' });
     const orderRes = await dolibarrApi.get(`/orders/${req.params.id}`);
     const order = orderRes.data;
     // Vérifier que la commande appartient au client connecté
@@ -2943,10 +3185,26 @@ app.use((req, res, next) => {
 
 if (IS_PROD) {
   const distPath = join(__dirname, '..', 'dist');
-  app.use(express.static(distPath));
+  app.use(express.static(distPath, {
+    setHeaders: (res, filePath) => {
+      // index.html ne doit jamais être caché : sinon les anciens hash d'assets
+      // restent référencés après un rebuild → erreurs MIME au prochain chargement.
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      } else if (/\/assets\//.test(filePath)) {
+        // Assets fingerprintés (hash dans le nom) → cache agressif sûr.
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
   app.get('{*path}', (req, res) => {
     // Don't intercept API routes
     if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });
+    // Ne pas servir index.html pour un asset manquant : sinon le navigateur reçoit
+    // du text/html et refuse de l'exécuter comme module JS/CSS (erreur MIME).
+    if (req.path.startsWith('/assets/') || /\.(js|mjs|css|map|json|woff2?|ttf|png|jpe?g|gif|svg|webp|ico)$/i.test(req.path)) {
+      return res.status(404).type('text/plain').send('Not found');
+    }
     res.sendFile(join(distPath, 'index.html'));
   });
 }
@@ -2959,9 +3217,18 @@ function getPaymentModeId(method) {
   return modes[method] || 0;
 }
 
+// ─── GLOBAL ERROR HANDLER ───────────────────────────────────
+// Monté après toutes les routes : capture les erreurs non gérées
+// et évite de divulguer la stack au client.
+app.use((err, req, res, next) => {
+  console.error('[ERR]', err.message);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({ error: 'Erreur serveur' });
+});
+
 // ─── START ──────────────────────────────────────────────────
 
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, process.env.HOST || '127.0.0.1', async () => {
   console.log(`\n  Sen Harmattan API Server running on port ${PORT}`);
   console.log(`  Mode: ${IS_PROD ? 'Production' : 'Development'}\n`);
 

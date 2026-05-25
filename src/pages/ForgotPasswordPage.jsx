@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { FiMail, FiArrowLeft } from 'react-icons/fi';
 import { forgotPassword } from '../api/dolibarr';
+import { AuthScopeBadge, AuthScopeSwitch } from './AuthScope';
 import './AuthPages.css';
 
 export default function ForgotPasswordPage() {
@@ -29,6 +30,7 @@ export default function ForgotPasswordPage() {
     <div className="auth-page">
       <div className="container">
         <div className="auth-card">
+          <AuthScopeBadge scope="client" />
           <h1>Mot de passe oublié</h1>
 
           {sent ? (
@@ -72,6 +74,8 @@ export default function ForgotPasswordPage() {
               </p>
             </>
           )}
+
+          <AuthScopeSwitch scope="client" />
         </div>
       </div>
     </div>

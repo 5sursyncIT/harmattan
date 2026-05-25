@@ -4,6 +4,7 @@ import { FiEye, FiEyeOff } from 'react-icons/fi';
 import { registerCustomer } from '../api/dolibarr';
 import useAuthStore from '../store/authStore';
 import toast from 'react-hot-toast';
+import { AuthScopeBadge, AuthScopeSwitch } from './AuthScope';
 import './AuthPages.css';
 
 export default function RegisterPage() {
@@ -69,6 +70,7 @@ export default function RegisterPage() {
     <div className="auth-page">
       <div className="container">
         <div className="auth-card">
+          <AuthScopeBadge scope="client" />
           <h1>Créer un compte</h1>
           <p className="auth-subtitle">Rejoignez Sen Harmattan</p>
 
@@ -134,6 +136,8 @@ export default function RegisterPage() {
           <p className="auth-link">
             Déjà un compte ? <Link to="/connexion">Se connecter</Link>
           </p>
+
+          <AuthScopeSwitch scope="client" />
         </div>
       </div>
     </div>

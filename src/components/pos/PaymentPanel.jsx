@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { posCreateSale, posGetConfig } from '../../api/pos';
 import usePosCartStore from '../../store/posCartStore';
 import usePosAuthStore from '../../store/posAuthStore';
@@ -11,14 +11,26 @@ const METHOD_ICONS = {
   LIQ: { emoji: '\u{1F4B5}', color: '#27ae60' },
   CB: { emoji: '\u{1F4B3}', color: '#2980b9' },
   CHQ: { emoji: '\u{1F4DD}', color: '#8e44ad' },
-  WAVE: { emoji: '\u{1F30A}', color: '#3498db' },
-  OM: { emoji: '\u{1F4F1}', color: '#e67e22' },
+  WAVE: { img: '/images/wave.png', color: '#1dcfe1' },
+  OM: { img: '/images/om.png', color: '#e67e22' },
 };
 
-export default function PaymentPanel({ onClose, onComplete }) {
+// Liste de repli des moyens de paiement — utilisée si /pos/config est
+// injoignable (mode hors ligne), pour ne jamais bloquer l'encaissement.
+const FALLBACK_METHODS = [
+  { code: 'LIQ', label: 'Espèces' },
+  { code: 'CB', label: 'Carte bancaire' },
+  { code: 'CHQ', label: 'Chèque' },
+  { code: 'WAVE', label: 'Wave' },
+  { code: 'OM', label: 'Orange Money' },
+];
+const METHODS_CACHE_KEY = 'pos-payment-methods';
+
+export default function PaymentPanel({ onClose, onComplete, splitMode = false }) {
   const items = usePosCartStore((s) => s.items);
   const customer = usePosCartStore((s) => s.customer);
   const getTotal = usePosCartStore((s) => s.getTotal);
+  const ensureSaleId = usePosCartStore((s) => s.ensureSaleId);
   // const staff = usePosAuthStore((s) => s.staff);
 
   const [methods, setMethods] = useState([]);
@@ -27,6 +39,8 @@ export default function PaymentPanel({ onClose, onComplete }) {
   const [payments, setPayments] = useState([]);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState('');
+  // Garde synchrone : neutralise un double-tap avant que `processing` ne soit rendu.
+  const submittingRef = useRef(false);
 
   const total = getTotal();
   const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
@@ -35,8 +49,17 @@ export default function PaymentPanel({ onClose, onComplete }) {
 
   useEffect(() => {
     posGetConfig()
-      .then((res) => setMethods(res.data.paymentMethods))
-      .catch(() => {});
+      .then((res) => {
+        const m = res.data?.paymentMethods?.length ? res.data.paymentMethods : FALLBACK_METHODS;
+        setMethods(m);
+        try { localStorage.setItem(METHODS_CACHE_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+      })
+      .catch(() => {
+        // Hors ligne : réutiliser le dernier config connu, sinon la liste de repli.
+        let cached = [];
+        try { cached = JSON.parse(localStorage.getItem(METHODS_CACHE_KEY) || '[]'); } catch { /* ignore */ }
+        setMethods(cached.length ? cached : FALLBACK_METHODS);
+      });
   }, []);
 
   const handleNumpad = (val) => {
@@ -63,16 +86,28 @@ export default function PaymentPanel({ onClose, onComplete }) {
   };
 
   const handleValidate = async () => {
-    if (remaining > 0) return;
+    if (remaining > 0 || submittingRef.current) return;
+    submittingRef.current = true;
     setProcessing(true);
     setError('');
+    // Identifiant stable de la vente — clé d'idempotence partagée par les
+    // chemins en ligne et hors ligne (rejeu, double soumission).
+    const saleId = ensureSaleId();
     try {
       const result = await posCreateSale({
-        items: items.map((i) => ({
+        client_sale_id: saleId,
+        items: items.map((i) => i.is_free ? ({
+          is_free: true,
+          label: i.label,
+          subprice: i.price_ttc,
+          qty: i.qty,
+          discount: i.discount || 0,
+        }) : ({
           product_id: i.product_id,
           qty: i.qty,
           price_ttc: i.price_ttc,
           label: i.label,
+          discount: i.discount || 0,
         })),
         customer_id: customer?.id || null,
         payments: payments.map((p) => ({ code: p.code, amount: p.amount })),
@@ -82,7 +117,20 @@ export default function PaymentPanel({ onClose, onComplete }) {
       // Network error — queue for later
       if (!err.response) {
         const saleData = {
-          items: items.map((i) => ({ product_id: i.product_id, qty: i.qty, price_ttc: i.price_ttc, label: i.label, discount: i.discount })),
+          client_sale_id: saleId,
+          items: items.map((i) => i.is_free ? ({
+            is_free: true,
+            label: i.label,
+            subprice: i.price_ttc,
+            qty: i.qty,
+            discount: i.discount || 0,
+          }) : ({
+            product_id: i.product_id,
+            qty: i.qty,
+            price_ttc: i.price_ttc,
+            label: i.label,
+            discount: i.discount,
+          })),
           customer_id: customer?.id || null,
           payments: payments.map((p) => ({ code: p.code, amount: p.amount })),
         };
@@ -93,6 +141,7 @@ export default function PaymentPanel({ onClose, onComplete }) {
       }
       setError(err.response?.data?.error || 'Erreur lors de la vente');
     } finally {
+      submittingRef.current = false;
       setProcessing(false);
     }
   };
@@ -110,6 +159,12 @@ export default function PaymentPanel({ onClose, onComplete }) {
           <span>{total.toLocaleString('fr-FR')} FCFA</span>
         </div>
 
+        {splitMode && payments.length === 0 && (
+          <div className="pos-payment-split-banner">
+            Mode fractionné — saisissez le 1<sup>er</sup> montant puis touchez « Ajouter ». Répétez pour chaque moyen.
+          </div>
+        )}
+
         {/* Payment methods */}
         <div className="pos-payment-methods">
           {methods.map((m) => {
@@ -119,17 +174,24 @@ export default function PaymentPanel({ onClose, onComplete }) {
                 key={m.code}
                 className={`pos-pm-btn ${selectedMethod === m.code ? 'active' : ''}`}
                 style={{ '--pm-color': icon.color }}
-                onClick={() => { if (remaining > 0) { setSelectedMethod(m.code); if (payments.length === 0) handleQuickPay(m.code); } }}
+                onClick={() => {
+                  if (remaining <= 0) return;
+                  setSelectedMethod(m.code);
+                  // En mode split : juste sélectionner, pas de quick-pay.
+                  if (!splitMode && payments.length === 0) handleQuickPay(m.code);
+                }}
               >
-                <span className="pos-pm-emoji">{icon.emoji}</span>
+                <span className="pos-pm-emoji">
+                  {icon.img ? <img src={icon.img} alt="" /> : icon.emoji}
+                </span>
                 {m.label}
               </button>
             );
           })}
         </div>
 
-        {/* Numpad for split payments */}
-        {payments.length > 0 && remaining > 0 && (
+        {/* Numpad : visible dès l'ouverture en mode split, sinon après 1er paiement */}
+        {((splitMode && remaining > 0) || (payments.length > 0 && remaining > 0)) && (
           <div className="pos-payment-split">
             <div className="pos-payment-split-header">
               <span>Reste : {remaining.toLocaleString('fr-FR')} F</span>
@@ -160,7 +222,11 @@ export default function PaymentPanel({ onClose, onComplete }) {
           <div className="pos-payment-list">
             {payments.map((p, i) => (
               <div key={i} className="pos-payment-line">
-                <span>{METHOD_ICONS[p.code]?.emoji} {p.label}</span>
+                <span>
+                  {METHOD_ICONS[p.code]?.img
+                    ? <img src={METHOD_ICONS[p.code].img} alt="" className="pos-pm-line-icon" />
+                    : METHOD_ICONS[p.code]?.emoji} {p.label}
+                </span>
                 <span>{p.amount.toLocaleString('fr-FR')} F</span>
                 <button onClick={() => handleRemovePayment(i)}><FiX size={14} /></button>
               </div>

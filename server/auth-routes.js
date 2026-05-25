@@ -7,6 +7,12 @@ import bcrypt from 'bcryptjs';
  * Customer authentication routes module
  * Extracted from index.js for maintainability
  */
+// Hache un token avant stockage/lookup — le token brut ne vit que dans le
+// cookie HttpOnly de l'utilisateur, jamais en base.
+function hashSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
 export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter, requireCustomerAuth, dolibarrApi, transporter, cookieSecure }) {
   const router = Router();
 
@@ -25,7 +31,7 @@ export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter
       // Create server-side session
       const sessionToken = crypto.randomBytes(32).toString('hex');
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-      db.prepare('INSERT INTO customer_sessions (token, customer_id, expires_at) VALUES (?, ?, ?)').run(sessionToken, customer.id, expiresAt);
+      db.prepare('INSERT INTO customer_sessions (token, customer_id, expires_at) VALUES (?, ?, ?)').run(hashSessionToken(sessionToken), customer.id, expiresAt);
       res.cookie('customer_session', sessionToken, {
         httpOnly: true,
         sameSite: 'strict',
@@ -92,35 +98,41 @@ export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter
 
   // Forgot password
   router.post('/forgot-password', authLimiter, csrfProtection, sanitizeBody(['email']), async (req, res) => {
-    try {
-      const { email } = req.body;
-      if (!email) return res.status(400).json({ error: 'Email requis' });
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email requis' });
 
-      const customer = db.prepare('SELECT * FROM customers WHERE email = ?').get(email);
-      if (!customer) return res.json({ success: true }); // anti-enumeration
+    // Anti-énumération : on répond immédiatement et de façon identique,
+    // que le compte existe ou non. Le travail (recherche + envoi SMTP)
+    // est effectué en arrière-plan APRÈS la réponse, ce qui supprime
+    // le canal temporel exploitable pour énumérer les comptes.
+    res.json({ success: true });
 
-      const token = crypto.randomBytes(32).toString('hex');
-      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    // Travail asynchrone post-réponse (best-effort, ne bloque pas le client)
+    setImmediate(() => {
+      try {
+        const customer = db.prepare('SELECT * FROM customers WHERE email = ?').get(email);
+        if (!customer) return; // compte inexistant : aucun mail, mais réponse déjà identique
 
-      db.exec(`CREATE TABLE IF NOT EXISTS password_resets (
-        email TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at DATETIME NOT NULL
-      )`);
-      db.prepare('INSERT OR REPLACE INTO password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, token, expiresAt);
+        const token = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-      const baseUrl = process.env.SITE_URL || 'http://38.242.229.122:3000';
-      const resetUrl = `${baseUrl}/reinitialiser-mdp?token=${token}&email=${encodeURIComponent(email)}`;
-      transporter.sendMail({
-        from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
-        to: email,
-        subject: 'Réinitialisation de votre mot de passe',
-        html: `<p>Bonjour,</p><p>Vous avez demandé la réinitialisation de votre mot de passe.</p><p><a href="${resetUrl}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">Réinitialiser mon mot de passe</a></p><p>Ce lien expire dans 1 heure.</p><p>Si vous n'avez pas fait cette demande, ignorez cet email.</p><p>L'équipe L'Harmattan Sénégal</p>`,
-      }).catch((err) => console.error('[AUTH] Reset email error:', err.message));
+        db.exec(`CREATE TABLE IF NOT EXISTS password_resets (
+          email TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at DATETIME NOT NULL
+        )`);
+        db.prepare('INSERT OR REPLACE INTO password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, token, expiresAt);
 
-      res.json({ success: true });
-    } catch (err) {
-      console.error('Forgot password error:', err.message);
-      res.status(500).json({ error: 'Erreur serveur' });
-    }
+        const baseUrl = process.env.SITE_URL || 'http://38.242.229.122:3000';
+        const resetUrl = `${baseUrl}/reinitialiser-mdp?token=${token}&email=${encodeURIComponent(email)}`;
+        transporter.sendMail({
+          from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+          to: email,
+          subject: 'Réinitialisation de votre mot de passe',
+          html: `<p>Bonjour,</p><p>Vous avez demandé la réinitialisation de votre mot de passe.</p><p><a href="${resetUrl}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">Réinitialiser mon mot de passe</a></p><p>Ce lien expire dans 1 heure.</p><p>Si vous n'avez pas fait cette demande, ignorez cet email.</p><p>L'équipe L'Harmattan Sénégal</p>`,
+        }).catch((err) => console.error('[AUTH] Reset email error:', err.message));
+      } catch (err) {
+        console.error('Forgot password (async) error:', err.message);
+      }
+    });
   });
 
   // Reset password
@@ -193,6 +205,21 @@ export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter
       console.error('Password change error:', err.message);
       res.status(500).json({ error: 'Erreur changement mot de passe' });
     }
+  });
+
+  // Logout — supprime la session côté serveur ET le cookie côté client.
+  // Sans cette route, le cookie restait actif 7 jours même après "déconnexion" front.
+  router.post('/logout', (req, res) => {
+    const token = req.cookies?.customer_session;
+    if (token) {
+      try { db.prepare('DELETE FROM customer_sessions WHERE token = ?').run(hashSessionToken(token)); } catch (e) { void e; }
+    }
+    res.clearCookie('customer_session', {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: cookieSecure,
+    });
+    res.json({ success: true });
   });
 
   return router;

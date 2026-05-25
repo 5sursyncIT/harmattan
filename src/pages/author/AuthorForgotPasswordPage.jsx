@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
+import { AuthScopeBadge, AuthScopeSwitch } from '../AuthScope';
 import '../AuthPages.css';
 
 export default function AuthorForgotPasswordPage() {
@@ -42,7 +43,8 @@ export default function AuthorForgotPasswordPage() {
     <div className="auth-page">
       <div className="container">
         <div className="auth-card">
-          <h1>{token ? 'Nouveau mot de passe' : 'Mot de passe oublié'}</h1>
+          <AuthScopeBadge scope="author" />
+          <h1>{token ? 'Nouveau mot de passe auteur' : 'Mot de passe oublié'}</h1>
           {token ? (
             <form onSubmit={handleReset}>
               <div className="form-group">
@@ -73,6 +75,8 @@ export default function AuthorForgotPasswordPage() {
           <p className="auth-link">
             <Link to="/auteur/connexion">Retour à la connexion</Link>
           </p>
+
+          <AuthScopeSwitch scope="author" />
         </div>
       </div>
     </div>

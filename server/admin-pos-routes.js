@@ -21,7 +21,7 @@ export function createAdminPosRouter({ db, auth, csrfProtection }) {
   // GET /api/admin/pos/devices — Liste tous les appareils
   router.get('/devices', auth, (req, res) => {
     const devices = db.prepare(
-      `SELECT id, device_name, last_seen_at, last_ip, active, created_at
+      `SELECT id, device_name, terminal, last_seen_at, last_ip, active, created_at
        FROM pos_devices ORDER BY created_at DESC`
     ).all();
     res.json(devices);
@@ -65,7 +65,7 @@ export function createAdminPosRouter({ db, auth, csrfProtection }) {
   router.put('/devices/:id', auth, csrfProtection, (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const { active, device_name } = req.body || {};
+      const { active, device_name, terminal } = req.body || {};
 
       const device = db.prepare('SELECT id FROM pos_devices WHERE id = ?').get(id);
       if (!device) return res.status(404).json({ error: 'Appareil introuvable' });
@@ -80,13 +80,21 @@ export function createAdminPosRouter({ db, auth, csrfProtection }) {
         updates.push('device_name = ?');
         values.push(device_name.trim());
       }
+      if (typeof terminal !== 'undefined') {
+        const t = parseInt(terminal);
+        if (!(t >= 1 && t <= 10)) return res.status(400).json({ error: 'Numéro de terminal invalide (1-10)' });
+        const clash = db.prepare('SELECT id FROM pos_devices WHERE terminal = ? AND id != ? AND active = 1').get(t, id);
+        if (clash) return res.status(400).json({ error: `Le terminal ${t} est déjà attribué à un autre appareil` });
+        updates.push('terminal = ?');
+        values.push(t);
+      }
       if (updates.length === 0) return res.status(400).json({ error: 'Aucune modification' });
 
       values.push(id);
       db.prepare(`UPDATE pos_devices SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
       const updated = db.prepare(
-        'SELECT id, device_name, last_seen_at, last_ip, active, created_at FROM pos_devices WHERE id = ?'
+        'SELECT id, device_name, terminal, last_seen_at, last_ip, active, created_at FROM pos_devices WHERE id = ?'
       ).get(id);
       res.json(updated);
     } catch (err) {
@@ -100,7 +108,14 @@ export function createAdminPosRouter({ db, auth, csrfProtection }) {
     const id = parseInt(req.params.id);
     const result = db.prepare('UPDATE pos_devices SET active = 0 WHERE id = ?').run(id);
     if (result.changes === 0) return res.status(404).json({ error: 'Appareil introuvable' });
-    // Invalidate any active sessions from this device (via staff sessions)
+    // Invalidate any active sessions from this device.
+    // Le schéma ne lie pas directement un appareil à une session POS :
+    // pos_sessions ne contient que (token, staff_id, expires_at, absolute_expiry)
+    // et pos_devices n'a aucune référence vers le personnel. Il n'existe donc
+    // aucun moyen fiable de retrouver « les sessions de cet appareil ».
+    // Cependant, une fois active = 0, le middleware requireDevice (pos-routes.js)
+    // rejette toute requête portant le device_token de cet appareil : la session
+    // POST devient inexploitable depuis cet appareil dès la révocation.
     res.json({ success: true });
   });
 
@@ -123,8 +138,8 @@ export function createAdminPosRouter({ db, auth, csrfProtection }) {
       const { name, pin, role = 'cashier' } = req.body || {};
 
       if (!name || !name.trim()) return res.status(400).json({ error: 'Le nom est requis' });
-      if (!pin || !/^\d{4,6}$/.test(String(pin))) {
-        return res.status(400).json({ error: 'Le PIN doit contenir entre 4 et 6 chiffres' });
+      if (!pin || !/^\d{6}$/.test(String(pin))) {
+        return res.status(400).json({ error: 'Le PIN doit contenir exactement 6 chiffres' });
       }
       if (!['cashier', 'manager'].includes(role)) {
         return res.status(400).json({ error: 'Rôle invalide (cashier ou manager)' });
@@ -199,8 +214,8 @@ export function createAdminPosRouter({ db, auth, csrfProtection }) {
       const id = parseInt(req.params.id);
       const { pin } = req.body || {};
 
-      if (!pin || !/^\d{4,6}$/.test(String(pin))) {
-        return res.status(400).json({ error: 'Le PIN doit contenir entre 4 et 6 chiffres' });
+      if (!pin || !/^\d{6}$/.test(String(pin))) {
+        return res.status(400).json({ error: 'Le PIN doit contenir exactement 6 chiffres' });
       }
 
       const target = db.prepare('SELECT id FROM pos_staff WHERE id = ?').get(id);

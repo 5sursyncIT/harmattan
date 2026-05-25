@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { FiDollarSign, FiTrendingUp, FiAlertCircle, FiBriefcase, FiUsers, FiBook, FiFileText, FiCreditCard, FiPercent, FiBarChart2, FiShoppingBag } from 'react-icons/fi';
+import { FiDollarSign, FiTrendingUp, FiAlertCircle, FiBriefcase, FiUsers, FiBook, FiFileText, FiCreditCard, FiPercent, FiBarChart2, FiShoppingBag, FiBookOpen, FiList, FiTruck, FiEdit3 } from 'react-icons/fi';
 import { getAccountingDashboard } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
@@ -106,7 +106,8 @@ export default function AccountingPanel() {
         </div>
       )}
 
-      {/* Tuiles de navigation */}
+      {/* Tuiles de navigation — journaux & suivi */}
+      <h4 className="ac-section-title" style={{ margin: '4px 0 10px' }}>Journaux & suivi</h4>
       <div className="ac-tiles">
         <Tile to="/admin/accounting/sales" icon={<FiFileText size={20} />} iconBg="#dbeafe" iconColor="#1e40af"
               title="Journal des ventes" subtitle="Factures émises avec statut paiement"
@@ -120,9 +121,28 @@ export default function AccountingPanel() {
         <Tile to="/admin/accounting/treasury" icon={<FiCreditCard size={20} />} iconBg="#dbeafe" iconColor="#1e40af"
               title="Trésorerie" subtitle="Soldes bancaires consolidés"
               metric={formatPrice(data.treasury.total)} />
+        <Tile to="/admin/accounting/suppliers" icon={<FiTruck size={20} />} iconBg="#fef3c7" iconColor="#92400e"
+              title="Factures fournisseurs" subtitle="Saisie et suivi des charges" />
         <Tile to="/admin/accounting/royalties" icon={<FiBook size={20} />} iconBg="#ede9fe" iconColor="#6d28d9"
               title="Royalties auteurs" subtitle="Droits dus par contrat et période"
               metric="Calcul automatique" />
+      </div>
+
+      {/* Tuiles de navigation — comptabilité générale */}
+      <h4 className="ac-section-title" style={{ margin: '4px 0 10px' }}>Comptabilité générale</h4>
+      <div className="ac-tiles">
+        <Tile to="/admin/accounting/entries" icon={<FiEdit3 size={20} />} iconBg="#dcfce7" iconColor="#14532d"
+              title="Écritures & transfert" subtitle="Transfert en comptabilité et saisie d'OD" />
+        <Tile to="/admin/accounting/ledger" icon={<FiList size={20} />} iconBg="#dbeafe" iconColor="#1e40af"
+              title="Grand livre" subtitle="Toutes les écritures par compte" />
+        <Tile to="/admin/accounting/balance" icon={<FiBarChart2 size={20} />} iconBg="#e0e7ff" iconColor="#3730a3"
+              title="Balance générale" subtitle="Soldes débiteurs et créditeurs" />
+        <Tile to="/admin/accounting/statements" icon={<FiTrendingUp size={20} />} iconBg="#dcfce7" iconColor="#14532d"
+              title="États financiers" subtitle="Compte de résultat et bilan" />
+        <Tile to="/admin/accounting/vat" icon={<FiPercent size={20} />} iconBg="#fee2e2" iconColor="#991b1b"
+              title="Déclaration TVA" subtitle="TVA collectée, déductible et nette" />
+        <Tile to="/admin/accounting/chart" icon={<FiBookOpen size={20} />} iconBg="#f1f5f9" iconColor="#475569"
+              title="Plan comptable" subtitle="Comptes SYSCOHADA" />
       </div>
 
       {/* Graphique CA vs Encaissements */}

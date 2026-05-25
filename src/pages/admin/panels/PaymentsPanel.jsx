@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getAdminPayments, confirmOrderPayment, rejectPayment } from '../../../api/admin';
+import { getAdminPayments, getPaymentOrphans, confirmOrderPayment, rejectPayment } from '../../../api/admin';
 import { FiDollarSign, FiCheck, FiX, FiClock, FiPhone, FiMail, FiHash, FiAlertCircle } from 'react-icons/fi';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
@@ -22,6 +22,7 @@ export default function PaymentsPanel() {
   const [rejectReason, setRejectReason] = useState('');
   const [showReject, setShowReject] = useState(null);
   const [processing, setProcessing] = useState(false);
+  const [orphans, setOrphans] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,6 +33,15 @@ export default function PaymentsPanel() {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [status, page]);
+
+  // Compteur des paiements confirmés sans facture — incident à arbitrer.
+  useEffect(() => {
+    let cancelled = false;
+    getPaymentOrphans()
+      .then(r => { if (!cancelled) setOrphans(r.data?.total || 0); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [status]);
 
   const handleConfirm = async (payment) => {
     setProcessing(true);
@@ -76,6 +86,13 @@ export default function PaymentsPanel() {
           {pendingCount > 0 && <span style={{ background: '#f59e0b', color: '#fff', borderRadius: 10, padding: '2px 10px', fontSize: '0.8rem' }}>{pendingCount}</span>}
         </h3>
       </div>
+
+      {orphans > 0 && (
+        <div style={{ marginBottom: 16, padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, color: '#991b1b', display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.9rem' }}>
+          <FiAlertCircle />
+          <span><strong>{orphans} paiement{orphans > 1 ? 's' : ''} confirmé{orphans > 1 ? 's' : ''} sans facture</strong> — à arbitrer (création manuelle de facture ou remboursement). Visible dans l'onglet « Confirmé ».</span>
+        </div>
+      )}
 
       {/* Tabs statut */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
@@ -132,6 +149,12 @@ export default function PaymentsPanel() {
                     {p.payment_status === 'confirmed' && p.invoice_ref && (
                       <div style={{ marginTop: 6, fontSize: '0.8rem', color: '#10b981' }}>
                         Facture {p.invoice_ref} — confirmé par {p.confirmed_by} le {formatDate(p.confirmed_at)}
+                      </div>
+                    )}
+                    {p.payment_status === 'confirmed' && !p.invoice_ref && (
+                      <div style={{ marginTop: 6, padding: '6px 10px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, fontSize: '0.8rem', color: '#991b1b', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <FiAlertCircle size={14} />
+                        <span>Paiement encaissé mais <strong>aucune facture</strong> liée — créer la facture manuellement ou rembourser.</span>
                       </div>
                     )}
                     {p.payment_status === 'rejected' && (

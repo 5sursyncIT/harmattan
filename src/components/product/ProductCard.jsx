@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { FiShoppingCart, FiEye } from 'react-icons/fi';
-import { formatPrice, stripHtml, truncateText } from '../../utils/formatters';
+import { formatPrice, stripHtml, truncateText, slugify } from '../../utils/formatters';
 import { getProductImageUrl } from '../../api/dolibarr';
 import useCartStore from '../../store/cartStore';
 import toast from 'react-hot-toast';
@@ -31,6 +31,7 @@ const getPlaceholderColor = (text) => {
 };
 
 export default function ProductCard({ product, onQuickPreview }) {
+  const navigate = useNavigate();
   const addItem = useCartStore((s) => s.addItem);
   const [imgError, setImgError] = useState(false);
   const [showHover, setShowHover] = useState(false);
@@ -132,7 +133,27 @@ export default function ProductCard({ product, onQuickPreview }) {
         <div className="product-card-info">
           <h3 className="product-card-title">{label}</h3>
           {product.array_options?.options_auteur && (
-            <p className="product-card-author">{product.array_options.options_auteur}</p>
+            <p className="product-card-author">
+              <span
+                role="link"
+                tabIndex={0}
+                className="product-card-author-link"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  navigate(`/auteur/${slugify(product.array_options.options_auteur)}`);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    navigate(`/auteur/${slugify(product.array_options.options_auteur)}`);
+                  }
+                }}
+              >
+                {product.array_options.options_auteur}
+              </span>
+            </p>
           )}
           {description && (
             <p className="product-card-desc">{truncateText(description, 80)}</p>

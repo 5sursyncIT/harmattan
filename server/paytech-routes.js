@@ -84,6 +84,7 @@ const webhookLimiter = rateLimit({
 export function createPaytechRouter({
   db,
   dolibarrApi,
+  dolibarrPool,
   csrfProtection,
   requireCustomerAuth,
   cache,
@@ -194,7 +195,6 @@ export function createPaytechRouter({
         const eventType = String(body.type_event || '').toLowerCase();
         const refCommand = String(body.ref_command || '');
         const token = String(body.token || '');
-        const paymentMethod = String(body.payment_method || '');
         const clientPhone = String(body.client_phone || '');
         let customField = {};
         try { customField = body.custom_field ? JSON.parse(body.custom_field) : {}; } catch { /* ignore */ }
@@ -237,26 +237,117 @@ export function createPaytechRouter({
           return res.json({ ok: true, ignored: eventType });
         }
 
-        let invoiceRef = null;
-
-        // Création de la facture Dolibarr depuis la commande
-        try {
-          const invoiceRes = await dolibarrApi.post('/invoices/createfromorder/' + op.dolibarr_order_id);
-          const invoiceId = invoiceRes.data;
-          // Validate the invoice
-          try { await dolibarrApi.post(`/invoices/${invoiceId}/validate`); } catch (e) { console.warn('[PAYTECH-IPN] invoice validate warning:', e.response?.data || e.message); }
-          // Récup ref humaine
-          try {
-            const inv = await dolibarrApi.get(`/invoices/${invoiceId}`);
-            invoiceRef = inv.data?.ref || null;
-          } catch { /* ignore */ }
-        } catch (err) {
-          console.error('[PAYTECH-IPN] création facture échouée:', err.response?.data || err.message);
-          // On marque malgré tout le paiement comme confirmé pour ne pas relancer le client.
-          // Un admin pourra créer la facture manuellement depuis /admin/payments.
+        // ── Vérification du montant payé ──
+        // PayTech peut rapporter le montant sous différents champs selon la version
+        // de l'IPN. On retient le premier champ numérique valide.
+        const amountExpected = parseFloat(op.amount_expected || 0);
+        const paidRaw = [body.item_price, body.final_item_price, body.amount]
+          .map((v) => parseFloat(v))
+          .find((v) => Number.isFinite(v) && v > 0);
+        const amountPaid = Number.isFinite(paidRaw) ? paidRaw : null;
+        if (amountPaid === null) {
+          console.warn(`[PAYTECH-IPN] montant payé absent de l'IPN, order=${op.dolibarr_order_id} — commande NON confirmée`);
+          return res.json({ ok: true, status: 'amount_missing' });
+        }
+        // Tolérance d'arrondi de 1 FCFA
+        if (amountPaid < amountExpected - 1) {
+          console.warn(
+            `[PAYTECH-IPN] montant insuffisant : payé=${amountPaid} attendu=${amountExpected} order=${op.dolibarr_order_id} — commande NON confirmée`
+          );
+          db.prepare(
+            `UPDATE order_payments
+             SET external_status = 'amount_mismatch', external_payload = ?
+             WHERE id = ?`
+          ).run(JSON.stringify(body), op.id);
+          return res.json({ ok: true, status: 'amount_mismatch' });
         }
 
-        const adminId = null; // confirmé par PayTech, pas par un admin
+        let invoiceRef = op.invoice_ref || null;
+
+        // ── Idempotence basée sur la commande (pas sur le token) ──
+        // Si une facture est déjà liée à cette commande, on ne la recrée pas
+        // (rejeu d'un sale_complete avec un token différent).
+        if (op.invoice_ref) {
+          console.info(`[PAYTECH-IPN] facture déjà liée (${op.invoice_ref}), pas de nouvelle création, order=${op.dolibarr_order_id}`);
+        } else {
+          // ── Revalidation stock avant facturation ──
+          // Entre la commande et l'IPN, le POS peut avoir vendu les mêmes unités.
+          // On bloque la création de facture si stock < quantité commandée. La
+          // commande reste, le paiement reste à 'pending' externe et l'admin
+          // pourra arbitrer manuellement (rembourser ou réapprovisionner).
+          let stockShortage = null;
+          if (dolibarrPool) {
+            try {
+              const orderDetail = await dolibarrApi.get(`/orders/${op.dolibarr_order_id}`);
+              const productLines = (orderDetail.data?.lines || []).filter((l) => l.fk_product);
+              const productIds = productLines.map((l) => parseInt(l.fk_product));
+              if (productIds.length > 0) {
+                const placeholders = productIds.map(() => '?').join(',');
+                const [stockRows] = await dolibarrPool.query(
+                  `SELECT rowid AS id, label, stock, fk_product_type FROM llx_product WHERE rowid IN (${placeholders})`,
+                  productIds,
+                );
+                const stockMap = new Map(stockRows.map((r) => [r.id, r]));
+                for (const line of productLines) {
+                  const pid = parseInt(line.fk_product);
+                  const row = stockMap.get(pid);
+                  if (!row || row.fk_product_type !== 0) continue;
+                  const available = Number(row.stock) || 0;
+                  const qty = parseFloat(line.qty) || 0;
+                  if (available < qty) {
+                    stockShortage = { product_id: pid, label: row.label, requested: qty, available };
+                    break;
+                  }
+                }
+              }
+            } catch (stockErr) {
+              console.warn('[PAYTECH-IPN] Stock recheck failed:', stockErr.message);
+            }
+          }
+
+          if (stockShortage) {
+            console.error(`[PAYTECH-IPN] stock insuffisant à la confirmation : order=${op.dolibarr_order_id}`, stockShortage);
+            db.prepare(
+              `UPDATE order_payments
+               SET external_status = 'paid_no_stock', external_payload = ?
+               WHERE id = ?`
+            ).run(JSON.stringify({ ...body, _stock_shortage: stockShortage }), op.id);
+            // Le paiement reste 'pending' côté local — l'admin doit arbitrer.
+            return res.json({ ok: true, status: 'paid_but_out_of_stock' });
+          }
+
+          // Création de la facture Dolibarr depuis la commande
+          try {
+            const invoiceRes = await dolibarrApi.post('/invoices/createfromorder/' + op.dolibarr_order_id);
+            const invoiceId = invoiceRes.data;
+            // Validate the invoice — idwarehouse:4 (Rayon) = même dépôt que POS,
+            // déclenche le décrément stock sur la source de vérité physique.
+            try {
+              await dolibarrApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
+            } catch (e) {
+              console.warn('[PAYTECH-IPN] invoice validate warning:', e.response?.data || e.message);
+            }
+            // Tag canal de vente (cohérent avec /orders et confirm-payment admin).
+            // createfromorder ne copie pas toujours module_source — PUT best-effort.
+            try {
+              await dolibarrApi.put(`/invoices/${invoiceId}`, { module_source: 'ecommerce' });
+            } catch (e) {
+              console.warn('[PAYTECH-IPN] invoice tag warning:', e.response?.data || e.message);
+            }
+            // Récup ref humaine
+            try {
+              const inv = await dolibarrApi.get(`/invoices/${invoiceId}`);
+              invoiceRef = inv.data?.ref || null;
+            } catch { /* ignore */ }
+          } catch (err) {
+            console.error('[PAYTECH-IPN] création facture échouée:', err.response?.data || err.message);
+            // On marque malgré tout le paiement comme confirmé pour ne pas relancer le client.
+            // Un admin pourra créer la facture manuellement depuis /admin/payments
+            // (visible via GET /api/admin/payments/orphans).
+          }
+        }
+
+        // Pas d'adminId : confirmé par PayTech, pas par un admin
         db.prepare(
           `UPDATE order_payments
            SET payment_status = 'confirmed',
@@ -335,15 +426,23 @@ export function createPaytechRouter({
   );
 
   // ════════════════════════════════════════════════════════════
-  // GET /api/payments/status/:orderId — polling client
+  // GET /api/payments/status/:orderId — polling client (auth + ownership)
   // ════════════════════════════════════════════════════════════
-  router.get('/payments/status/:orderId', async (req, res) => {
+  router.get('/payments/status/:orderId', requireCustomerAuth, async (req, res) => {
     try {
       const orderId = req.params.orderId;
       const op = db.prepare(
-        'SELECT dolibarr_order_id, order_ref, payment_status, external_status, invoice_ref, amount_expected FROM order_payments WHERE dolibarr_order_id = ? OR order_ref = ? LIMIT 1'
+        'SELECT dolibarr_order_id, order_ref, payment_status, external_status, invoice_ref, amount_expected, customer_email FROM order_payments WHERE dolibarr_order_id = ? OR order_ref = ? LIMIT 1'
       ).get(String(orderId), String(orderId));
       if (!op) return res.status(404).json({ error: 'Commande introuvable' });
+
+      // IDOR : la commande doit appartenir au client connecté.
+      const sessionEmail = String(req.customer?.email || '').toLowerCase();
+      const orderEmail = String(op.customer_email || '').toLowerCase();
+      if (!sessionEmail || !orderEmail || sessionEmail !== orderEmail) {
+        return res.status(403).json({ error: 'Accès non autorisé' });
+      }
+
       res.json({
         order_id: op.dolibarr_order_id,
         order_ref: op.order_ref,

@@ -286,7 +286,7 @@ export function createNewsRouter({ db, cache, adminAuth, csrfProtection }) {
     }
   });
 
-  router.post('/api/admin/news/upload-image', adminAuth, newsImageUpload.single('image'), (req, res) => {
+  router.post('/api/admin/news/upload-image', adminAuth, csrfProtection, newsImageUpload.single('image'), (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
       res.json({ path: `/images/news/${req.file.filename}` });

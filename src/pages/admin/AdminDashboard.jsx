@@ -6,7 +6,7 @@ import {
   FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiCheckSquare, FiLayers,
   FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss,
 } from 'react-icons/fi';
-import { adminLogout, adminMe, getNotificationCounts } from '../../api/admin';
+import { adminLogout, adminMe, getNotificationCounts, adminChangePassword } from '../../api/admin';
 import AdminLogin from './AdminLogin';
 import Loader from '../../components/common/Loader';
 import toast from 'react-hot-toast';
@@ -53,6 +53,7 @@ const NAV_GROUPS = [
     label: 'Ventes',
     items: [
       { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
+      { path: 'invoices', label: 'Factures', icon: <FiFileText />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
       { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin', 'comptable'] },
       { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin', 'comptable'] },
     ],
@@ -117,6 +118,7 @@ function saveCollapsed(state) {
 export default function AdminDashboard() {
   const [admin, setAdmin] = useState(null);
   const [role, setRole] = useState(null);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
   const [checking, setChecking] = useState(true);
   const [badges, setBadges] = useState({});
   const [collapsed, setCollapsed] = useState(loadCollapsed);
@@ -128,8 +130,9 @@ export default function AdminDashboard() {
       .then((res) => {
         setAdmin(res.data.username);
         setRole(res.data.role || 'admin');
+        setMustChangePassword(!!res.data.mustChangePassword);
       })
-      .catch(() => { setAdmin(null); setRole(null); })
+      .catch(() => { setAdmin(null); setRole(null); setMustChangePassword(false); })
       .finally(() => setChecking(false));
 
     const handleUnauthorized = () => {
@@ -178,8 +181,23 @@ export default function AdminDashboard() {
     });
   };
 
+  const handleLoginSuccess = (data) => {
+    setAdmin(data.username);
+    setRole(data.role || 'admin');
+    setMustChangePassword(!!data.mustChangePassword);
+  };
+
   if (checking) return <div className="admin-loading"><Loader /></div>;
-  if (!admin) return <AdminLogin onLogin={setAdmin} />;
+  if (!admin) return <AdminLogin onLogin={handleLoginSuccess} />;
+  if (mustChangePassword) {
+    return (
+      <ForcedPasswordChange
+        username={admin}
+        onSuccess={() => setMustChangePassword(false)}
+        onLogout={handleLogout}
+      />
+    );
+  }
 
   // Filtrer les groupes selon le rôle : ne garder que les items autorisés, masquer les groupes vides
   const visibleGroups = NAV_GROUPS
@@ -256,12 +274,59 @@ export default function AdminDashboard() {
 
       <main className="admin-main">
         <header className="admin-header">
-          <h1>{activeTab.label}</h1>
+          <h1>{activeTab?.label || ''}</h1>
         </header>
         <div className="admin-content">
           <Outlet context={{ adminUsername: admin, adminRole: role }} />
         </div>
       </main>
+    </div>
+  );
+}
+
+// Écran bloquant affiché tant que `mustChangePassword` est vrai.
+// L'utilisateur ne peut pas naviguer dans l'admin avant d'avoir changé son mot de passe.
+function ForcedPasswordChange({ username, onSuccess, onLogout }) {
+  const [current, setCurrent] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (newPw.length < 8 || !/[A-Z]/.test(newPw) || !/[0-9]/.test(newPw)) {
+      return toast.error('Min. 8 caractères, 1 majuscule, 1 chiffre');
+    }
+    if (newPw !== confirm) return toast.error('Les mots de passe ne correspondent pas');
+    if (newPw === current) return toast.error('Le nouveau mot de passe doit être différent');
+    setSaving(true);
+    try {
+      await adminChangePassword(current, newPw);
+      toast.success('Mot de passe modifié');
+      onSuccess();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-login">
+      <form onSubmit={handleSubmit} className="admin-login-form" style={{ maxWidth: 420 }}>
+        <img src="/images/logo.png" alt="Logo" className="admin-login-logo" />
+        <h2>Renouvellement de mot de passe</h2>
+        <p style={{ margin: '0 0 12px', color: '#92400e', fontSize: 14, textAlign: 'center', background: '#fef3c7', padding: 10, borderRadius: 6 }}>
+          Bonjour <strong>{username}</strong>, vous devez définir un nouveau mot de passe avant d'accéder à l'administration.
+        </p>
+        <input type="password" placeholder="Mot de passe actuel" value={current} onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
+        <input type="password" placeholder="Nouveau mot de passe (8+ car., 1 maj., 1 chiffre)" value={newPw} onChange={(e) => setNewPw(e.target.value)} required autoComplete="new-password" minLength={8} />
+        <input type="password" placeholder="Confirmer le nouveau mot de passe" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
+        <button type="submit" disabled={saving}>{saving ? 'Enregistrement…' : 'Définir le nouveau mot de passe'}</button>
+        <button type="button" onClick={onLogout} style={{ background: 'transparent', color: '#6b7280', marginTop: 8 }}>
+          Se déconnecter
+        </button>
+      </form>
     </div>
   );
 }

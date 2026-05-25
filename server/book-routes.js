@@ -48,9 +48,9 @@ const excludedListSql = `(${excludedCategoryPlaceholders()})`;
 
 /**
  * Crée le router.
- * @param {Object} deps - { dolibarrPool, auth, csrfProtection, sanitizeBody, cache }
+ * @param {Object} deps - { dolibarrPool, auth, csrfProtection, cache, db }
  */
-export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeBody, cache }) {
+export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db }) {
   const router = Router();
 
   async function fetchAllowedGenreIds() {
@@ -110,12 +110,105 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
     };
   }
 
+  // ══════════════════════════════════════════════════════
+  // Dual-write Auteur (Phase 1 refactor) — sync vers book_authors SQLite
+  // ══════════════════════════════════════════════════════
+
+  // Normalisation pour matching : minuscules, sans accents, espaces tassés
+  function normalizeAuthorName(s) {
+    if (!s) return '';
+    return String(s)
+      .normalize('NFD').replace(/[̀-ͯ]/g, '') // strip combining diacritics
+      .toLowerCase()
+      .replace(/[\s,;\-_]+/g, ' ')
+      .trim();
+  }
+
+  // Cherche un SQLite authors.id qui matche le nom de l'auteur sur display_name
+  // ou la combinaison "lastname firstname". Renvoie l'ID ou null.
+  function matchAuthorIdByName(authorFull) {
+    if (!authorFull) return null;
+    const target = normalizeAuthorName(authorFull);
+    if (!target) return null;
+    const rows = db.prepare(
+      `SELECT id, firstname, lastname, display_name FROM authors`
+    ).all();
+    for (const r of rows) {
+      const cand1 = normalizeAuthorName(r.display_name);
+      const cand2 = normalizeAuthorName(`${r.firstname || ''} ${r.lastname || ''}`);
+      const cand3 = normalizeAuthorName(`${r.lastname || ''} ${r.firstname || ''}`);
+      if (cand1 === target || cand2 === target || cand3 === target) return r.id;
+    }
+    return null;
+  }
+
+  // Met à jour book_authors pour ce produit : 0 ou 1 entrée selon match.
+  // Pas d'exception remontée : la legacy pe.auteur reste source de vérité.
+  function syncBookAuthorsLink(productId, authorFull) {
+    try {
+      const authorId = matchAuthorIdByName(authorFull);
+      const tx = db.transaction(() => {
+        db.prepare(`DELETE FROM book_authors WHERE product_id = ?`).run(productId);
+        if (authorId) {
+          db.prepare(
+            `INSERT INTO book_authors (product_id, author_id, role, position) VALUES (?, ?, 'author', 0)`
+          ).run(productId, authorId);
+        }
+      });
+      tx();
+      return { matched: !!authorId, authorId };
+    } catch (e) {
+      console.warn(`[BOOKS] syncBookAuthorsLink p=${productId} err:`, e.message);
+      return { matched: false, authorId: null, error: e.message };
+    }
+  }
+
+  // Version multi-auteurs (Phase 4) : prend un tableau d'IDs valides
+  // (déjà créés/sélectionnés côté UI), conserve l'ordre comme position.
+  // Vérifie l'existence de chaque ID avant insert (anti-orphelins).
+  function syncBookAuthorsLinks(productId, authorIds) {
+    try {
+      const validIds = [];
+      for (const id of authorIds) {
+        const n = parseInt(id, 10);
+        if (!Number.isInteger(n) || n <= 0) continue;
+        const exists = db.prepare(`SELECT 1 FROM authors WHERE id = ?`).get(n);
+        if (exists) validIds.push(n);
+      }
+      const tx = db.transaction(() => {
+        db.prepare(`DELETE FROM book_authors WHERE product_id = ?`).run(productId);
+        for (let i = 0; i < validIds.length; i++) {
+          db.prepare(
+            `INSERT INTO book_authors (product_id, author_id, role, position) VALUES (?, ?, 'author', ?)`
+          ).run(productId, validIds[i], i);
+        }
+      });
+      tx();
+      return { matched: validIds.length > 0, authorIds: validIds };
+    } catch (e) {
+      console.warn(`[BOOKS] syncBookAuthorsLinks p=${productId} err:`, e.message);
+      return { matched: false, authorIds: [], error: e.message };
+    }
+  }
+
+  // Construit la chaîne display pour pe.auteur depuis une liste d'IDs SQLite.
+  function buildAuteurFieldFromIds(authorIds) {
+    if (!Array.isArray(authorIds) || authorIds.length === 0) return '';
+    const placeholders = authorIds.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT id, display_name, firstname, lastname FROM authors WHERE id IN (${placeholders})`
+    ).all(...authorIds);
+    const byId = new Map(rows.map((r) => [r.id, r.display_name || `${r.firstname} ${r.lastname}`.trim()]));
+    return authorIds.map((id) => byId.get(parseInt(id, 10))).filter(Boolean).join(' ; ');
+  }
+
   function invalidateProductCache(productId, ref = null) {
     if (!cache) return;
     cache.del(`product:${productId}`);
     cache.del('price-range');
     cache.del('categories:all');
     cache.del('refs-with-real-covers');
+    cache.del('public_authors_book_counts_fk'); // bibliographie auteur via JOIN
     if (ref) {
       cache.del(`img:${ref}`);
       cache.del(`realcover:${ref}`);
@@ -319,6 +412,18 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
 
       const genreIds = await fetchProductGenreIds(id);
 
+      // Multi-auteurs (Phase 4) : lit book_authors triés par position pour pré-remplir l'UI
+      const authorRows = db.prepare(
+        `SELECT a.id, a.display_name, a.firstname, a.lastname, a.slug, ba.position
+         FROM book_authors ba JOIN authors a ON a.id = ba.author_id
+         WHERE ba.product_id = ? ORDER BY ba.position ASC, a.id ASC`
+      ).all(id);
+      const authors = authorRows.map((a) => ({
+        id: a.id,
+        display_name: a.display_name || `${a.firstname || ''} ${a.lastname || ''}`.trim(),
+        slug: a.slug,
+      }));
+
       const p = rows[0];
       let author_nom = p.auteur || '';
       let author_prenom = '';
@@ -346,6 +451,8 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         description,
         status: p.status,
         ref: p.ref,
+        authors,                              // Phase 4 : objets { id, display_name, slug }
+        author_ids: authors.map((a) => a.id), // raccourci pour la UI
       });
     } catch (err) {
       console.error('[BOOKS] GET detail error:', err.message);
@@ -386,6 +493,20 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         });
       }
 
+      // Multi-auteurs (Phase 4) : si author_ids[] fourni, il prend le dessus.
+      // Le pe.auteur Dolibarr est alors construit depuis les display_names des auteurs SQLite.
+      const explicitAuthorIds = Array.isArray(req.body.author_ids)
+        ? req.body.author_ids.map((n) => parseInt(n, 10)).filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+      if (explicitAuthorIds.length > 0) {
+        const derived = buildAuteurFieldFromIds(explicitAuthorIds);
+        if (derived) {
+          // Réécrit author_nom (= chaîne complète) pour que pe.auteur reflète la sélection
+          result.normalized.author_nom = derived;
+          result.normalized.author_prenom = '';
+        }
+      }
+
       const payload = buildDolibarrPayload(result.normalized);
       const createRes = await adminApi.post('/products', payload);
       newProductId = createRes.data;
@@ -395,12 +516,18 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         await adminApi.post(`/categories/${gid}/objects/product/${newProductId}`);
       }
 
+      // Dual-write : prend explicit author_ids si présent, sinon fallback au matching mono
+      const authorLink = explicitAuthorIds.length > 0
+        ? syncBookAuthorsLinks(newProductId, explicitAuthorIds)
+        : syncBookAuthorsLink(newProductId, [result.normalized.author_nom, result.normalized.author_prenom].filter(Boolean).join(' ').trim());
+
       invalidateProductCache(newProductId, result.normalized.isbn);
 
       res.status(201).json({
         id: newProductId,
         ref: result.normalized.isbn,
         message: 'Livre créé avec succès',
+        author_link: authorLink,
       });
     } catch (err) {
       console.error('[BOOKS] POST error:', err.response?.data || err.message);
@@ -451,6 +578,18 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
         });
       }
 
+      // Multi-auteurs (Phase 4) : si author_ids[] fourni, réécrit pe.auteur depuis SQLite display_names
+      const explicitAuthorIdsPut = Array.isArray(req.body.author_ids)
+        ? req.body.author_ids.map((n) => parseInt(n, 10)).filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+      if (explicitAuthorIdsPut.length > 0) {
+        const derived = buildAuteurFieldFromIds(explicitAuthorIdsPut);
+        if (derived) {
+          result.normalized.author_nom = derived;
+          result.normalized.author_prenom = '';
+        }
+      }
+
       const payload = buildDolibarrPayload(result.normalized);
       await adminApi.put(`/products/${id}`, payload);
 
@@ -459,11 +598,13 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
       const toRemove = currentGenres.filter((g) => !selectedGenreIds.includes(g));
       const toAdd = selectedGenreIds.filter((g) => !currentGenres.includes(g));
 
+      const genreFailures = { unlink: [], link: [] };
       for (const gid of toRemove) {
         try {
           await adminApi.delete(`/categories/${gid}/objects/product/${id}`);
         } catch (catErr) {
           console.warn(`[BOOKS] Unlink category ${gid} failed:`, catErr.message);
+          genreFailures.unlink.push({ id: gid, error: catErr.message });
         }
       }
       for (const gid of toAdd) {
@@ -471,6 +612,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
           await adminApi.post(`/categories/${gid}/objects/product/${id}`);
         } catch (catErr) {
           console.warn(`[BOOKS] Link category ${gid} failed:`, catErr.message);
+          genreFailures.link.push({ id: gid, error: catErr.message });
         }
       }
 
@@ -478,7 +620,27 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, sanitizeB
       const [refRows] = await dolibarrPool.query('SELECT ref FROM llx_product WHERE rowid = ? LIMIT 1', [id]);
       invalidateProductCache(id, refRows[0]?.ref);
 
-      res.json({ id, message: 'Livre mis à jour avec succès' });
+      // Dual-write : prend explicit author_ids[] (Phase 4) sinon fallback matching mono
+      const authorLink = explicitAuthorIdsPut.length > 0
+        ? syncBookAuthorsLinks(id, explicitAuthorIdsPut)
+        : syncBookAuthorsLink(id, [result.normalized.author_nom, result.normalized.author_prenom].filter(Boolean).join(' ').trim());
+
+      // Si la sync des genres a partiellement échoué, le signaler explicitement
+      if (genreFailures.unlink.length > 0 || genreFailures.link.length > 0) {
+        // Relire l'état réel pour informer l'UI
+        const finalGenres = await fetchProductGenreIds(id);
+        return res.status(207).json({
+          id,
+          message: 'Livre mis à jour mais synchronisation des genres incomplète',
+          warning: 'genres_partial_sync',
+          genres_failures: genreFailures,
+          genres_now: finalGenres,
+          genres_requested: selectedGenreIds,
+          author_link: authorLink,
+        });
+      }
+
+      res.json({ id, message: 'Livre mis à jour avec succès', author_link: authorLink });
     } catch (err) {
       console.error('[BOOKS] PUT error:', err.response?.data || err.message);
       res.status(500).json({ error: 'Erreur mise à jour du livre' });

@@ -1,24 +1,37 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { posLookupInvoice, posCreateReturn } from '../../api/pos';
 import { FiX, FiSearch, FiRotateCcw } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import './POSReturn.css';
 
-export default function POSReturn({ onClose }) {
-  const [ref, setRef] = useState('');
+const REFUND_METHODS = [
+  { code: 'LIQ', label: 'Espèces' },
+  { code: 'CB', label: 'Carte' },
+  { code: 'WAVE', label: 'Wave' },
+  { code: 'OM', label: 'Orange Money' },
+  { code: 'CHQ', label: 'Chèque' },
+];
+
+export default function POSReturn({ onClose, initialRef }) {
+  const [ref, setRef] = useState(initialRef || '');
   const [invoice, setInvoice] = useState(null);
   const [selectedItems, setSelectedItems] = useState([]);
   const [reason, setReason] = useState('');
+  const [refundMethod, setRefundMethod] = useState('LIQ');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
 
-  const handleLookup = async () => {
-    if (!ref.trim()) return;
+  const lookup = async (refValue) => {
+    const lookupRef = (refValue || '').trim();
+    if (!lookupRef) return;
     setLoading(true);
     try {
-      const res = await posLookupInvoice(ref.trim());
+      const res = await posLookupInvoice(lookupRef);
       setInvoice(res.data);
-      setSelectedItems(res.data.lines.map(l => ({ ...l, returnQty: l.qty })));
+      setSelectedItems(res.data.lines.map(l => {
+        const returnable = l.qty_returnable ?? l.qty;
+        return { ...l, returnQty: returnable > 0 ? returnable : 0 };
+      }));
     } catch {
       toast.error('Facture non trouvée');
       setInvoice(null);
@@ -27,6 +40,13 @@ export default function POSReturn({ onClose }) {
     }
   };
 
+  const handleLookup = () => lookup(ref);
+
+  useEffect(() => {
+    if (initialRef) lookup(initialRef);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRef]);
+
   const toggleItem = (idx) => {
     setSelectedItems(prev => prev.map((item, i) =>
       i === idx ? { ...item, selected: !item.selected } : item
@@ -34,13 +54,15 @@ export default function POSReturn({ onClose }) {
   };
 
   const updateReturnQty = (idx, qty) => {
-    setSelectedItems(prev => prev.map((item, i) =>
-      i === idx ? { ...item, returnQty: Math.max(1, Math.min(qty, item.qty)) } : item
-    ));
+    setSelectedItems(prev => prev.map((item, i) => {
+      if (i !== idx) return item;
+      const max = item.qty_returnable ?? item.qty;
+      return { ...item, returnQty: Math.max(1, Math.min(qty, max)) };
+    }));
   };
 
   const handleReturn = async () => {
-    const items = selectedItems.filter(i => i.selected).map(i => ({
+    const items = selectedItems.filter(i => i.selected && i.returnQty > 0).map(i => ({
       product_id: i.product_id,
       label: i.label,
       qty: i.returnQty,
@@ -55,6 +77,7 @@ export default function POSReturn({ onClose }) {
         invoice_ref: invoice.ref,
         items,
         reason,
+        refund_method: refundMethod,
       });
       setResult(res.data);
       toast.success(`Avoir ${res.data.credit_ref} créé`);
@@ -78,6 +101,7 @@ export default function POSReturn({ onClose }) {
             <p className="pos-return-success">Avoir <strong>{result.credit_ref}</strong> créé</p>
             <p>Facture originale : {result.original_ref}</p>
             <p>Montant : <strong>{Math.abs(result.total_ttc).toLocaleString('fr-FR')} FCFA</strong></p>
+            <p>Remboursé en : <strong>{REFUND_METHODS.find(m => m.code === result.refund_method)?.label || result.refund_method || 'Espèces'}</strong></p>
             <button className="pos-return-btn primary" onClick={onClose}>Fermer</button>
           </div>
         ) : !invoice ? (
@@ -105,25 +129,50 @@ export default function POSReturn({ onClose }) {
             </div>
 
             <div className="pos-return-items">
-              {selectedItems.map((item, i) => (
-                <label key={i} className={`pos-return-item ${item.selected ? 'selected' : ''}`}>
-                  <input type="checkbox" checked={item.selected || false} onChange={() => toggleItem(i)} />
-                  <span className="pos-return-item-label">{item.label}</span>
-                  <div className="pos-return-item-qty">
-                    <span>Qté:</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={item.qty}
-                      value={item.returnQty}
-                      onChange={(e) => updateReturnQty(i, parseInt(e.target.value) || 1)}
-                      disabled={!item.selected}
-                    />
-                    <span>/ {item.qty}</span>
-                  </div>
-                  <span className="pos-return-item-price">{Math.round(item.price_ttc * (item.selected ? item.returnQty : item.qty)).toLocaleString('fr-FR')} F</span>
-                </label>
-              ))}
+              {selectedItems.map((item, i) => {
+                const returnable = item.qty_returnable ?? item.qty;
+                const exhausted = returnable <= 0;
+                return (
+                  <label key={i} className={`pos-return-item ${item.selected ? 'selected' : ''} ${exhausted ? 'exhausted' : ''}`}>
+                    <input type="checkbox" checked={item.selected || false} onChange={() => toggleItem(i)} disabled={exhausted} />
+                    <span className="pos-return-item-label">
+                      {item.label}
+                      {item.qty_returned > 0 && (
+                        <small> — déjà retourné : {item.qty_returned}/{item.qty}</small>
+                      )}
+                    </span>
+                    <div className="pos-return-item-qty">
+                      <span>Qté:</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={returnable}
+                        value={item.returnQty}
+                        onChange={(e) => updateReturnQty(i, parseInt(e.target.value) || 1)}
+                        disabled={!item.selected || exhausted}
+                      />
+                      <span>/ {returnable}</span>
+                    </div>
+                    <span className="pos-return-item-price">{Math.round(item.price_ttc * (item.selected ? item.returnQty : returnable)).toLocaleString('fr-FR')} F</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="pos-return-refund">
+              <div className="pos-return-refund-label">Remboursé en :</div>
+              <div className="pos-return-method-btns">
+                {REFUND_METHODS.map(m => (
+                  <button
+                    key={m.code}
+                    type="button"
+                    className={`pos-return-method-btn ${refundMethod === m.code ? 'active' : ''}`}
+                    onClick={() => setRefundMethod(m.code)}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <input

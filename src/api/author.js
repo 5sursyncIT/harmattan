@@ -25,6 +25,12 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
+// API publique des auteurs (annuaire + profil)
+export const authorPublicApi = {
+  list: (params = {}) => api.get('/authors', { params }),
+  profile: (slug) => api.get(`/authors/${encodeURIComponent(slug)}`),
+};
+
 export const authorApi = {
   register: (data) => api.post('/author/register', data),
   login: (email, password) => api.post('/author/login', { email, password }),
@@ -35,6 +41,8 @@ export const authorApi = {
   updateProfile: (data) => api.put('/author/profile', data),
   updatePassword: (currentPassword, newPassword) =>
     api.put('/author/password', { currentPassword, newPassword }),
+  updateProfilePublic: (data) => api.put('/author/profile-public', data),
+  dashboard: () => api.get('/author/dashboard'),
   // Manuscrits
   submitManuscript: (formData) =>
     api.post('/author/manuscripts', formData, {

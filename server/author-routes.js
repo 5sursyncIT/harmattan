@@ -55,8 +55,14 @@ const originalUpload = multer({
   fileFilter: (req, file, cb) => cb(null, /\.(pdf|doc|docx|odt|rtf)$/i.test(file.originalname || '')),
 });
 
-export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimiter, transporter, cookieSecure, siteUrl }) {
+export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimiter, transporter, cookieSecure, siteUrl, dolibarrPool }) {
   const router = Router();
+
+  // Hache un token avant stockage/lookup — le token brut ne vit que dans le
+  // cookie HttpOnly de l'auteur, jamais en base.
+  function hashSessionToken(token) {
+    return crypto.createHash('sha256').update(String(token)).digest('hex');
+  }
 
   // Middleware d'auth pour l'auteur connecté
   function requireAuthorAuth(req, res, next) {
@@ -64,7 +70,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     if (!token) return res.status(401).json({ error: 'Non authentifié' });
     const session = db.prepare(
       "SELECT a.* FROM author_sessions s JOIN authors a ON a.id = s.author_id WHERE s.token = ? AND s.expires_at > datetime('now')"
-    ).get(token);
+    ).get(hashSessionToken(token));
     if (!session) return res.status(401).json({ error: 'Session expirée' });
     req.author = session;
     next();
@@ -73,7 +79,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
   function createSession(authorId) {
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    db.prepare('INSERT INTO author_sessions (token, author_id, expires_at) VALUES (?, ?, ?)').run(token, authorId, expiresAt);
+    db.prepare('INSERT INTO author_sessions (token, author_id, expires_at) VALUES (?, ?, ?)').run(hashSessionToken(token), authorId, expiresAt);
     return { token, expiresAt };
   }
 
@@ -148,14 +154,278 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
   // ─── LOGOUT ───────────────────────────────────────────────
   router.post('/logout', requireAuthorAuth, (req, res) => {
     const token = req.cookies?.[AUTHOR_SESSION_COOKIE];
-    if (token) db.prepare('DELETE FROM author_sessions WHERE token = ?').run(token);
+    if (token) db.prepare('DELETE FROM author_sessions WHERE token = ?').run(hashSessionToken(token));
     res.clearCookie(AUTHOR_SESSION_COOKIE);
     res.json({ success: true });
   });
 
   router.get('/me', requireAuthorAuth, (req, res) => {
-    const { id, email, firstname, lastname, phone, bio } = req.author;
-    res.json({ id, email, firstname, lastname, phone: phone || '', bio: bio || '' });
+    const { id, email, firstname, lastname, phone, bio, slug, photo_url, website,
+      social_twitter, social_instagram, social_linkedin, social_facebook, public_listed } = req.author;
+    res.json({
+      id, email, firstname, lastname,
+      phone: phone || '',
+      bio: bio || '',
+      slug: slug || null,
+      photo_url: photo_url || null,
+      website: website || null,
+      socials: {
+        twitter: social_twitter || null,
+        instagram: social_instagram || null,
+        linkedin: social_linkedin || null,
+        facebook: social_facebook || null,
+      },
+      public_listed: !!public_listed,
+    });
+  });
+
+  // PUT /api/author/profile-public — édition par l'auteur de son profil public
+  router.put('/profile-public', requireAuthorAuth, csrfProtection, sanitizeBody(['bio', 'website', 'social_twitter', 'social_instagram', 'social_linkedin', 'social_facebook', 'photo_url']), (req, res) => {
+    const { bio, photo_url, website, social_twitter, social_instagram, social_linkedin, social_facebook, public_listed } = req.body;
+    db.prepare(
+      `UPDATE authors SET
+         bio = ?, photo_url = ?, website = ?,
+         social_twitter = ?, social_instagram = ?, social_linkedin = ?, social_facebook = ?,
+         public_listed = ?
+       WHERE id = ?`
+    ).run(
+      bio || null,
+      photo_url || null,
+      website || null,
+      social_twitter || null,
+      social_instagram || null,
+      social_linkedin || null,
+      social_facebook || null,
+      public_listed ? 1 : 0,
+      req.author.id,
+    );
+    res.json({ success: true });
+  });
+
+  // GET /api/author/dashboard — synthèse manuscrits + contrats + royalties + ventes
+  router.get('/dashboard', requireAuthorAuth, async (req, res) => {
+    try {
+      const author = req.author;
+      const displayName = ((author.display_name || `${author.firstname} ${author.lastname}`) || '').trim();
+
+      // 1. Manuscrits (toutes étapes)
+      const manuscripts = db.prepare(
+        `SELECT id, ref, title, genre, current_stage, created_at, updated_at
+         FROM manuscripts WHERE author_id = ? ORDER BY created_at DESC`
+      ).all(author.id).map((r) => ({ ...r, stage_label: STAGE_LABELS[r.current_stage] || r.current_stage }));
+
+      const manuscriptStats = {
+        total: manuscripts.length,
+        in_progress: manuscripts.filter((m) => !['printed', 'evaluation_negative'].includes(m.current_stage)).length,
+        action_required: manuscripts.filter((m) => ['correction_author_review', 'bat_author_review'].includes(m.current_stage)).length,
+        printed: manuscripts.filter((m) => m.current_stage === 'printed').length,
+      };
+
+      // 2. Contrats Dolibarr liés à l'auteur (par dolibarr_thirdparty_id ou par nom)
+      let contracts = [];
+      let books = [];
+      let salesStats = { total_units: 0, total_revenue_ht: 0, last_12_months_units: 0, last_12_months_revenue_ht: 0 };
+      let royalties = { total_due: 0, by_book: [], year: new Date().getFullYear() };
+
+      if (dolibarrPool && (author.dolibarr_thirdparty_id || displayName)) {
+        // Recherche des contrats : prio dolibarr_thirdparty_id, fallback nom de société
+        let contractWhere = '';
+        let contractParams = [];
+        if (author.dolibarr_thirdparty_id) {
+          contractWhere = 'c.fk_soc = ?';
+          contractParams = [author.dolibarr_thirdparty_id];
+        } else {
+          contractWhere = 's.nom LIKE ?';
+          contractParams = [`%${displayName.replace(/[%_]/g, '')}%`];
+        }
+        try {
+          const [rows] = await dolibarrPool.query(
+            `SELECT c.rowid AS id, c.ref, c.statut, c.date_contrat,
+                    ce.book_title, ce.book_isbn, ce.contract_type,
+                    ce.royalty_rate_print, ce.royalty_rate_digital, ce.royalty_threshold, ce.free_author_copies
+             FROM llx_contrat c
+             JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+             JOIN llx_societe s ON s.rowid = c.fk_soc
+             WHERE ${contractWhere}
+             ORDER BY c.date_contrat DESC, c.rowid DESC
+             LIMIT 100`,
+            contractParams,
+          );
+          contracts = rows.map((r) => ({
+            id: r.id,
+            ref: r.ref,
+            statut: r.statut,
+            statut_label: r.statut === 0 ? 'Brouillon' : r.statut === 1 ? 'Actif' : r.statut === 2 ? 'Fermé' : `Statut ${r.statut}`,
+            date: r.date_contrat,
+            book_title: r.book_title,
+            book_isbn: r.book_isbn,
+            contract_type: r.contract_type,
+            royalty_rate: r.royalty_rate_print || 0,
+            threshold: r.royalty_threshold || 0,
+            free_copies: r.free_author_copies || 0,
+          }));
+        } catch (e) {
+          console.warn('[AUTHOR/DASHBOARD] contracts:', e.message);
+        }
+
+        // Bibliographie publiée (livres dont l'auteur match)
+        if (displayName) {
+          const pat = `%${displayName.replace(/[%_]/g, '')}%`;
+          try {
+            const [rows] = await dolibarrPool.query(
+              `SELECT p.rowid AS id, p.ref, p.label, p.barcode, p.price_ttc,
+                      pe.publication_year, pe.editeur
+               FROM llx_product p
+               LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
+               WHERE p.tosell = 1 AND p.fk_product_type = 0
+                 AND pe.auteur LIKE ?
+               ORDER BY pe.publication_year DESC, p.label ASC
+               LIMIT 100`,
+              [pat],
+            );
+            books = rows;
+          } catch (e) {
+            console.warn('[AUTHOR/DASHBOARD] books:', e.message);
+          }
+        }
+
+        // Stats ventes globales sur l'ensemble des ISBN de l'auteur (via book_isbn dans contrats)
+        // Et calcul royalties simplifié (mode cumulatif sur l'année en cours)
+        const isbns = contracts
+          .map((c) => (c.book_isbn || '').replace(/[-\s]/g, ''))
+          .filter(Boolean);
+
+        if (isbns.length) {
+          // Total cumulé + revenu HT
+          try {
+            const placeholders = isbns.map(() => '?').join(',');
+            const [[total]] = await dolibarrPool.query(
+              `SELECT COALESCE(SUM(fd.qty), 0) AS units, COALESCE(SUM(fd.total_ht), 0) AS revenue
+               FROM llx_facturedet fd
+               JOIN llx_facture f ON f.rowid = fd.fk_facture
+               JOIN llx_product p ON p.rowid = fd.fk_product
+               WHERE f.fk_statut >= 1 AND fd.qty > 0
+                 AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') IN (${placeholders})`,
+              isbns,
+            );
+            salesStats.total_units = Number(total.units);
+            salesStats.total_revenue_ht = Math.round(Number(total.revenue));
+          } catch (e) {
+            console.warn('[AUTHOR/DASHBOARD] sales total:', e.message);
+          }
+
+          // Dernier 12 mois
+          try {
+            const placeholders = isbns.map(() => '?').join(',');
+            const [[recent]] = await dolibarrPool.query(
+              `SELECT COALESCE(SUM(fd.qty), 0) AS units, COALESCE(SUM(fd.total_ht), 0) AS revenue
+               FROM llx_facturedet fd
+               JOIN llx_facture f ON f.rowid = fd.fk_facture
+               JOIN llx_product p ON p.rowid = fd.fk_product
+               WHERE f.fk_statut >= 1 AND fd.qty > 0
+                 AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') IN (${placeholders})
+                 AND f.datef >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)`,
+              isbns,
+            );
+            salesStats.last_12_months_units = Number(recent.units);
+            salesStats.last_12_months_revenue_ht = Math.round(Number(recent.revenue));
+          } catch (e) {
+            console.warn('[AUTHOR/DASHBOARD] sales 12m:', e.message);
+          }
+
+          // Royalties par livre, sur l'année en cours, mode cumulatif
+          const year = new Date().getFullYear();
+          royalties.year = year;
+          const dateTo = `${year}-12-31`;
+          const dateFrom = `${year}-01-01`;
+          for (const c of contracts) {
+            const isbn = (c.book_isbn || '').replace(/[-\s]/g, '');
+            if (!isbn) continue;
+            try {
+              const [[cumRow]] = await dolibarrPool.query(
+                `SELECT COALESCE(SUM(fd.qty), 0) AS units
+                 FROM llx_facturedet fd
+                 JOIN llx_facture f ON f.rowid = fd.fk_facture
+                 JOIN llx_product p ON p.rowid = fd.fk_product
+                 WHERE f.fk_statut >= 1 AND fd.qty > 0
+                   AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
+                   AND f.datef <= ?`,
+                [isbn, dateTo],
+              );
+              const cumulative = Number(cumRow.units);
+
+              const [[periodRow]] = await dolibarrPool.query(
+                `SELECT COALESCE(SUM(fd.qty), 0) AS units, COALESCE(SUM(fd.total_ht), 0) AS gross
+                 FROM llx_facturedet fd
+                 JOIN llx_facture f ON f.rowid = fd.fk_facture
+                 JOIN llx_product p ON p.rowid = fd.fk_product
+                 WHERE f.fk_statut >= 1 AND fd.qty > 0
+                   AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
+                   AND f.datef BETWEEN ? AND ?`,
+                [isbn, dateFrom, dateTo],
+              );
+              const unitsPeriod = Number(periodRow.units);
+              const grossPeriod = Number(periodRow.gross);
+              if (unitsPeriod === 0) continue;
+
+              const threshold = Number(c.threshold) || 0;
+              const freeCopies = Number(c.free_copies) || 0;
+              const rate = Number(c.royalty_rate) || 0;
+              const cumBefore = cumulative - unitsPeriod;
+              const thresholdPlusFree = threshold + freeCopies;
+              let unitsOver = 0;
+              if (cumulative > thresholdPlusFree) {
+                unitsOver = cumBefore >= thresholdPlusFree ? unitsPeriod : (cumulative - thresholdPlusFree);
+              }
+              const avgHt = unitsPeriod > 0 ? grossPeriod / unitsPeriod : 0;
+              const dueAmount = unitsOver * avgHt * (rate / 100);
+              if (dueAmount > 0) {
+                royalties.by_book.push({
+                  contract_id: c.id,
+                  contract_ref: c.ref,
+                  book_title: c.book_title,
+                  units_period: unitsPeriod,
+                  units_over_threshold: Math.round(unitsOver * 100) / 100,
+                  rate,
+                  royalty_due: Math.round(dueAmount),
+                });
+                royalties.total_due += dueAmount;
+              }
+            } catch (e) {
+              console.warn('[AUTHOR/DASHBOARD] royalty calc:', e.message);
+            }
+          }
+          royalties.total_due = Math.round(royalties.total_due);
+        }
+      }
+
+      res.json({
+        author: {
+          id: author.id,
+          firstname: author.firstname,
+          lastname: author.lastname,
+          email: author.email,
+          slug: author.slug || null,
+          public_listed: !!author.public_listed,
+        },
+        manuscripts,
+        manuscript_stats: manuscriptStats,
+        contracts,
+        books: books.map((b) => ({
+          id: b.id,
+          ref: b.ref,
+          label: b.label,
+          price: Number(b.price_ttc || 0),
+          year: b.publication_year || null,
+          editor: b.editeur || null,
+        })),
+        sales: salesStats,
+        royalties,
+      });
+    } catch (err) {
+      console.error('[AUTHOR/DASHBOARD] error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement dashboard' });
+    }
   });
 
   router.put('/profile', requireAuthorAuth, csrfProtection, sanitizeBody(['firstname', 'lastname', 'phone']), (req, res) => {
@@ -442,8 +712,13 @@ export function createManuscriptMulter(kindName, sizeMB, mimePattern) {
   return multer({
     storage: multer.diskStorage({
       destination: (req, file, cb) => {
-        const manuscriptId = req.params.id || req.params.manuscriptId || 'tmp';
-        const dir = join(MANUSCRIPTS_DIR, String(manuscriptId), kindName);
+        const manuscriptId = String(req.params.id || req.params.manuscriptId || '');
+        // Anti path traversal : l'identifiant doit être strictement numérique,
+        // sinon un id du type '..' permettrait d'écrire hors de MANUSCRIPTS_DIR.
+        if (!/^\d+$/.test(manuscriptId)) {
+          return cb(new Error('Identifiant de manuscrit invalide'));
+        }
+        const dir = join(MANUSCRIPTS_DIR, manuscriptId, kindName);
         try { mkdirSync(dir, { recursive: true }); } catch (e) { return cb(e); }
         cb(null, dir);
       },
@@ -457,5 +732,5 @@ export function createManuscriptMulter(kindName, sizeMB, mimePattern) {
   });
 }
 
-// eslint-disable-next-line no-unused-vars
+ 
 const _ref_buildMulterForKind = buildMulterForKind;

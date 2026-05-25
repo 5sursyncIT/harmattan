@@ -65,6 +65,15 @@ const AccountingPayments = lazy(() => import('./pages/admin/panels/AccountingPay
 const AccountingReceivables = lazy(() => import('./pages/admin/panels/AccountingReceivables'));
 const AccountingTreasury = lazy(() => import('./pages/admin/panels/AccountingTreasury'));
 const AccountingRoyalties = lazy(() => import('./pages/admin/panels/AccountingRoyalties'));
+const AccountingChart = lazy(() => import('./pages/admin/panels/AccountingChart'));
+const AccountingLedger = lazy(() => import('./pages/admin/panels/AccountingLedger'));
+const AccountingBalance = lazy(() => import('./pages/admin/panels/AccountingBalance'));
+const AccountingStatements = lazy(() => import('./pages/admin/panels/AccountingStatements'));
+const AccountingEntries = lazy(() => import('./pages/admin/panels/AccountingEntries'));
+const AccountingSuppliers = lazy(() => import('./pages/admin/panels/AccountingSuppliers'));
+const AccountingVat = lazy(() => import('./pages/admin/panels/AccountingVat'));
+const InvoicesPanel = lazy(() => import('./pages/admin/panels/InvoicesPanel'));
+const InvoicesAuditPanel = lazy(() => import('./pages/admin/panels/InvoicesAuditPanel'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
@@ -72,6 +81,10 @@ const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'))
 const CustomersPanel = lazy(() => import('./pages/admin/panels/CustomersPanel'));
 const AuthorsPanel = lazy(() => import('./pages/admin/panels/AuthorsPanel'));
 const AdminNewsPanel = lazy(() => import('./pages/admin/panels/NewsPanel'));
+
+// Pages publiques auteurs (annuaire + profil)
+const AuthorsDirectoryPage = lazy(() => import('./pages/AuthorsDirectoryPage'));
+const AuthorProfilePage = lazy(() => import('./pages/AuthorProfilePage'));
 
 // Portail auteur (workflow éditorial)
 const AuthorLoginPage = lazy(() => import('./pages/author/AuthorLoginPage'));
@@ -135,6 +148,15 @@ export default function App() {
             <Route path="accounting/receivables" element={<AccountingReceivables />} />
             <Route path="accounting/treasury" element={<AccountingTreasury />} />
             <Route path="accounting/royalties" element={<AccountingRoyalties />} />
+            <Route path="accounting/chart" element={<AccountingChart />} />
+            <Route path="accounting/ledger" element={<AccountingLedger />} />
+            <Route path="accounting/balance" element={<AccountingBalance />} />
+            <Route path="accounting/statements" element={<AccountingStatements />} />
+            <Route path="accounting/entries" element={<AccountingEntries />} />
+            <Route path="accounting/suppliers" element={<AccountingSuppliers />} />
+            <Route path="accounting/vat" element={<AccountingVat />} />
+            <Route path="invoices" element={<InvoicesPanel />} />
+            <Route path="invoices/audit-log" element={<InvoicesAuditPanel />} />
             <Route path="stock" element={<StockDashboardPanel />} />
             <Route path="stock/alerts" element={<StockAlertsPanel />} />
             <Route path="stock/products" element={<StockProductsPanel />} />
@@ -154,6 +176,10 @@ export default function App() {
 
           <Route path="/" element={<Layout />}>
             <Route index element={<HomePage />} />
+            {/* Pages publiques auteurs */}
+            <Route path="auteurs" element={<AuthorsDirectoryPage />} />
+            <Route path="auteur/:slug" element={<AuthorProfilePage />} />
+
             {/* Portail auteur */}
             <Route path="auteur/connexion" element={<AuthorLoginPage />} />
             <Route path="auteur/inscription" element={<AuthorRegisterPage />} />

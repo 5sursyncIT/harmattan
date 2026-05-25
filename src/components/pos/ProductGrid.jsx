@@ -45,6 +45,7 @@ export default function ProductGrid({ category }) {
           key={p.id}
           className={`pos-product-card ${p.stock_reel <= 0 ? 'out-of-stock' : ''}`}
           onClick={() => addItem(p)}
+          title={p.label}
         >
           <div className="pos-product-media">
             <img
@@ -53,23 +54,17 @@ export default function ProductGrid({ category }) {
               className="pos-product-img"
               loading="lazy"
             />
+            <span className="pos-product-price">
+              {parseInt(p.price_ttc).toLocaleString('fr-FR')} XOF
+            </span>
+            {p.stock_reel <= 0 && <span className="pos-product-badge-out">Rupture</span>}
+            {p.stock_reel > 0 && p.stock_reel <= 3 && (
+              <span className="pos-product-badge-low">{p.stock_reel}</span>
+            )}
           </div>
           <div className="pos-product-info">
-            <span className="pos-product-ref">{p.ref}</span>
             <span className="pos-product-label">{p.label}</span>
-            <div className="pos-product-meta">
-              <span className="pos-product-price">
-                {parseInt(p.price_ttc).toLocaleString('fr-FR')} F
-              </span>
-              <span className={`pos-product-stock ${p.stock_reel > 0 ? 'in' : 'out'}`}>
-                {p.stock_reel > 0 ? `${p.stock_reel} en stock` : 'Indisponible'}
-              </span>
-            </div>
           </div>
-          {p.stock_reel <= 0 && <span className="pos-product-badge-out">Rupture</span>}
-          {p.stock_reel > 0 && p.stock_reel <= 3 && (
-            <span className="pos-product-badge-low">{p.stock_reel} restant(s)</span>
-          )}
         </button>
       ))}
     </div>

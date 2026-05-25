@@ -133,6 +133,20 @@
   color: var(--color-text-light);
   margin-bottom: 8px;
 }
+.product-card-author-link {
+  cursor: pointer;
+  transition: color 0.15s ease;
+  text-decoration: none;
+  border-radius: 2px;
+}
+.product-card-author-link:hover {
+  color: var(--color-green);
+  text-decoration: underline;
+}
+.product-card-author-link:focus-visible {
+  outline: 2px solid var(--color-green);
+  outline-offset: 2px;
+}
 
 .product-card-desc {
   display: none;

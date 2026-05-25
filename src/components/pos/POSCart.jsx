@@ -14,10 +14,11 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
   const holdTicket = usePosCartStore((s) => s.holdTicket);
   const recallTicket = usePosCartStore((s) => s.recallTicket);
   const getTotal = usePosCartStore((s) => s.getTotal);
+  const selectedItemId = usePosCartStore((s) => s.selectedItemId);
+  const setSelectedItem = usePosCartStore((s) => s.setSelectedItem);
 
   const total = getTotal();
   const itemCount = items.reduce((sum, item) => sum + item.qty, 0);
-  const [selectedItemId, setSelectedItemId] = useState(null);
   const [editorMode, setEditorMode] = useState('qty');
   const [keypadValue, setKeypadValue] = useState('');
 
@@ -26,18 +27,19 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
   useEffect(() => {
     const syncTimer = window.setTimeout(() => {
       if (!items.length) {
-        setSelectedItemId(null);
+        if (selectedItemId !== null) setSelectedItem(null);
         setKeypadValue('');
         return;
       }
 
       if (!selectedItemId || !items.some((item) => item.product_id === selectedItemId)) {
-        setSelectedItemId(items[0].product_id);
+        setSelectedItem(items[0].product_id);
         setKeypadValue('');
       }
     }, 0);
 
     return () => clearTimeout(syncTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, selectedItemId]);
 
   const displayedValue = selectedItem
@@ -45,7 +47,7 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
     : '--';
 
   const handleSelectItem = (productId) => {
-    setSelectedItemId(productId);
+    setSelectedItem(productId);
     setKeypadValue('');
   };
 
@@ -170,15 +172,13 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
 
       <div className={`pos-cart-workspace ${isProMode ? 'pro-mode' : ''}`}>
         <section className="pos-cart-main-panel">
-          <div className="pos-cart-panel-header">
-            <div>
-              <span className="pos-cart-section-label">Lignes du ticket</span>
-              <strong>{items.length > 0 ? 'Panier en cours' : 'Panier vide'}</strong>
+          {selectedItem && (
+            <div className="pos-cart-panel-header">
+              <span className="pos-cart-selection-chip active" title={selectedItem.label}>
+                Sélection : {selectedItem.label}
+              </span>
             </div>
-            <span className={`pos-cart-selection-chip ${selectedItem ? 'active' : ''}`}>
-              {selectedItem ? `Sélection : ${selectedItem.label}` : 'Touchez une ligne pour l’éditer'}
-            </span>
-          </div>
+          )}
 
           <div className="pos-cart-items">
           {items.length === 0 ? (
@@ -195,69 +195,68 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
                 className={`pos-cart-item ${selectedItemId === item.product_id ? 'selected' : ''}`}
                 onClick={() => handleSelectItem(item.product_id)}
               >
-                <div className="pos-cart-item-info">
+                <div className="pos-cart-item-row1">
                   <span className="pos-cart-item-ref">{item.ref}</span>
-                  <span className="pos-cart-item-label">{item.label}</span>
-                  <span className="pos-cart-item-price">
-                    {parseInt(item.price_ttc, 10).toLocaleString('fr-FR')} F / unité
+                  <span className="pos-cart-item-label" title={item.label}>{item.label}</span>
+                </div>
+                <div className="pos-cart-item-row2">
+                  <div className="pos-cart-item-actions">
+                    <button
+                      type="button"
+                      aria-label={`Réduire la quantité de ${item.label}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        updateQty(item.product_id, item.qty - 1);
+                      }}
+                    >
+                      <FiMinus size={14} />
+                    </button>
+                    <span className="pos-cart-item-qty">{item.qty}</span>
+                    <button
+                      type="button"
+                      aria-label={`Augmenter la quantité de ${item.label}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        updateQty(item.product_id, item.qty + 1);
+                      }}
+                    >
+                      <FiPlus size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="pos-cart-item-discount-btn"
+                      aria-label={`Appliquer une remise à ${item.label}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (isProMode) {
+                          handleSelectItem(item.product_id);
+                          handleModeChange('discount');
+                        } else {
+                          const val = prompt('Remise en % (0-100) :', item.discount || 0);
+                          if (val !== null) setDiscount(item.product_id, parseInt(val) || 0);
+                        }
+                      }}
+                      title="Remise"
+                    >
+                      <FiPercent size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="pos-cart-item-remove"
+                      aria-label={`Supprimer ${item.label} du ticket`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        removeItem(item.product_id);
+                      }}
+                    >
+                      <FiTrash2 size={14} />
+                    </button>
+                  </div>
+                  <span className="pos-cart-item-total">
+                    {Math.round(item.line_total).toLocaleString('fr-FR')} F
                     {item.discount > 0 && <span className="pos-cart-item-discount-tag">-{item.discount}%</span>}
                   </span>
                 </div>
-                <div className="pos-cart-item-actions">
-                  <button
-                    type="button"
-                    aria-label={`Réduire la quantité de ${item.label}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      updateQty(item.product_id, item.qty - 1);
-                    }}
-                  >
-                    <FiMinus size={14} />
-                  </button>
-                  <span className="pos-cart-item-qty">{item.qty}</span>
-                  <button
-                    type="button"
-                    aria-label={`Augmenter la quantité de ${item.label}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      updateQty(item.product_id, item.qty + 1);
-                    }}
-                  >
-                    <FiPlus size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="pos-cart-item-discount-btn"
-                    aria-label={`Appliquer une remise à ${item.label}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (isProMode) {
-                        handleSelectItem(item.product_id);
-                        handleModeChange('discount');
-                      } else {
-                        const val = prompt('Remise en % (0-100) :', item.discount || 0);
-                        if (val !== null) setDiscount(item.product_id, parseInt(val) || 0);
-                      }
-                    }}
-                    title="Remise"
-                  >
-                    <FiPercent size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="pos-cart-item-remove"
-                    aria-label={`Supprimer ${item.label} du ticket`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      removeItem(item.product_id);
-                    }}
-                  >
-                    <FiTrash2 size={14} />
-                  </button>
-                </div>
-                <span className="pos-cart-item-total">
-                  {Math.round(item.line_total).toLocaleString('fr-FR')} F
-                </span>
               </div>
             ))
           )}

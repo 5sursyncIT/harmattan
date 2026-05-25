@@ -90,11 +90,14 @@ describe('validateAuthor', () => {
   it('rejette nom vide', () => {
     expect(validateAuthor('').valid).toBe(false);
   });
-  it('rejette nom > 80 caractères', () => {
-    expect(validateAuthor('a'.repeat(81)).valid).toBe(false);
+  it('rejette nom > 255 caractères (limite varchar Dolibarr)', () => {
+    expect(validateAuthor('a'.repeat(256)).valid).toBe(false);
   });
-  it('rejette prénom > 80 caractères', () => {
-    expect(validateAuthor('DIOP', 'a'.repeat(81)).valid).toBe(false);
+  it('rejette prénom > 255 caractères', () => {
+    expect(validateAuthor('DIOP', 'a'.repeat(256)).valid).toBe(false);
+  });
+  it('accepte nom 80 chars (compat multi-auteurs joints)', () => {
+    expect(validateAuthor('a'.repeat(80)).valid).toBe(true);
   });
 });
 
@@ -251,20 +254,19 @@ describe('validatePrice', () => {
   it('accepte 5000', () => {
     expect(validatePrice(5000).valid).toBe(true);
   });
-  it('accepte 4999.99', () => {
-    expect(validatePrice(4999.99).valid).toBe(true);
+  it('accepte une chaîne entière "5000"', () => {
+    expect(validatePrice('5000').valid).toBe(true);
   });
-  it('accepte "4999.99" string', () => {
-    expect(validatePrice('4999.99').valid).toBe(true);
+  it('rejette les décimales (FCFA sans subdivision)', () => {
+    expect(validatePrice(4999.99).valid).toBe(false);
+    expect(validatePrice(4999.5).valid).toBe(false);
+    expect(validatePrice('4999.99').valid).toBe(false);
   });
   it('rejette 0', () => {
     expect(validatePrice(0).valid).toBe(false);
   });
   it('rejette une valeur négative', () => {
     expect(validatePrice(-100).valid).toBe(false);
-  });
-  it('rejette plus de 2 décimales', () => {
-    expect(validatePrice(4999.999).valid).toBe(false);
   });
   it('rejette vide/null', () => {
     expect(validatePrice('').valid).toBe(false);

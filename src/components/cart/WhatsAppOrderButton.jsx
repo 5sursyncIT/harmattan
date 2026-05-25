@@ -13,7 +13,7 @@ import { buildWhatsAppOrderMessage, buildWhatsAppOrderUrl } from '../../utils/wh
  */
 export default function WhatsAppOrderButton({ items = [], phone }) {
   const config = useSiteConfig();
-  const targetPhone = phone || config?.whatsapp_phone || '221772422508';
+  const targetPhone = phone || config?.whatsapp_phone || '221709530240';
 
   if (!items || items.length === 0) return null;
 
