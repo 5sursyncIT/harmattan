@@ -12,6 +12,7 @@ export const getExpiringContracts = (days = 90) => api.get('/contracts/expiring'
 export const downloadContractDocument = (id) => api.get(`/contracts/${id}/document`, { responseType: 'blob' });
 export const exportContractsCsv = (params = {}) => api.get('/contracts/export/csv', { params, responseType: 'blob' });
 export const searchAuthors = (q) => api.get('/contracts/thirdparties/search', { params: { q } });
+export const createAuthor = (data) => api.post('/contracts/thirdparties', data);
 
 // Signature
 export const getSignatureUrl = (id) => api.get(`/contracts/${id}/signature-url`);

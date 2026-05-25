@@ -14,8 +14,46 @@ import toast from 'react-hot-toast';
 import './Contracts.css';
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
-const TYPE_LABELS = { harmattan_2024: 'Harmattan 2024', harmattan_dll: 'Harmattan DLL', tamarinier: 'Le Tamarinier' };
+const CONTRACT_MODEL_LABELS = {
+  harmattan_2024: 'Harmattan classique',
+  harmattan_dll: 'Harmattan DLL',
+  tamarinier: 'Le Tamarinier',
+};
+const RIGHTS_SCOPE_LABELS = {
+  edition_simple: 'papier seul',
+  edition_numerique: 'papier + numérique',
+  edition_complete: 'complète',
+};
+const TYPE_LABELS = {
+  harmattan_2024: 'Harmattan classique',
+  harmattan_dll: 'Harmattan DLL',
+  tamarinier: 'Le Tamarinier',
+  edition_simple: 'Édition · papier',
+  edition_numerique: 'Édition · papier + numérique',
+  edition_complete: 'Édition · complète',
+};
 const TYPE_COLORS = { harmattan_2024: '#10531a', harmattan_dll: '#0284c7', tamarinier: '#7c3aed' };
+const TYPE_OPTIONS = Object.keys(CONTRACT_MODEL_LABELS).flatMap(model =>
+  Object.keys(RIGHTS_SCOPE_LABELS).map(scope => ({
+    value: `${model}_${scope}`,
+    label: `${CONTRACT_MODEL_LABELS[model]} · ${RIGHTS_SCOPE_LABELS[scope]}`,
+  }))
+);
+
+function getTypeMeta(type) {
+  if (!type) return { label: '—', color: '#888' };
+  for (const model of Object.keys(CONTRACT_MODEL_LABELS)) {
+    const prefix = `${model}_`;
+    if (type.startsWith(prefix)) {
+      const scope = type.slice(prefix.length);
+      return {
+        label: `${CONTRACT_MODEL_LABELS[model]} · ${RIGHTS_SCOPE_LABELS[scope] || scope}`,
+        color: TYPE_COLORS[model] || '#888',
+      };
+    }
+  }
+  return { label: TYPE_LABELS[type] || type, color: TYPE_COLORS[type] || '#888' };
+}
 
 function InfoRow({ icon, label, value, mono = false }) {
   return (
@@ -158,7 +196,8 @@ export default function ContractDetail() {
   if (!contract) return <div className="ct-empty"><FiAlertCircle size={48} className="ct-empty-icon" /><h3>Contrat introuvable</h3></div>;
 
   const ef = contract.extrafields || {};
-  const typeColor = TYPE_COLORS[ef.contractType] || '#888';
+  const typeMeta = getTypeMeta(ef.contractType);
+  const typeColor = typeMeta.color;
   const statusClass = contract.status === 0 ? 'ct-badge-draft' : contract.status === 1 ? 'ct-badge-active' : 'ct-badge-closed';
 
   const formatDate = (ts) => {
@@ -230,9 +269,9 @@ export default function ContractDetail() {
                 <div className="ct-field"><label>ISBN</label><input type="text" value={editForm.book_isbn} onChange={e => setEditForm({ ...editForm, book_isbn: e.target.value })} /></div>
                 <div className="ct-field"><label>Type de contrat</label>
                   <select value={editForm.contract_type} onChange={e => setEditForm({ ...editForm, contract_type: e.target.value })}>
-                    <option value="harmattan_2024">Harmattan 2024</option>
-                    <option value="harmattan_dll">Harmattan DLL</option>
-                    <option value="tamarinier">Le Tamarinier</option>
+                    {TYPE_OPTIONS.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -242,7 +281,7 @@ export default function ContractDetail() {
                 <InfoRow icon={<FiFileText size={14} />} label="ISBN" value={ef.bookIsbn} mono />
                 <InfoRow icon={<FiCalendar size={14} />} label="Date contrat" value={formatDate(contract.date)} />
                 <InfoRow icon={<FiExternalLink size={14} />} label="Type" value={
-                  ef.contractType ? <span className="ct-badge" style={{ padding: '2px 10px', background: `${typeColor}10`, color: typeColor }}>{TYPE_LABELS[ef.contractType]}</span> : '—'
+                  ef.contractType ? <span className="ct-badge" style={{ padding: '2px 10px', background: `${typeColor}10`, color: typeColor }}>{typeMeta.label}</span> : '—'
                 } />
               </>
             )}

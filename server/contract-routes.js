@@ -15,39 +15,85 @@ const adminApi = axios.create({
 });
 
 // ─── Business configuration ──────────────────────────────
-// Nouveaux types (v2) + anciens types conservés pour retro-compat
-const TEMPLATE_MAP = {
-  // v2 — templates enrichis (charte Harmattan, page de garde, pagination)
-  edition_simple: 'template_edition_simple',
-  edition_numerique: 'template_edition_numerique',
-  edition_complete: 'template_edition_complete',
+const CONTRACT_MODELS = {
+  harmattan_2024: { label: 'Harmattan · classique', defaults: { royalty_rate_print: 10, royalty_threshold: 500, free_author_copies: 5 } },
+  harmattan_dll: { label: 'Harmattan · DLL', defaults: { royalty_rate_print: 15, royalty_threshold: 1000, free_author_copies: 55 } },
+  tamarinier: { label: 'Le Tamarinier', defaults: { royalty_rate_print: 10, royalty_threshold: 500, free_author_copies: 5 } },
+};
+
+const RIGHTS_SCOPES = {
+  edition_simple: { label: 'papier seul', defaults: { royalty_rate_digital: 0 } },
+  edition_numerique: { label: 'papier + numérique', defaults: { royalty_rate_digital: 10 } },
+  edition_complete: { label: 'complète', defaults: { royalty_rate_digital: 10 } },
+};
+
+const COMBINED_CONTRACT_TYPES = Object.fromEntries(
+  Object.keys(CONTRACT_MODELS).flatMap(model =>
+    Object.keys(RIGHTS_SCOPES).map(scope => {
+      const key = `${model}_${scope}`;
+      return [key, { model, scope }];
+    })
+  )
+);
+
+const LEGACY_TYPE_ALIASES = {
+  harmattan_2024: { model: 'harmattan_2024', scope: 'edition_complete' },
+  harmattan_dll: { model: 'harmattan_dll', scope: 'edition_complete' },
+  tamarinier: { model: 'tamarinier', scope: 'edition_complete' },
+  edition_simple: { model: 'harmattan_2024', scope: 'edition_simple' },
+  edition_numerique: { model: 'harmattan_2024', scope: 'edition_numerique' },
+  edition_complete: { model: 'harmattan_2024', scope: 'edition_complete' },
+};
+
+const resolveContractType = (type) => COMBINED_CONTRACT_TYPES[type] || LEGACY_TYPE_ALIASES[type] || null;
+
+const TEMPLATE_MAP = Object.fromEntries(
+  Object.keys(COMBINED_CONTRACT_TYPES).map(type => [type, `template_${type}`])
+);
+Object.assign(TEMPLATE_MAP, {
   // Legacy — contrats existants continuent de pointer vers les anciens templates
   harmattan_2024: 'template_harmattan_2024',
   harmattan_dll: 'template_harmattan_dll',
   tamarinier: 'template_tamarinier',
-};
+  edition_simple: 'template_edition_simple',
+  edition_numerique: 'template_edition_numerique',
+  edition_complete: 'template_edition_complete',
+});
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
-const TYPE_LABELS = {
+const TYPE_LABELS = Object.fromEntries(
+  Object.entries(COMBINED_CONTRACT_TYPES).map(([type, cfg]) => [
+    type,
+    `${CONTRACT_MODELS[cfg.model].label} · ${RIGHTS_SCOPES[cfg.scope].label}`,
+  ])
+);
+Object.assign(TYPE_LABELS, {
   edition_simple: 'Édition · papier',
   edition_numerique: 'Édition · papier & numérique',
   edition_complete: 'Édition · complète (papier, numérique, adaptations)',
-  harmattan_2024: 'Harmattan 2024 (ancien)',
-  harmattan_dll: 'Harmattan DLL (ancien)',
-  tamarinier: 'Le Tamarinier (ancien)',
-};
+  harmattan_2024: 'Harmattan classique',
+  harmattan_dll: 'Harmattan DLL',
+  tamarinier: 'Le Tamarinier',
+});
 
-const DEFAULTS_BY_TYPE = {
-  edition_simple:    { royalty_rate_print: 8,  royalty_rate_digital: 0,  royalty_threshold: 500, free_author_copies: 10, tirage_initial: 100, format_ouvrage: '15 × 21 cm', prix_public_previsionnel: 8000, nombre_pages_estime: 200, exemplaires_sp: 5 },
-  edition_numerique: { royalty_rate_print: 8,  royalty_rate_digital: 15, royalty_threshold: 500, free_author_copies: 10, tirage_initial: 100, format_ouvrage: '15 × 21 cm', prix_public_previsionnel: 8000, nombre_pages_estime: 200, exemplaires_sp: 5 },
-  edition_complete:  { royalty_rate_print: 8,  royalty_rate_digital: 15, royalty_threshold: 500, free_author_copies: 10, tirage_initial: 100, format_ouvrage: '15 × 21 cm', prix_public_previsionnel: 8000, nombre_pages_estime: 200, exemplaires_sp: 5 },
-  harmattan_2024:    { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
-  harmattan_dll:     { royalty_rate_print: 8,  royalty_rate_digital: 8,  royalty_threshold: 300, free_author_copies: 10 },
-  tamarinier:        { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
-};
+function getDefaultsForType(type) {
+  const resolved = resolveContractType(type);
+  if (!resolved) return null;
+  return {
+    royalty_rate_print: CONTRACT_MODELS[resolved.model].defaults.royalty_rate_print,
+    royalty_rate_digital: RIGHTS_SCOPES[resolved.scope].defaults.royalty_rate_digital,
+    royalty_threshold: CONTRACT_MODELS[resolved.model].defaults.royalty_threshold,
+    free_author_copies: CONTRACT_MODELS[resolved.model].defaults.free_author_copies,
+    tirage_initial: 100,
+    format_ouvrage: '15 × 21 cm',
+    prix_public_previsionnel: 15,
+    nombre_pages_estime: 200,
+    exemplaires_sp: 5,
+  };
+}
 
-// Types v2 activement proposés à la création (les anciens restent compatibles mais masqués)
-export const ACTIVE_CONTRACT_TYPES = ['edition_simple', 'edition_numerique', 'edition_complete'];
+// Types activement proposés à la création
+export const ACTIVE_CONTRACT_TYPES = Object.keys(COMBINED_CONTRACT_TYPES);
 
 // Signataire éditeur par défaut (surchargeable par contrat)
 const DEFAULT_EDITOR_NAME = process.env.CONTRACT_EDITOR_SIGNATORY_NAME || '';
@@ -119,7 +165,7 @@ function validateISBN(isbn) {
 function validateContractData(data) {
   const errors = [];
   if (!data.thirdparty_id || isNaN(parseInt(data.thirdparty_id))) errors.push('Auteur invalide');
-  if (!data.contract_type || !TEMPLATE_MAP[data.contract_type]) errors.push('Type de contrat invalide');
+  if (!data.contract_type || !resolveContractType(data.contract_type) || !TEMPLATE_MAP[data.contract_type]) errors.push('Type de contrat invalide');
   if (!data.book_title?.trim()) errors.push('Titre de l\'ouvrage requis');
   if (data.book_isbn && !validateISBN(data.book_isbn)) errors.push('Format ISBN invalide (10 ou 13 chiffres)');
 
@@ -443,11 +489,16 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         extrafields: {
           contractType: contract.array_options?.options_contract_type,
           bookTitle: contract.array_options?.options_book_title,
+          bookSubtitle: contract.array_options?.options_book_subtitle,
           bookIsbn: contract.array_options?.options_book_isbn,
           royaltyPrint: contract.array_options?.options_royalty_rate_print,
           royaltyDigital: contract.array_options?.options_royalty_rate_digital,
           royaltyThreshold: contract.array_options?.options_royalty_threshold,
+          royaltyDigitalThresholdFcfa: contract.array_options?.options_royalty_digital_threshold_fcfa,
           freeCopies: contract.array_options?.options_free_author_copies,
+          authorPurchaseEnabled: contract.array_options?.options_author_purchase_enabled,
+          authorPurchaseQty: contract.array_options?.options_author_purchase_qty,
+          authorPurchaseDiscount: contract.array_options?.options_author_purchase_discount,
         },
         lines: (contract.lines || []).map(l => ({
           id: l.id, description: l.description || l.product_label, qty: l.qty,
@@ -482,25 +533,30 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         return res.status(400).json({ error: 'Auteur non trouvé dans Dolibarr' });
       }
 
-      const defaults = DEFAULTS_BY_TYPE[data.contract_type];
+      const defaults = getDefaultsForType(data.contract_type);
       const templateFile = TEMPLATE_MAP[data.contract_type];
       const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${templateFile}.odt`;
 
       const arrayOptions = {
         options_contract_type: data.contract_type,
         options_book_title: data.book_title.trim(),
+        options_book_subtitle: (data.book_subtitle || '').trim(),
         options_book_isbn: (data.book_isbn || '').replace(/[-\s]/g, ''),
         options_royalty_rate_print: parseFloat(data.royalty_rate_print) || defaults.royalty_rate_print,
         options_royalty_rate_digital: parseFloat(data.royalty_rate_digital) || defaults.royalty_rate_digital,
         options_royalty_threshold: parseInt(data.royalty_threshold) || defaults.royalty_threshold,
+        options_royalty_digital_threshold_fcfa: parseInt(data.royalty_digital_threshold_fcfa) || 20000,
         options_free_author_copies: parseInt(data.free_author_copies) || defaults.free_author_copies,
+        options_author_purchase_enabled: data.author_purchase_enabled ? 1 : 0,
+        options_author_purchase_qty: data.author_purchase_enabled ? (parseInt(data.author_purchase_qty) || 0) : 0,
+        options_author_purchase_discount: data.author_purchase_enabled ? (parseFloat(data.author_purchase_discount) || 0) : 0,
       };
 
       // Nouvelles variables v2 (templates edition_*)
       if (ACTIVE_CONTRACT_TYPES.includes(data.contract_type)) {
         arrayOptions.options_tirage_initial = parseInt(data.tirage_initial) || defaults.tirage_initial;
         arrayOptions.options_format_ouvrage = (data.format_ouvrage || defaults.format_ouvrage).trim();
-        arrayOptions.options_prix_public_previsionnel = parseInt(data.prix_public_previsionnel) || defaults.prix_public_previsionnel;
+        arrayOptions.options_prix_public_previsionnel = parseFloat(data.prix_public_previsionnel) || defaults.prix_public_previsionnel;
         arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime) || defaults.nombre_pages_estime;
         arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp) || defaults.exemplaires_sp;
         if (data.date_signature) arrayOptions.options_date_signature = data.date_signature;
@@ -519,25 +575,6 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       });
 
       const contractId = contractRes.data;
-
-      // Create contract line with dates (for expiration tracking)
-      if (data.service_start || data.service_end) {
-        try {
-          const lineData = {
-            description: `Droits d'édition — ${data.book_title.trim()}`,
-            subprice: 0,
-            qty: 1,
-            product_type: 1, // service
-            tva_tx: 0,
-          };
-          if (data.service_start) lineData.date_start = Math.floor(new Date(data.service_start).getTime() / 1000);
-          if (data.service_end) lineData.date_end = Math.floor(new Date(data.service_end).getTime() / 1000);
-
-          await adminApi.post(`/contracts/${contractId}/lines`, lineData);
-        } catch (lineErr) {
-          console.error('Contract line creation warning:', lineErr.response?.data || lineErr.message);
-        }
-      }
 
       // Log activity
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
@@ -612,6 +649,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         updates.model_pdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${TEMPLATE_MAP[data.contract_type]}.odt`;
       }
       if (data.book_title) arrayOptions.options_book_title = data.book_title.trim();
+      if (data.book_subtitle !== undefined) arrayOptions.options_book_subtitle = (data.book_subtitle || '').trim();
       if (data.book_isbn !== undefined) {
         if (data.book_isbn && !validateISBN(data.book_isbn)) return res.status(400).json({ error: 'Format ISBN invalide' });
         arrayOptions.options_book_isbn = (data.book_isbn || '').replace(/[-\s]/g, '');
@@ -627,12 +665,16 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         arrayOptions.options_royalty_rate_digital = v;
       }
       if (data.royalty_threshold !== undefined) arrayOptions.options_royalty_threshold = parseInt(data.royalty_threshold);
+      if (data.royalty_digital_threshold_fcfa !== undefined) arrayOptions.options_royalty_digital_threshold_fcfa = parseInt(data.royalty_digital_threshold_fcfa);
       if (data.free_author_copies !== undefined) arrayOptions.options_free_author_copies = parseInt(data.free_author_copies);
+      if (data.author_purchase_enabled !== undefined) arrayOptions.options_author_purchase_enabled = data.author_purchase_enabled ? 1 : 0;
+      if (data.author_purchase_qty !== undefined) arrayOptions.options_author_purchase_qty = parseInt(data.author_purchase_qty) || 0;
+      if (data.author_purchase_discount !== undefined) arrayOptions.options_author_purchase_discount = parseFloat(data.author_purchase_discount) || 0;
 
       // Nouvelles variables v2
       if (data.tirage_initial !== undefined) arrayOptions.options_tirage_initial = parseInt(data.tirage_initial);
       if (data.format_ouvrage !== undefined) arrayOptions.options_format_ouvrage = (data.format_ouvrage || '').trim();
-      if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = parseInt(data.prix_public_previsionnel);
+      if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = parseFloat(data.prix_public_previsionnel);
       if (data.nombre_pages_estime !== undefined) arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime);
       if (data.exemplaires_sp !== undefined) arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp);
       if (data.date_signature !== undefined) arrayOptions.options_date_signature = data.date_signature || null;
@@ -902,6 +944,76 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       if (err.response?.status === 404) return res.json([]);
       console.error('Thirdparty search error:', err.message);
       res.status(500).json({ error: 'Erreur recherche' });
+    }
+  });
+
+  // CREATE AUTHOR (Dolibarr thirdparty) — inline depuis le wizard de contrat
+  router.post('/thirdparties', auth, csrfProtection, async (req, res) => {
+    try {
+      const name = String(req.body.name || '').trim();
+      const email = String(req.body.email || '').trim();
+      const phone = String(req.body.phone || '').trim();
+      const address = String(req.body.address || '').trim();
+
+      if (name.length < 2) return res.status(400).json({ error: 'Nom requis (2 caractères min.)' });
+      if (!email) return res.status(400).json({ error: 'Email requis' });
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Email invalide' });
+      }
+      if (!phone) return res.status(400).json({ error: 'Téléphone requis' });
+      if (phone.replace(/[\s.\-()]/g, '').length < 6) {
+        return res.status(400).json({ error: 'Téléphone invalide' });
+      }
+
+      // Doublon : si un thirdparty existe déjà avec ce nom (exact, insensible à la casse), le retourner
+      try {
+        const safeName = safeSql(name);
+        const dup = await adminApi.get('/thirdparties', {
+          params: { sqlfilters: `(t.nom:=:'${safeName}')`, limit: 1 },
+        });
+        if (Array.isArray(dup.data) && dup.data.length > 0) {
+          const t = dup.data[0];
+          return res.status(200).json({
+            created: false,
+            id: t.id, name: t.name || t.nom, email: t.email, phone: t.phone,
+          });
+        }
+      } catch (dupErr) {
+        if (dupErr.response?.status !== 404) {
+          console.warn('Thirdparty dedup check warning:', dupErr.message);
+        }
+      }
+
+      const createRes = await adminApi.post('/thirdparties', {
+        name,
+        email: email || '',
+        phone: phone || '',
+        address: address || '',
+        client: 1,
+        code_client: -1,
+      });
+
+      const newId = createRes.data;
+      const detail = await adminApi.get(`/thirdparties/${newId}`);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin?.username || 'unknown', 'contract_author_create', `#${detail.data.id} ${name}`);
+
+      res.status(201).json({
+        created: true,
+        id: detail.data.id,
+        name: detail.data.name || detail.data.nom,
+        email: detail.data.email,
+        phone: detail.data.phone,
+      });
+    } catch (err) {
+      const status = err.response?.status;
+      const dolErr = err.response?.data?.error?.message || err.response?.data?.message;
+      console.error('Contract author create error:', dolErr || err.message);
+      if (status === 409 || /already exists|exists already|déjà/i.test(dolErr || '')) {
+        return res.status(409).json({ error: 'Un tiers avec ce nom existe déjà' });
+      }
+      res.status(500).json({ error: dolErr || 'Erreur création auteur' });
     }
   });
 

@@ -1008,11 +1008,10 @@ async function createContractDraft(manuscript) {
   }
 
   // Créer le contrat brouillon via Dolibarr REST API.
-  // Type par défaut : edition_simple (papier seul) — le plus prudent ; l'éditeur
-  // peut ensuite basculer vers edition_numerique / edition_complete dans le brouillon
-  // s'il choisit ces formules. Aligné avec ACTIVE_CONTRACT_TYPES de contract-routes.js.
-  const CONTRACT_TYPE = 'edition_simple';
-  const TEMPLATE_FILE = 'template_edition_simple';
+  // Type par défaut : harmattan_2024 (contrat classique) — l'éditeur peut basculer
+  // vers harmattan_dll / tamarinier dans le brouillon. Aligné avec ACTIVE_CONTRACT_TYPES.
+  const CONTRACT_TYPE = 'harmattan_2024';
+  const TEMPLATE_FILE = 'template_harmattan_2024';
   const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${TEMPLATE_FILE}.odt`;
   try {
     const contractRes = await dolibarrApi.post('/contracts', {
@@ -1020,16 +1019,16 @@ async function createContractDraft(manuscript) {
       date_contrat: Math.floor(Date.now() / 1000),
       model_pdf: modelPdf,
       array_options: {
-        // Defaults alignés avec DEFAULTS_BY_TYPE[edition_simple] dans contract-routes.js
+        // Defaults alignés avec DEFAULTS_BY_TYPE[harmattan_2024] dans contract-routes.js
         options_contract_type: CONTRACT_TYPE,
         options_book_title: manuscript.title,
-        options_royalty_rate_print: 8,
-        options_royalty_rate_digital: 0,
+        options_royalty_rate_print: 10,
+        options_royalty_rate_digital: 10,
         options_royalty_threshold: 500,
-        options_free_author_copies: 10,
+        options_free_author_copies: 5,
         options_tirage_initial: 100,
         options_format_ouvrage: '15 × 21 cm',
-        options_prix_public_previsionnel: 8000,
+        options_prix_public_previsionnel: 15,
         options_nombre_pages_estime: 200,
         options_exemplaires_sp: 5,
       },
