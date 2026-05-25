@@ -25,6 +25,15 @@ pnpm build
 sudo systemctl restart senharmattan-shop   # systemd service on VPS 38.242.229.122
 ```
 
+**Contract ODT templates regeneration:**
+```bash
+node scripts/build-contract-templates.mjs                                                    # output: /tmp/contract-templates-v2/
+sudo cp /tmp/contract-templates-v2/*.odt /var/www/html/dolibarr/documents/doctemplates/contracts/
+sudo chown www-data:www-data /var/www/html/dolibarr/documents/doctemplates/contracts/template_*.odt
+# si nouveaux extrafields :
+mysql -u dolibarr -p dolibarr < scripts/add-contract-subtitle-extrafield.sql
+```
+
 ## Architecture
 
 **Dual-server in dev, single-server in production:**
@@ -41,7 +50,7 @@ sudo systemctl restart senharmattan-shop   # systemd service on VPS 38.242.229.1
 - `admin-pos-routes.js` — POS management: staff CRUD, device management, PIN expiry
 - `auth-routes.js` — Customer authentication: login, register, password reset, sessions
 - `book-routes.js` — Book CRUD: create/update products, cover image upload, extrafield metadata
-- `contract-routes.js` — Contract management: CRUD, manuscript linking, document generation (Carbone)
+- `contract-routes.js` — Contract management: CRUD, manuscript linking, ODT-driven PDF generation via Dolibarr extrafields, inline thirdparty (author) creation
 - `preorder-utils.js` — Preorder helpers: pricing, payment resolution, email templates, status transitions
 - `dolibarr-client.js` — Axios client for Dolibarr API with DOLAPIKEY auth, 30s timeout
 - `sync.js` — In-memory cache (SimpleCache) + sync functions for products/categories/stock
@@ -81,6 +90,19 @@ ADMIN_DEFAULT_PASSWORD
 - Sales create Dolibarr invoices + payments + stock decrements
 - Quotes (Facture Proforma) generate ODT files from `server/templates/devis-librairie.odt`
 - ODT generation: unzip template, replace XML placeholders, rezip (no Carbone for quotes)
+
+## Contract System (/admin/contracts/*)
+
+- Wizard `ContractCreate.jsx` en 3 étapes : auteur → type/conditions → vérification.
+- **Auteur** : recherche + création inline (POST `/api/contracts/thirdparties`, nom + email + téléphone tous obligatoires, dédup par nom).
+- **Type de contrat** = combinaison **modèle × étendue de droits** stockée dans `options_contract_type` au format `modele_scope` (ex : `harmattan_2024_edition_numerique`) :
+  - **Modèles** : `harmattan_2024` (classique), `harmattan_dll` (subventionné DLL), `tamarinier` (collection).
+  - **Étendues** : `edition_simple` (papier), `edition_numerique` (+ avenant numérique), `edition_complete` (+ adaptations audiovisuelle & théâtrale).
+- Extrafields Dolibarr propres aux contrats (table `llx_contrat_extrafields`) : `book_title`, `book_subtitle`, `book_isbn`, `royalty_rate_print/digital`, `royalty_threshold`, `royalty_digital_threshold_fcfa` (seuil de report num.), `free_author_copies`, `tirage_initial`, `format_ouvrage`, `nombre_pages_estime`, `prix_public_previsionnel` (€), `exemplaires_sp`, `author_purchase_enabled/qty/discount` (annexe achat auteur), `date_signature`, `editeur_signataire_nom/qualite`.
+- Migration SQL des extrafields : `scripts/add-contract-subtitle-extrafield.sql` (idempotent — `ON DUPLICATE KEY` + `ADD COLUMN IF NOT EXISTS`).
+- **Templates ODT** générés par `scripts/build-contract-templates.mjs` (9 combinaisons + 6 alias legacy), déployés dans `/var/www/html/dolibarr/documents/doctemplates/contracts/`. Wording Article 4 spécifique pour DLL (15 % sur 1000 premiers ex. subventionnés, puis 10 %). Placeholders `{object_options_*}` + `{__THIRDPARTY_NAME/PHONE/EMAIL__}` + `{__ONLINE_SIGN_URL__}`. **Dolibarr ne supporte pas les blocs conditionnels** → l'annexe d'achat auteur apparaît toujours (avec `qty=0` si non activée).
+- Workflow manuscrit : la création auto de contrat (`server/index.js`) bascule sur `harmattan_2024_edition_simple` par défaut.
+- Signature en ligne : URL générée via `generateSignatureUrl(ref)` (HMAC bcrypt avec `DOLIBARR_INSTANCE_KEY` + `DOLIBARR_SIGN_TOKEN`).
 
 ## Security Patterns
 
