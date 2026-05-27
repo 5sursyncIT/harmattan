@@ -68,7 +68,8 @@ const NAV_GROUPS = [
       { path: 'faq', label: 'FAQ', icon: <FiHelpCircle />, roles: ['super_admin', 'admin', 'support'] },
       { path: 'contacts', label: 'Messages', icon: <FiMail />, roles: ['super_admin', 'admin', 'support'] },
       { path: 'newsletter', label: 'Newsletter', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support'] },
-      { path: 'customers', label: 'Clients', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'support'] },
+      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support', 'librarian', 'comptable'] },
+      { path: 'customers', label: 'Comptes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'support'] },
     ],
   },
   {

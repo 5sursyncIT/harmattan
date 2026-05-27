@@ -1,0 +1,244 @@
+import { useState, useEffect, useMemo } from 'react';
+import { FiX, FiPlus, FiTrash2, FiCheckCircle, FiFileText } from 'react-icons/fi';
+import toast from 'react-hot-toast';
+import { createContractQuote, openQuotePdf } from '../../api/quotes';
+
+const FCFA_PER_EUR = 655.957;
+const PURCHASE_REMISE = 0.68;        // ~32 % de remise sur le prix public (item 4)
+const COLOR_FLAT_PRICE = 852000;     // Prix fixe contribution impression couleur (item 6)
+
+function buildDefaultItems({ pages, priceEur, qty, color }) {
+  const items = [];
+  if (pages > 0) {
+    items.push({ id: 1, label: '1 - Contribution au frais de relecture et au report de correction', price: pages * 1500 });
+    items.push({ id: 2, label: '2 - Contribution à la mise en pages et réalisation du Prêt-à-clicher', price: pages * 1000 });
+  }
+  if (priceEur > 0 && qty > 0) {
+    items.push({ id: 4, label: `4 - Achat de ${qty} exemplaires contractuels`, price: Math.round(priceEur * qty * FCFA_PER_EUR * PURCHASE_REMISE) });
+  }
+  if (color) {
+    items.push({ id: 6, label: '6 - Contribution à l\'impression Couleur', price: COLOR_FLAT_PRICE });
+  }
+  return items;
+}
+
+export default function ContractQuoteModal({ contract, onClose, onCreated }) {
+  const ef = contract.extrafields || {};
+  const author = contract.author || {};
+
+  // Détecte civilité depuis le nom (très basique — éditable)
+  const inferredTitle = useMemo(() => {
+    const n = (author.name || '').toLowerCase();
+    if (n.startsWith('mme') || n.startsWith('madame')) return 'Madame';
+    return 'Monsieur';
+  }, [author.name]);
+
+  // Coercion explicite — les extrafields Dolibarr remontent souvent en string ("0", "100"…).
+  // Why: sans parseInt, `ef.authorPurchaseEnabled = "0"` est truthy → branche "enabled"
+  // avec qty parsée à 0 → la ligne 4 disparaissait silencieusement.
+  const numPages = parseInt(ef.nombrePagesEstime) || 100;
+  // Compat anciens contrats : prix stocké en FCFA (souvent 8000–15000) avant la bascule en €.
+  // Au-delà de 200 € c'est forcément une valeur FCFA → on convertit.
+  const rawPrice = parseFloat(ef.prixPublicPrevisionnel) || 15;
+  const numPriceEur = rawPrice > 200 ? Math.round(rawPrice / 655.957 * 100) / 100 : rawPrice;
+  const purchaseEnabled = parseInt(ef.authorPurchaseEnabled) === 1;
+  const purchaseQty = parseInt(ef.authorPurchaseQty) || 0;
+  const initialQty = purchaseEnabled && purchaseQty > 0 ? purchaseQty : 50;
+
+  const [form, setForm] = useState({
+    recipient_title: inferredTitle,
+    recipient_name: author.name || '',
+    book_title: ef.bookTitle || '',
+    book_pages: numPages,
+    book_format: '13.5 cm sur 21.5 cm',
+    book_interior: 'une couleur N & B',
+    book_paper: 'bouffant 80 grammes',
+    book_cover: 'cartonné, coucher brillant, quadrichromie avec pellicule',
+    book_price_eur: numPriceEur,
+    diffusion: 'Paris, Dakar, dans les grandes capitales européennes et sur Internet',
+    color: false,
+  });
+  const [items, setItems] = useState(() => buildDefaultItems({
+    pages: parseInt(form.book_pages) || 0,
+    priceEur: parseFloat(form.book_price_eur) || 0,
+    qty: initialQty,
+    color: false,
+  }));
+
+  const [submitting, setSubmitting] = useState(false);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const total = items.reduce((s, i) => s + (parseInt(i.price) || 0), 0);
+
+  // Recalcul auto des items standards (1, 2, 4, 6) quand pages/prix/couleur changent.
+  // Why: les lignes 1/2/6 dépendent linéairement du nombre de pages, et la 4
+  // dépend du prix public en €. Sans recompute live, l'éditeur changeait les pages
+  // et la ligne couleur restait figée à l'ancien total.
+  // How to apply: les lignes libres (id >= 100) ne sont jamais écrasées.
+  useEffect(() => {
+    const pages = parseInt(form.book_pages) || 0;
+    const priceEur = parseFloat(form.book_price_eur) || 0;
+    setItems(prev => {
+      const customs = prev.filter(i => i.id >= 100);
+      const next = buildDefaultItems({ pages, priceEur, qty: initialQty, color: form.color });
+      return [...next, ...customs];
+    });
+  }, [form.book_pages, form.book_price_eur, form.color, initialQty]);
+
+  const updateItem = (idx, patch) => {
+    setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
+  };
+  const removeItem = (idx) => setItems(prev => prev.filter((_, i) => i !== idx));
+  const addCustomItem = () => {
+    const nextId = Math.max(100, ...items.map(i => i.id || 0)) + 1;
+    setItems(prev => [...prev, { id: nextId, label: '', price: 0 }]);
+  };
+
+  const handleSubmit = async () => {
+    if (!form.recipient_name?.trim()) return toast.error('Nom destinataire requis');
+    if (!form.book_title?.trim()) return toast.error('Titre requis');
+    const cleanItems = items
+      .map(i => ({ label: String(i.label || '').trim(), price: Math.max(0, parseInt(i.price) || 0) }))
+      .filter(i => i.label && i.price > 0);
+    if (cleanItems.length === 0) return toast.error('Au moins une ligne avec un montant > 0');
+
+    setSubmitting(true);
+    try {
+      const res = await createContractQuote(contract.id, {
+        recipient_title: form.recipient_title,
+        recipient_name: form.recipient_name.trim(),
+        book_title: form.book_title.trim(),
+        book_pages: parseInt(form.book_pages) || 0,
+        book_format: form.book_format,
+        book_interior: form.book_interior,
+        book_paper: form.book_paper,
+        book_cover: form.book_cover,
+        book_price_eur: parseFloat(form.book_price_eur) || 0,
+        diffusion: form.diffusion,
+        items: cleanItems,
+      });
+      toast.success(`Devis ${res.data.ref} créé`);
+      openQuotePdf(res.data.id);
+      onCreated?.(res.data);
+      onClose?.();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur création devis');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="ct-modal-overlay" onClick={onClose}>
+      <div className="ct-modal ct-modal-large" onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <FiFileText size={18} /> Générer un devis
+          </h3>
+          <button type="button" className="ct-btn-ghost" onClick={onClose}><FiX size={18} /></button>
+        </div>
+
+        <div className="ct-quote-form">
+          <h5 className="ct-quote-section">Destinataire</h5>
+          <div className="ct-form-row cols-2-1">
+            <div className="ct-field">
+              <label>Nom complet *</label>
+              <input value={form.recipient_name} onChange={e => set('recipient_name', e.target.value)} maxLength={120} />
+            </div>
+            <div className="ct-field">
+              <label>Civilité</label>
+              <select value={form.recipient_title} onChange={e => set('recipient_title', e.target.value)}>
+                <option>Monsieur</option><option>Madame</option><option>Mademoiselle</option>
+              </select>
+            </div>
+          </div>
+
+          <h5 className="ct-quote-section">Spécifications ouvrage</h5>
+          <div className="ct-form-row">
+            <div className="ct-field">
+              <label>Titre *</label>
+              <input value={form.book_title} onChange={e => set('book_title', e.target.value)} maxLength={300} />
+            </div>
+          </div>
+          <div className="ct-form-row cols-4">
+            <div className="ct-field">
+              <label>Pages</label>
+              <input type="number" value={form.book_pages} onChange={e => set('book_pages', e.target.value)} min={0} />
+            </div>
+            <div className="ct-field">
+              <label>Format</label>
+              <input value={form.book_format} onChange={e => set('book_format', e.target.value)} />
+            </div>
+            <div className="ct-field">
+              <label>Intérieur</label>
+              <input value={form.book_interior} onChange={e => set('book_interior', e.target.value)} />
+            </div>
+            <div className="ct-field">
+              <label>Prix public (€)</label>
+              <input type="number" step={0.5} value={form.book_price_eur} onChange={e => set('book_price_eur', e.target.value)} min={0} />
+            </div>
+          </div>
+          <div className="ct-form-row cols-2">
+            <div className="ct-field">
+              <label>Papier</label>
+              <input value={form.book_paper} onChange={e => set('book_paper', e.target.value)} />
+            </div>
+            <div className="ct-field">
+              <label>Couverture</label>
+              <input value={form.book_cover} onChange={e => set('book_cover', e.target.value)} maxLength={200} />
+            </div>
+          </div>
+          <div className="ct-form-row">
+            <div className="ct-field">
+              <label>Diffusion</label>
+              <input value={form.diffusion} onChange={e => set('diffusion', e.target.value)} maxLength={200} />
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+            <input type="checkbox" id="quote-color" checked={form.color} onChange={e => set('color', e.target.checked)} />
+            <label htmlFor="quote-color" style={{ fontSize: '0.9rem', cursor: 'pointer' }}>
+              Ouvrage en couleur (ajoute « Contribution à l'impression Couleur » = 852 000 FCFA)
+            </label>
+          </div>
+
+          <h5 className="ct-quote-section" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Lignes du devis</span>
+            <button type="button" className="ct-btn ct-btn-outline" onClick={addCustomItem} style={{ fontSize: '0.78rem', padding: '4px 10px' }}>
+              <FiPlus size={12} /> Ajouter une ligne
+            </button>
+          </h5>
+          <div className="ct-quote-items">
+            {items.map((item, idx) => (
+              <div key={item.id} className="ct-quote-item-row">
+                <input className="ct-quote-item-label" value={item.label}
+                  onChange={e => updateItem(idx, { label: e.target.value })}
+                  placeholder="Description" maxLength={200} />
+                <input className="ct-quote-item-price" type="number" value={item.price}
+                  onChange={e => updateItem(idx, { price: e.target.value })} min={0} step={500} />
+                <span className="ct-quote-item-unit">FCFA</span>
+                <button type="button" className="ct-btn-ghost" onClick={() => removeItem(idx)} title="Supprimer">
+                  <FiTrash2 size={14} />
+                </button>
+              </div>
+            ))}
+            {items.length === 0 && (
+              <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: '8px 0' }}>Aucune ligne — ajoutez-en au moins une.</p>
+            )}
+          </div>
+
+          <div className="ct-quote-total">
+            <span>TOTAL</span>
+            <span>{total.toLocaleString('fr-FR')} FCFA</span>
+          </div>
+        </div>
+
+        <div className="ct-modal-actions">
+          <button type="button" className="ct-btn ct-btn-outline" onClick={onClose} disabled={submitting}>Annuler</button>
+          <button type="button" className="ct-btn ct-btn-primary" onClick={handleSubmit} disabled={submitting || items.length === 0}>
+            {submitting ? 'Création...' : <>Créer et télécharger PDF <FiCheckCircle size={14} /></>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

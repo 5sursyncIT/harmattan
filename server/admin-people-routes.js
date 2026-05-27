@@ -2,8 +2,19 @@
 // Read-only listing + detail views + password reset for both.
 // Panel admin dashboard consumes these endpoints.
 import { Router } from 'express';
+import axios from 'axios';
 import crypto from 'crypto';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
+import { dolibarrApi } from './dolibarr-client.js';
+
+const adminApi = axios.create({
+  baseURL: process.env.DOLIBARR_URL || 'http://localhost/dolibarr/htdocs/api/index.php',
+  headers: { DOLAPIKEY: process.env.DOLIBARR_ADMIN_API_KEY, 'Content-Type': 'application/json' },
+  timeout: 30000,
+});
+
+const DOC_BUILDDOC_URL = 'http://localhost/dolibarr/htdocs/custom/senharmattansync/document-builddoc.php';
+const DOLIBARR_WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
 
 export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection, transporter }) {
   const router = Router();
@@ -89,30 +100,62 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
          FROM order_payments WHERE customer_email = ? ORDER BY id DESC LIMIT 50`
       ).all(customer.email);
 
-      // Factures Dolibarr si dolibarr_id est renseigné
+      // Factures + devis Dolibarr si dolibarr_id est renseigné
       let invoices = [];
       let invoiceTotals = { count: 0, total_ht: 0, total_ttc: 0 };
+      let quotes = [];
+      let quoteTotals = { count: 0, total_ht: 0, total_ttc: 0 };
+      let societe = null;
       if (customer.dolibarr_id && dolibarrPool) {
         try {
           const [rows] = await dolibarrPool.query(
-            `SELECT rowid AS id, facnumber AS ref, datef AS date, total_ht, total_ttc, paye, fk_statut
-             FROM llx_facture WHERE fk_soc = ? ORDER BY rowid DESC LIMIT 20`,
+            `SELECT f.rowid AS id, f.ref, f.datef AS date, f.total_ht, f.total_ttc, f.paye, f.fk_statut, f.type,
+                    COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+             FROM llx_facture f WHERE f.fk_soc = ? ORDER BY f.rowid DESC LIMIT 50`,
             [customer.dolibarr_id]
           );
           invoices = rows;
-          const [[totals]] = await dolibarrPool.query(
+          const [[itotals]] = await dolibarrPool.query(
             `SELECT COUNT(*) AS count, COALESCE(SUM(total_ht), 0) AS total_ht,
                     COALESCE(SUM(total_ttc), 0) AS total_ttc
              FROM llx_facture WHERE fk_soc = ?`,
             [customer.dolibarr_id]
           );
-          invoiceTotals = totals;
+          invoiceTotals = itotals;
         } catch (dolErr) {
           console.warn('Customer invoice fetch warning:', dolErr.message);
         }
+        try {
+          const [rows] = await dolibarrPool.query(
+            `SELECT rowid AS id, ref, datep AS date, total_ht, total_ttc, fk_statut
+             FROM llx_propal WHERE fk_soc = ? ORDER BY rowid DESC LIMIT 50`,
+            [customer.dolibarr_id]
+          );
+          quotes = rows;
+          const [[qtotals]] = await dolibarrPool.query(
+            `SELECT COUNT(*) AS count, COALESCE(SUM(total_ht), 0) AS total_ht,
+                    COALESCE(SUM(total_ttc), 0) AS total_ttc
+             FROM llx_propal WHERE fk_soc = ?`,
+            [customer.dolibarr_id]
+          );
+          quoteTotals = qtotals;
+        } catch (dolErr) {
+          console.warn('Customer quotes fetch warning:', dolErr.message);
+        }
+        try {
+          const [[soc]] = await dolibarrPool.query(
+            `SELECT rowid AS id, nom, code_client, code_fournisseur, client, fournisseur,
+                    siret, tva_intra, phone, email, town, zip, address, note_private
+             FROM llx_societe WHERE rowid = ?`,
+            [customer.dolibarr_id]
+          );
+          societe = soc || null;
+        } catch (dolErr) {
+          console.warn('Customer societe fetch warning:', dolErr.message);
+        }
       }
 
-      res.json({ customer, preorders, payments, invoices, invoiceTotals });
+      res.json({ customer, societe, preorders, payments, invoices, invoiceTotals, quotes, quoteTotals });
     } catch (err) {
       console.error('Customer detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement client' });
@@ -511,6 +554,335 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     } catch (err) {
       console.error('Author reset password error:', err);
       res.status(500).json({ error: 'Erreur serveur : ' + err.message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // TIERS Dolibarr (llx_societe) — clients, prospects, fournisseurs
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/societes', auth, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const { q = '', type = '', page = 1, limit = 30 } = req.query;
+      const pageInt = Math.max(1, parseInt(page) || 1);
+      const limitInt = Math.min(100, parseInt(limit) || 30);
+      const offset = (pageInt - 1) * limitInt;
+
+      const where = [];
+      const params = [];
+      if (q) {
+        const pat = `%${safeLike(q)}%`;
+        where.push(`(s.nom LIKE ? OR s.name_alias LIKE ? OR s.code_client LIKE ? OR s.code_fournisseur LIKE ? OR s.email LIKE ? OR s.phone LIKE ? OR s.zip LIKE ? OR s.town LIKE ?)`);
+        params.push(pat, pat, pat, pat, pat, pat, pat, pat);
+      }
+      // type: 'client' | 'prospect' | 'fournisseur'
+      if (type === 'client')      where.push(`s.client IN (1,3)`);
+      else if (type === 'prospect')  where.push(`s.client IN (2,3)`);
+      else if (type === 'fournisseur') where.push(`s.fournisseur = 1`);
+
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const [[{ n: total }]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS n FROM llx_societe s ${whereSql}`, params
+      );
+      const [rows] = await dolibarrPool.query(
+        `SELECT s.rowid AS id, s.nom, s.name_alias, s.code_client, s.code_fournisseur,
+                s.client, s.fournisseur, s.email, s.phone, s.town, s.zip, s.barcode,
+                s.datec AS created_at
+         FROM llx_societe s
+         ${whereSql}
+         ORDER BY s.nom ASC
+         LIMIT ? OFFSET ?`,
+        [...params, limitInt, offset]
+      );
+
+      res.json({
+        societes: rows,
+        total,
+        page: pageInt,
+        pages: Math.ceil(total / limitInt),
+      });
+    } catch (err) {
+      console.error('Societes list error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement tiers' });
+    }
+  });
+
+  router.get('/societes/:id', auth, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Id invalide' });
+
+      const [[societe]] = await dolibarrPool.query(
+        `SELECT rowid AS id, nom, name_alias, code_client, code_fournisseur, client, fournisseur,
+                siret, tva_intra, phone, email, town, zip, address, barcode,
+                note_private, datec AS created_at
+         FROM llx_societe WHERE rowid = ?`, [id]
+      );
+      if (!societe) return res.status(404).json({ error: 'Tiers introuvable' });
+
+      const [invoices] = await dolibarrPool.query(
+        `SELECT f.rowid AS id, f.ref, f.datef AS date, f.total_ht, f.total_ttc, f.paye, f.fk_statut, f.type,
+                COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+         FROM llx_facture f WHERE f.fk_soc = ? ORDER BY f.rowid DESC LIMIT 50`, [id]
+      );
+      const [[invoiceTotals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(total_ht), 0) AS total_ht,
+                COALESCE(SUM(total_ttc), 0) AS total_ttc
+         FROM llx_facture WHERE fk_soc = ?`, [id]
+      );
+
+      const [quotes] = await dolibarrPool.query(
+        `SELECT rowid AS id, ref, datep AS date, total_ht, total_ttc, fk_statut
+         FROM llx_propal WHERE fk_soc = ? ORDER BY rowid DESC LIMIT 50`, [id]
+      );
+      const [[quoteTotals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(total_ht), 0) AS total_ht,
+                COALESCE(SUM(total_ttc), 0) AS total_ttc
+         FROM llx_propal WHERE fk_soc = ?`, [id]
+      );
+
+      // Lien éventuel avec un compte web (auto-inscrit)
+      let webAccount = null;
+      try {
+        webAccount = db.prepare(
+          `SELECT id, email, firstname, lastname, created_at FROM customers WHERE dolibarr_id = ?`
+        ).get(id) || null;
+      } catch (e) { void e; }
+
+      res.json({ societe, invoices, invoiceTotals, quotes, quoteTotals, webAccount });
+    } catch (err) {
+      console.error('Societe detail error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement tiers' });
+    }
+  });
+
+  // ─── CRUD tiers (via Dolibarr REST API pour respecter la business logic) ─
+
+  function sanitizeSocieteInput(body) {
+    const data = {};
+    const str = (k, max = 200) => {
+      if (body[k] === undefined) return;
+      data[k] = String(body[k] || '').trim().slice(0, max);
+    };
+    const num = (k) => {
+      if (body[k] === undefined) return;
+      const n = parseInt(body[k]);
+      if (!isNaN(n)) data[k] = n;
+    };
+    str('name', 200);
+    str('name_alias', 200);
+    str('email', 150);
+    str('phone', 30);
+    str('address', 300);
+    str('zip', 20);
+    str('town', 100);
+    str('siret', 30);
+    str('tva_intra', 30);
+    str('note_private', 2000);
+    num('client');         // 0=non, 1=client, 2=prospect, 3=client+prospect
+    num('fournisseur');    // 0/1
+    // -1 = auto-générer chez Dolibarr
+    if (body.code_client !== undefined) data.code_client = body.code_client === -1 || body.code_client === '-1' ? -1 : String(body.code_client).trim().slice(0, 20);
+    if (body.code_fournisseur !== undefined) data.code_fournisseur = body.code_fournisseur === -1 || body.code_fournisseur === '-1' ? -1 : String(body.code_fournisseur).trim().slice(0, 20);
+    return data;
+  }
+
+  router.post('/societes', auth, requireRoles('super_admin', 'admin', 'editor', 'support'), csrfProtection, async (req, res) => {
+    try {
+      const data = sanitizeSocieteInput(req.body);
+      if (!data.name || data.name.length < 2) {
+        return res.status(400).json({ error: 'Nom du tiers requis (2 caractères min.)' });
+      }
+      if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+        return res.status(400).json({ error: 'Email invalide' });
+      }
+      // Au moins un type doit être renseigné
+      if (!data.client && !data.fournisseur) data.client = 1;
+
+      const created = await adminApi.post('/thirdparties', data);
+      const newId = created.data;
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin?.username || 'unknown', 'tier_create', `#${newId} ${data.name}`);
+
+      res.status(201).json({ id: newId, name: data.name });
+    } catch (err) {
+      const dolErr = err.response?.data?.error?.message || err.response?.data?.message;
+      console.error('Societe create error:', dolErr || err.message);
+      if (err.response?.status === 409 || /already exists|déjà/i.test(dolErr || '')) {
+        return res.status(409).json({ error: 'Un tiers avec ce nom ou ce code existe déjà' });
+      }
+      res.status(500).json({ error: dolErr || 'Erreur création tiers' });
+    }
+  });
+
+  router.put('/societes/:id', auth, requireRoles('super_admin', 'admin', 'editor', 'support'), csrfProtection, async (req, res) => {
+    // NOTE : on n'utilise PAS la REST API Dolibarr (PUT /thirdparties/{id})
+    // car la base contient des code_fournisseur legacy ("SU001439") qui ne
+    // respectent pas la syntaxe du module configuré (mod_codeclient_monkey,
+    // attendu : "CU2501-XXXXX"). Societe::verify() retourne -3 avec
+    // ErrorBadSupplierCodeSyntax, et la protection « oldcopy == newcode »
+    // n'est jamais activée par l'API REST → 500 systématique.
+    // Écriture SQL directe : sûre car les triggers/modules custom de ce
+    // Dolibarr n'écoutent aucun événement COMPANY_*.
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Id invalide' });
+
+      const data = sanitizeSocieteInput(req.body);
+      if (data.name !== undefined && data.name.length < 2) {
+        return res.status(400).json({ error: 'Nom du tiers requis (2 caractères min.)' });
+      }
+      if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+        return res.status(400).json({ error: 'Email invalide' });
+      }
+
+      // Existe ?
+      const [[exists]] = await dolibarrPool.query('SELECT rowid FROM llx_societe WHERE rowid = ?', [id]);
+      if (!exists) return res.status(404).json({ error: 'Tiers introuvable' });
+
+      // Mapping field → (column, nullable). On omet les champs absents pour
+      // préserver les valeurs existantes ; on accepte "" pour vider une
+      // colonne nullable (email, zip, town, address, etc.).
+      // Toutes les colonnes texte de llx_societe sont nullable. On accepte ""
+      // pour vider (=> NULL), sauf `nom` qui reste requis (longueur ≥ 2
+      // validée plus haut).
+      const stringCols = {
+        name:         { col: 'nom',          nullable: false },
+        name_alias:   { col: 'name_alias',   nullable: true },
+        email:        { col: 'email',        nullable: true },
+        phone:        { col: 'phone',        nullable: true },
+        address:      { col: 'address',      nullable: true },
+        zip:          { col: 'zip',          nullable: true },
+        town:         { col: 'town',         nullable: true },
+        siret:        { col: 'siret',        nullable: true },
+        tva_intra:    { col: 'tva_intra',    nullable: true },
+        note_private: { col: 'note_private', nullable: true },
+      };
+      const intCols = {
+        client: 'client',
+        fournisseur: 'fournisseur',
+      };
+      const codeCols = {
+        code_client: 'code_client',
+        code_fournisseur: 'code_fournisseur',
+      };
+
+      const sets = [];
+      const params = [];
+      for (const [key, { col, nullable }] of Object.entries(stringCols)) {
+        if (data[key] === undefined) continue;
+        const v = String(data[key]);
+        if (v === '' && nullable) { sets.push(`${col} = NULL`); continue; }
+        sets.push(`${col} = ?`); params.push(v);
+      }
+      for (const [key, col] of Object.entries(intCols)) {
+        if (data[key] === undefined) continue;
+        sets.push(`${col} = ?`); params.push(parseInt(data[key]) || 0);
+      }
+      for (const [key, col] of Object.entries(codeCols)) {
+        if (data[key] === undefined) continue;
+        // -1 = "garder l'auto-génération" — on n'écrit rien
+        if (data[key] === -1 || data[key] === '-1') continue;
+        const v = String(data[key]);
+        if (v === '') { sets.push(`${col} = NULL`); continue; }
+        sets.push(`${col} = ?`); params.push(v);
+      }
+
+      if (sets.length === 0) return res.json({ success: true, id, noop: true });
+
+      sets.push('tms = CURRENT_TIMESTAMP');
+      params.push(id);
+      await dolibarrPool.query(`UPDATE llx_societe SET ${sets.join(', ')} WHERE rowid = ?`, params);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin?.username || 'unknown', 'tier_update', `#${id} (direct SQL)`);
+
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error('Societe update error:', err.code, err.sqlMessage || err.message);
+      if (err.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ error: 'Doublon : un autre tiers utilise déjà ce code/nom' });
+      }
+      res.status(500).json({ error: err.sqlMessage || 'Erreur mise à jour tiers' });
+    }
+  });
+
+  router.delete('/societes/:id', auth, requireRoles('super_admin', 'admin'), csrfProtection, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Id invalide' });
+
+      // Garde-fou : refuser la suppression si le tiers a des factures, devis ou contrats
+      const [[invCount]] = await dolibarrPool.query('SELECT COUNT(*) AS n FROM llx_facture WHERE fk_soc = ?', [id]);
+      const [[propCount]] = await dolibarrPool.query('SELECT COUNT(*) AS n FROM llx_propal WHERE fk_soc = ?', [id]);
+      const [[contCount]] = await dolibarrPool.query('SELECT COUNT(*) AS n FROM llx_contrat WHERE fk_soc = ?', [id]);
+      const blockers = [];
+      if (invCount.n > 0) blockers.push(`${invCount.n} facture${invCount.n > 1 ? 's' : ''}`);
+      if (propCount.n > 0) blockers.push(`${propCount.n} devis`);
+      if (contCount.n > 0) blockers.push(`${contCount.n} contrat${contCount.n > 1 ? 's' : ''}`);
+      if (blockers.length > 0) {
+        return res.status(409).json({
+          error: `Suppression refusée — ce tiers est lié à : ${blockers.join(', ')}.`,
+        });
+      }
+
+      // Récupère le nom pour le log avant suppression
+      const [[soc]] = await dolibarrPool.query('SELECT nom FROM llx_societe WHERE rowid = ?', [id]);
+      if (!soc) return res.status(404).json({ error: 'Tiers introuvable' });
+
+      await adminApi.delete(`/thirdparties/${id}`);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin?.username || 'unknown', 'tier_delete', `#${id} ${soc.nom}`);
+
+      res.json({ success: true });
+    } catch (err) {
+      const dolErr = err.response?.data?.error?.message || err.response?.data?.message;
+      console.error('Societe delete error:', dolErr || err.message);
+      if (err.response?.status === 404) return res.status(404).json({ error: 'Tiers introuvable' });
+      res.status(500).json({ error: dolErr || 'Erreur suppression tiers' });
+    }
+  });
+
+  // ─── PDF devis (via endpoint PHP custom Dolibarr) ─────────
+  router.get('/propals/:id/pdf', auth, async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Id invalide' });
+    if (!DOLIBARR_WEBHOOK_SECRET) {
+      return res.status(500).json({ error: 'DOLIBARR_WEBHOOK_SECRET non configuré' });
+    }
+    try {
+      const phpRes = await axios.post(
+        DOC_BUILDDOC_URL,
+        { type: 'propal', id },
+        {
+          headers: { 'X-Dolibarr-Secret': DOLIBARR_WEBHOOK_SECRET, 'Content-Type': 'application/json' },
+          responseType: 'arraybuffer',
+          timeout: 30000,
+          validateStatus: () => true,
+        }
+      );
+      const contentType = phpRes.headers['content-type'] || '';
+      if (phpRes.status >= 200 && phpRes.status < 300 && contentType.includes('application/pdf')) {
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', `inline; filename="propal-${id}.pdf"`);
+        return res.send(Buffer.from(phpRes.data));
+      }
+      let detail = 'Erreur génération PDF';
+      try {
+        const json = JSON.parse(Buffer.from(phpRes.data).toString());
+        detail = json.error || detail;
+        console.warn('[PROPAL /pdf] php endpoint error:', json);
+      } catch { void 0; }
+      return res.status(phpRes.status || 500).json({ error: detail });
+    } catch (err) {
+      console.error('[PROPAL /pdf] exception:', err.message);
+      res.status(500).json({ error: 'Erreur téléchargement PDF devis', detail: err.message });
     }
   });
 

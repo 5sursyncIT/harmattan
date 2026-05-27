@@ -803,6 +803,10 @@ app.use('/api/auth', createAuthRouter({ db, csrfProtection, sanitizeBody, authLi
 import { createContractRouter } from './contract-routes.js';
 app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtection, sanitizeBody }));
 
+// ─── CONTRACT QUOTES (devis de contribution auteur) ─────
+import { createContractQuoteRouter } from './contract-quote-routes.js';
+app.use('/api', createContractQuoteRouter({ db, csrfProtection }));
+
 // ─── AUTHOR PORTAL (workflow éditorial) ────────────────────
 import { createAuthorRouter } from './author-routes.js';
 const { router: authorRouter, requireAuthorAuth } = createAuthorRouter({

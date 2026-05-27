@@ -540,9 +540,132 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
 export function createSuppliersRouter({ db, dolibarrPool, auth, csrfProtection }) {
   const router = Router();
 
-  router.get('/', auth, (req, res) => {
-    const suppliers = db.prepare('SELECT * FROM suppliers WHERE active = 1 ORDER BY priority_rank ASC, supplier_name ASC').all();
-    res.json(suppliers);
+  // Migration ponctuelle : la version précédente synchronisait automatiquement
+  // tous les tiers ayant fournisseur=1, ce qui a créé ~1500 faux fournisseurs
+  // (le flag est pollué chez Sen Harmattan). On désactive ces lignes auto-créées
+  // pour repartir d'une liste curée — l'utilisateur ré-ajoute via la recherche.
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (key TEXT PRIMARY KEY, run_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+  const cleanupKey = '2026-05-27_suppliers_curated';
+  if (!db.prepare('SELECT 1 FROM _migrations WHERE key = ?').get(cleanupKey)) {
+    db.prepare(
+      "UPDATE suppliers SET active = 0 WHERE dolibarr_supplier_id IS NOT NULL AND dolibarr_supplier_id != ''",
+    ).run();
+    db.prepare('INSERT INTO _migrations (key) VALUES (?)').run(cleanupKey);
+  }
+
+  router.get('/', auth, async (req, res) => {
+    // Liste curée : seuls les fournisseurs explicitement ajoutés (locaux) sont
+    // retournés. Le flag Dolibarr fournisseur=1 n'est PAS utilisé comme source
+    // (trop pollué). L'utilisateur ajoute via la recherche tiers + bouton.
+    const suppliers = db.prepare(
+      'SELECT * FROM suppliers WHERE active = 1 ORDER BY priority_rank ASC, supplier_name ASC',
+    ).all();
+
+    const linkedIds = suppliers
+      .map((s) => parseInt(s.dolibarr_supplier_id))
+      .filter((n) => !isNaN(n));
+    let dolMap = new Map();
+    if (linkedIds.length && dolibarrPool) {
+      try {
+        const placeholders = linkedIds.map(() => '?').join(',');
+        const [rows] = await dolibarrPool.query(
+          `SELECT rowid AS id, code_fournisseur, email, phone, town, zip
+             FROM llx_societe WHERE rowid IN (${placeholders})`,
+          linkedIds,
+        );
+        dolMap = new Map(rows.map((r) => [String(r.id), r]));
+      } catch (err) {
+        console.warn('[SUPPLIERS] Enrichissement Dolibarr échoué:', err.message);
+      }
+    }
+
+    const enriched = suppliers.map((s) => {
+      const d = s.dolibarr_supplier_id ? dolMap.get(String(s.dolibarr_supplier_id)) : null;
+      return {
+        ...s,
+        dolibarr_code: d?.code_fournisseur || null,
+        dolibarr_email: d?.email || null,
+        dolibarr_phone: d?.phone || null,
+        dolibarr_town: d?.town || null,
+        dolibarr_zip: d?.zip || null,
+      };
+    });
+    res.json(enriched);
+  });
+
+  // Recherche globale tiers Dolibarr (toutes catégories) pour promotion en
+  // fournisseur. On indique already_supplier=true si déjà rattaché localement.
+  router.get('/search-tiers', auth, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) return res.json({ results: [] });
+    try {
+      const pat = `%${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid AS id, nom, name_alias, code_client, code_fournisseur,
+                client, fournisseur, email, phone, town, zip
+           FROM llx_societe
+          WHERE status = 1
+            AND (nom LIKE ? OR name_alias LIKE ? OR code_fournisseur LIKE ?
+                 OR code_client LIKE ? OR email LIKE ? OR phone LIKE ?)
+          ORDER BY nom ASC
+          LIMIT 30`,
+        [pat, pat, pat, pat, pat, pat],
+      );
+      const linked = new Set(
+        db.prepare(
+          "SELECT dolibarr_supplier_id FROM suppliers WHERE active = 1 AND dolibarr_supplier_id IS NOT NULL AND dolibarr_supplier_id != ''",
+        ).all().map((r) => String(r.dolibarr_supplier_id)),
+      );
+      res.json({
+        results: rows.map((r) => ({ ...r, already_supplier: linked.has(String(r.id)) })),
+      });
+    } catch (err) {
+      console.error('[SUPPLIERS] search-tiers error:', err.message);
+      res.status(500).json({ error: 'Erreur recherche' });
+    }
+  });
+
+  // Promotion d'un tiers Dolibarr en fournisseur (crée la ligne locale + pose
+  // le flag fournisseur=1 dans Dolibarr si absent).
+  router.post('/from-tier/:dolibarrId', auth, csrfProtection, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    const dolId = parseInt(req.params.dolibarrId);
+    if (!dolId) return res.status(400).json({ error: 'ID tiers invalide' });
+    try {
+      const [[tier]] = await dolibarrPool.query(
+        'SELECT rowid AS id, nom, fournisseur FROM llx_societe WHERE rowid = ? AND status = 1',
+        [dolId],
+      );
+      if (!tier) return res.status(404).json({ error: 'Tiers introuvable' });
+
+      const dolIdStr = String(dolId);
+      const existing = db.prepare('SELECT id, active FROM suppliers WHERE dolibarr_supplier_id = ?').get(dolIdStr);
+      let localId;
+      if (existing) {
+        db.prepare('UPDATE suppliers SET active = 1, supplier_name = ? WHERE id = ?')
+          .run(tier.nom || `Tier #${dolId}`, existing.id);
+        localId = existing.id;
+      } else {
+        const result = db.prepare(
+          `INSERT INTO suppliers (supplier_name, dolibarr_supplier_id, priority_rank, lead_time_avg_days, lead_time_max_days)
+           VALUES (?, ?, 1, 14, 30)`,
+        ).run(tier.nom || `Tier #${dolId}`, dolIdStr);
+        localId = result.lastInsertRowid;
+      }
+
+      if (!tier.fournisseur) {
+        try {
+          await dolibarrPool.query('UPDATE llx_societe SET fournisseur = 1 WHERE rowid = ?', [dolId]);
+        } catch (err) {
+          console.warn('[SUPPLIERS] Flag Dolibarr non posé:', err.message);
+        }
+      }
+      res.json({ success: true, id: localId });
+    } catch (err) {
+      console.error('[SUPPLIERS] from-tier error:', err.message);
+      res.status(500).json({ error: 'Erreur ajout fournisseur' });
+    }
   });
 
   router.get('/:id', auth, async (req, res) => {

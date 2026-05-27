@@ -1,0 +1,200 @@
+.pos-cash-report {
+  background: #fff;
+  border-radius: 14px;
+  max-width: 720px;
+  width: 95%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+  overflow: hidden;
+}
+
+.pos-cash-report .pos-cr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.pos-cash-report .pos-cr-header h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #0f172a;
+}
+
+.pos-cash-report .pos-cr-icon-btn {
+  background: transparent;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #475569;
+  cursor: pointer;
+  transition: background .15s;
+}
+.pos-cash-report .pos-cr-icon-btn:hover { background: #f1f5f9; }
+
+.pos-cash-report .pos-cr-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.pos-cash-report .pos-cr-loading,
+.pos-cash-report .pos-cr-error {
+  padding: 40px;
+  text-align: center;
+  color: #64748b;
+}
+.pos-cash-report .pos-cr-error { color: #dc2626; }
+
+.pos-cash-report .pos-cr-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 20px;
+}
+
+.pos-cash-report .pos-cr-meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pos-cash-report .pos-cr-meta span {
+  font-size: 0.72rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.pos-cash-report .pos-cr-meta strong {
+  font-size: 0.88rem;
+  color: #0f172a;
+}
+
+.pos-cash-report .pos-cr-section {
+  margin-bottom: 20px;
+}
+.pos-cash-report .pos-cr-section h4 {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #334155;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pos-cash-report .pos-cr-warning-section h4 { color: #b45309; }
+
+.pos-cash-report .pos-cr-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.pos-cash-report .pos-cr-kpi {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pos-cash-report .pos-cr-kpi span {
+  font-size: 0.72rem;
+  color: #166534;
+  text-transform: uppercase;
+}
+.pos-cash-report .pos-cr-kpi strong {
+  font-size: 1.05rem;
+  color: #14532d;
+}
+
+.pos-cash-report .pos-cr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.pos-cash-report .pos-cr-table th,
+.pos-cash-report .pos-cr-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid #f1f5f9;
+}
+.pos-cash-report .pos-cr-table th {
+  font-size: 0.72rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+.pos-cash-report .pos-cr-table td.num,
+.pos-cash-report .pos-cr-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.pos-cash-report .pos-cr-table td.plus { color: #15803d; }
+.pos-cash-report .pos-cr-table td.minus { color: #b91c1c; }
+.pos-cash-report .pos-cr-table tr.muted { color: #94a3b8; }
+.pos-cash-report .pos-cr-table tr.total {
+  font-weight: 700;
+  background: #f8fafc;
+}
+.pos-cash-report .pos-cr-table tr.total td {
+  border-top: 1px solid #cbd5e1;
+  color: #0f172a;
+}
+
+.pos-cash-report .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.pos-cash-report .badge.in { background: #dcfce7; color: #15803d; }
+.pos-cash-report .badge.out { background: #fee2e2; color: #b91c1c; }
+
+.print-only { display: none; }
+
+/* ─── Print — A4/thermique 80mm via window.print ────────── */
+@media print {
+  body * { visibility: hidden !important; }
+  #pos-cash-report-printable, #pos-cash-report-printable * { visibility: visible !important; }
+  #pos-cash-report-printable {
+    position: absolute !important;
+    inset: 0 auto auto 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  #pos-cash-report-printable .pos-cr-body { padding: 12px !important; overflow: visible !important; }
+  .no-print { display: none !important; }
+  .print-only { display: block !important; }
+  .pos-cr-print-header h2 {
+    margin: 0 0 12px;
+    font-size: 1.2rem;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+  @page { margin: 10mm; }
+}

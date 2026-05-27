@@ -38,6 +38,10 @@ export const dolibarrUrls = {
   thirdpartiesClients: () => `${BASE}/societe/list.php?type=c`,
   thirdpartiesSuppliers: () => `${BASE}/societe/list.php?type=f`,
 
+  // Devis / Propositions commerciales
+  propal: (id) => `${BASE}/comm/propal/card.php?id=${id}`,
+  propalsList: () => `${BASE}/comm/propal/list.php`,
+
   // Paiements
   payment: (id) => `${BASE}/compta/paiement/card.php?id=${id}`,
   payments: () => `${BASE}/compta/paiement/list.php`,

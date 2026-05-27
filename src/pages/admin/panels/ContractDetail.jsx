@@ -8,9 +8,12 @@ import {
 import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
   FiPercent, FiFileText, FiCalendar, FiCopy, FiExternalLink, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
+  FiPlus, FiTrash2,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
+import { listContractQuotes, deleteQuote, openQuotePdf } from '../../../api/quotes';
+import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
 import './Contracts.css';
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
@@ -92,6 +95,26 @@ export default function ContractDetail() {
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [confirmAction, setConfirmAction] = useState(null);
+  const [showQuoteModal, setShowQuoteModal] = useState(false);
+  const [quotes, setQuotes] = useState([]);
+
+  const loadQuotes = () => {
+    if (!id) return;
+    listContractQuotes(id).then(r => setQuotes(r.data || [])).catch(() => {});
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadQuotes(); }, [id]);
+
+  const handleDeleteQuote = async (quote) => {
+    if (!window.confirm(`Supprimer le devis ${quote.ref} ?`)) return;
+    try {
+      await deleteQuote(quote.id);
+      toast.success('Devis supprimé');
+      loadQuotes();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur suppression');
+    }
+  };
 
   const load = () => {
     setLoading(true);
@@ -339,6 +362,43 @@ export default function ContractDetail() {
             )}
           </div>
 
+          {/* Devis de contribution auteur */}
+          <div className="ct-section">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <h3 className="ct-section-title" style={{ margin: 0 }}><FiFileText size={16} /> Devis de contribution</h3>
+              <button onClick={() => setShowQuoteModal(true)} className="ct-btn ct-btn-primary" style={{ padding: '6px 12px', fontSize: '0.8rem' }}>
+                <FiPlus size={12} /> Générer un devis
+              </button>
+            </div>
+            {quotes.length === 0 ? (
+              <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: 0 }}>Aucun devis. Cliquez sur « Générer un devis » pour proposer une participation aux frais d'édition à l'auteur.</p>
+            ) : (
+              <div className="ct-quotes-list">
+                {quotes.map(q => (
+                  <div key={q.id} className="ct-quote-row">
+                    <div className="ct-quote-row-info">
+                      <span className="ct-quote-row-ref">{q.ref}</span>
+                      <span className="ct-quote-row-meta">
+                        {new Date(q.created_at).toLocaleDateString('fr-FR')} · {q.created_by || 'admin'}
+                      </span>
+                    </div>
+                    <span className="ct-quote-row-total">{Number(q.total).toLocaleString('fr-FR')} FCFA</span>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button onClick={() => openQuotePdf(q.id)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Ouvrir le PDF">
+                        <FiDownload size={12} /> PDF
+                      </button>
+                      {q.status === 'draft' && (
+                        <button onClick={() => handleDeleteQuote(q)} className="ct-btn-ghost" title="Supprimer le devis">
+                          <FiTrash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Documents */}
           <div className="ct-section">
             <h3 className="ct-section-title"><FiFileText size={16} /> Documents</h3>
@@ -456,6 +516,13 @@ export default function ContractDetail() {
           danger
           onConfirm={handleDelete}
           onCancel={() => setConfirmAction(null)}
+        />
+      )}
+      {showQuoteModal && (
+        <ContractQuoteModal
+          contract={contract}
+          onClose={() => setShowQuoteModal(false)}
+          onCreated={loadQuotes}
         />
       )}
     </div>

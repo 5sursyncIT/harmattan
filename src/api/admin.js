@@ -154,6 +154,8 @@ export const getSupplier = (id) => api.get(`/admin/suppliers/${id}`);
 export const createSupplier = (data) => api.post('/admin/suppliers', data);
 export const updateSupplier = (id, data) => api.put(`/admin/suppliers/${id}`, data);
 export const deleteSupplier = (id) => api.delete(`/admin/suppliers/${id}`);
+export const searchSupplierTiers = (q) => api.get('/admin/suppliers/search-tiers', { params: { q } });
+export const addSupplierFromTier = (dolibarrId) => api.post(`/admin/suppliers/from-tier/${dolibarrId}`);
 
 // Notification badges
 export const getNotificationCounts = () => api.get('/admin/notifications/counts');
@@ -165,6 +167,13 @@ export const getAdminStats = () => api.get('/admin/stats');
 export const getAdminCustomers = (params = {}) => api.get('/admin/customers', { params });
 export const getAdminCustomer = (id) => api.get(`/admin/customers/${id}`);
 export const resetCustomerPassword = (id) => api.post(`/admin/customers/${id}/reset-password`);
+
+// Tiers Dolibarr (llx_societe)
+export const getAdminSocietes = (params = {}) => api.get('/admin/societes', { params });
+export const getAdminSociete = (id) => api.get(`/admin/societes/${id}`);
+export const createAdminSociete = (data) => api.post('/admin/societes', data);
+export const updateAdminSociete = (id, data) => api.put(`/admin/societes/${id}`, data);
+export const deleteAdminSociete = (id) => api.delete(`/admin/societes/${id}`);
 
 export const getAdminAuthors = (params = {}, config = {}) => api.get('/admin/authors', { params, ...config });
 export const getAdminAuthor = (id) => api.get(`/admin/authors/${id}`);

@@ -13,15 +13,17 @@ const MODES = [
 export default function POSNumpad() {
   const selectedItemId = usePosCartStore((s) => s.selectedItemId);
   const items = usePosCartStore((s) => s.items);
-  const updateQty = usePosCartStore((s) => s.updateQty);
-  const setDiscount = usePosCartStore((s) => s.setDiscount);
-  const setPrice = usePosCartStore((s) => s.setPrice);
   const removeItem = usePosCartStore((s) => s.removeItem);
 
   const selectedItem = items.find((i) => i.product_id === selectedItemId) || null;
 
   const [mode, setMode] = useState('qty');
   const [buffer, setBuffer] = useState('');
+  // Modal combinée prix + motif (raison obligatoire pour produit référencé).
+  // Pour un produit libre, le motif est optionnel.
+  const [priceModal, setPriceModal] = useState(null); // { item }
+  const [priceInput, setPriceInput] = useState('');
+  const [reason, setReason] = useState('');
 
   // Reset buffer if selected item changes
   useEffect(() => { setBuffer(''); }, [selectedItemId, mode]);
@@ -65,12 +67,16 @@ export default function POSNumpad() {
       store.updateQty(sel.product_id, value);
       toast.success(`Qté ${sel.label.slice(0, 24)} → ${value}`);
     } else if (mode === 'price') {
-      if (!sel.is_free) {
-        toast.error('Prix non modifiable — produit référencé');
-        return;
-      }
       if (value <= 0) {
         toast.error('Prix invalide');
+        return;
+      }
+      // Produit libre : prix immédiatement appliqué (pas de justification).
+      // Produit référencé : passe par la modale (jamais atteint ici car le
+      // bouton Prix ouvre la modale directement, mais on garde la garde).
+      if (!sel.is_free) {
+        setPriceInput(String(value));
+        setPriceModal({ item: sel });
         return;
       }
       store.setPrice(sel.product_id, value);
@@ -87,12 +93,50 @@ export default function POSNumpad() {
   };
 
   const handleModeChange = (m) => {
-    if (m === 'price' && selectedItem && !selectedItem.is_free) {
-      toast('Prix verrouillé pour les produits référencés', { icon: '🔒' });
+    // Prix sur produit référencé = action directe (modale prix+motif).
+    // Pas de bascule de mode, sinon l'utilisateur clique Prix et ne voit
+    // visuellement rien d'autre qu'une teinte plus foncée sur le bouton.
+    if (m === 'price') {
+      const store = usePosCartStore.getState();
+      const sel = store.items.find((i) => i.product_id === store.selectedItemId);
+      if (!sel) {
+        toast('Sélectionnez d’abord une ligne du ticket', { icon: 'ℹ️' });
+        return;
+      }
+      if (!sel.is_free) {
+        setPriceInput(String(Math.round(sel.price_ttc)));
+        setReason(sel.price_override_reason || '');
+        setPriceModal({ item: sel });
+        return;
+      }
+      // Produit libre : on bascule en mode numpad pour saisie rapide.
+      setMode('price');
+      setBuffer('');
       return;
     }
     setMode(m);
     setBuffer('');
+  };
+
+  const confirmPriceOverride = () => {
+    const newPrice = parseInt(priceInput, 10);
+    if (!Number.isFinite(newPrice) || newPrice <= 0) {
+      toast.error('Prix invalide');
+      return;
+    }
+    const trimmed = reason.trim();
+    if (trimmed.length < 3) {
+      toast.error('Motif obligatoire (3 caractères minimum)');
+      return;
+    }
+    const store = usePosCartStore.getState();
+    store.setPrice(priceModal.item.product_id, newPrice, trimmed);
+    toast.success(`Prix → ${newPrice.toLocaleString('fr-FR')} F (${trimmed})`);
+    setPriceModal(null); setReason(''); setPriceInput(''); setBuffer('');
+  };
+
+  const cancelPriceOverride = () => {
+    setPriceModal(null); setReason(''); setPriceInput('');
   };
 
   const handleClear = () => setBuffer('');
@@ -151,6 +195,64 @@ export default function POSNumpad() {
         <span>Appliquer {MODES.find((m) => m.key === mode)?.label}</span>
         {buffer && <span className="pos-numpad-apply-value">{display}</span>}
       </button>
+
+      {priceModal && (
+        <div
+          onClick={cancelPriceOverride}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 2200 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, padding: 20, width: '100%', maxWidth: 440, boxShadow: '0 20px 50px rgba(0,0,0,0.3)' }}>
+            <h3 style={{ margin: '0 0 6px', fontSize: '1.05rem', color: '#0f172a' }}>Modification de prix</h3>
+            <p style={{ margin: '0 0 14px', fontSize: '0.85rem', color: '#475569' }}>
+              <strong>{priceModal.item.label}</strong><br />
+              <span style={{ color: '#64748b' }}>
+                Prix catalogue : {Math.round(priceModal.item.price_original ?? priceModal.item.price_ttc).toLocaleString('fr-FR')} F
+              </span>
+            </p>
+
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+              Nouveau prix (FCFA) <span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <input
+              type="number"
+              inputMode="numeric"
+              value={priceInput}
+              onChange={(e) => setPriceInput(e.target.value)}
+              min={1}
+              max={10000000}
+              autoFocus
+              style={{ width: '100%', padding: 12, borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '1.2rem', fontWeight: 700, textAlign: 'right', outline: 'none', marginBottom: 14 }}
+            />
+
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+              Motif de la modification <span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Ex : remise client fidèle, livre abîmé, négociation manager…"
+              rows={3}
+              maxLength={200}
+              style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.9rem', resize: 'vertical', outline: 'none' }}
+            />
+            <div style={{ fontSize: '0.72rem', color: '#94a3b8', textAlign: 'right', marginTop: 2 }}>
+              {reason.length}/200
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button
+                onClick={cancelPriceOverride}
+                style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', color: '#475569', cursor: 'pointer', fontWeight: 600 }}
+              >Annuler</button>
+              <button
+                onClick={confirmPriceOverride}
+                disabled={reason.trim().length < 3 || !priceInput}
+                style={{ flex: 1, padding: 10, borderRadius: 8, border: 'none', background: (reason.trim().length < 3 || !priceInput) ? '#94a3b8' : '#10531a', color: '#fff', cursor: (reason.trim().length < 3 || !priceInput) ? 'not-allowed' : 'pointer', fontWeight: 700 }}
+              >Confirmer</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

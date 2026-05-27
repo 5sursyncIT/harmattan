@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy as reactLazy, Suspense } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Layout from './components/layout/Layout';
@@ -6,6 +6,29 @@ import Loader from './components/common/Loader';
 
 // Eager: homepage (first paint)
 import HomePage from './pages/HomePage';
+
+// Wrapper React.lazy : si le chunk dynamique manque (déploiement récent →
+// l'onglet a un index.html périmé en mémoire référençant d'anciens hashs),
+// on force un reload une seule fois (garde sessionStorage 10s anti-boucle).
+// Couvre l'erreur Firefox "disallowed MIME type" et Chrome "Failed to fetch
+// dynamically imported module" qui ne déclenchaient pas window.onerror
+// quand l'échec est intercepté dans une frontière Suspense.
+function lazy(importFn) {
+  return reactLazy(() =>
+    importFn().catch((err) => {
+      const msg = String(err?.message || err || '');
+      if (/dynamic|chunk|Loading|MIME|disallowed|Importing a module/i.test(msg)) {
+        const last = parseInt(sessionStorage.getItem('__chunk_reload_at') || '0', 10);
+        if (Date.now() - last > 10000) {
+          sessionStorage.setItem('__chunk_reload_at', String(Date.now()));
+          window.location.reload();
+          return new Promise(() => {}); // ne résout jamais — la page se recharge
+        }
+      }
+      throw err;
+    }),
+  );
+}
 
 // Lazy: all other pages
 const CatalogPage = lazy(() => import('./pages/CatalogPage'));
@@ -79,6 +102,9 @@ const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPane
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
 const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'));
 const CustomersPanel = lazy(() => import('./pages/admin/panels/CustomersPanel'));
+const CustomerDetailPage = lazy(() => import('./pages/admin/panels/CustomerDetailPage'));
+const TiersPanel = lazy(() => import('./pages/admin/panels/TiersPanel'));
+const SocieteDetailPage = lazy(() => import('./pages/admin/panels/SocieteDetailPage'));
 const AuthorsPanel = lazy(() => import('./pages/admin/panels/AuthorsPanel'));
 const AdminNewsPanel = lazy(() => import('./pages/admin/panels/NewsPanel'));
 
@@ -166,6 +192,9 @@ export default function App() {
             <Route path="contracts/new" element={<ContractCreate />} />
             <Route path="contracts/:id" element={<ContractDetail />} />
             <Route path="customers" element={<CustomersPanel />} />
+            <Route path="customers/:id" element={<CustomerDetailPage />} />
+            <Route path="tiers" element={<TiersPanel />} />
+            <Route path="tiers/:id" element={<SocieteDetailPage />} />
             <Route path="authors" element={<AuthorsPanel />} />
             <Route path="news" element={<AdminNewsPanel />} />
           </Route>

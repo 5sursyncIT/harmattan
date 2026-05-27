@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { getSuppliers, createSupplier, updateSupplier, deleteSupplier } from '../../../api/admin';
-import { FiTruck, FiPlus, FiEdit2, FiTrash2, FiSave, FiX, FiStar } from 'react-icons/fi';
+import { getSuppliers, createSupplier, updateSupplier, deleteSupplier, searchSupplierTiers, addSupplierFromTier } from '../../../api/admin';
+import { FiTruck, FiPlus, FiEdit2, FiTrash2, FiSave, FiX, FiStar, FiMail, FiPhone, FiMapPin, FiHash, FiSearch, FiCheck } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Stock.css';
@@ -14,6 +14,11 @@ export default function SuppliersPanel() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQ, setSearchQ] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [adding, setAdding] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -40,6 +45,30 @@ export default function SuppliersPanel() {
     finally { setSaving(false); }
   };
 
+  useEffect(() => {
+    if (!showSearch || searchQ.trim().length < 2) { setSearchResults([]); return; }
+    setSearching(true);
+    const t = setTimeout(() => {
+      searchSupplierTiers(searchQ.trim())
+        .then((r) => setSearchResults(r.data.results || []))
+        .catch(() => setSearchResults([]))
+        .finally(() => setSearching(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchQ, showSearch]);
+
+  const handleAddFromTier = async (tier) => {
+    setAdding(tier.id);
+    try {
+      await addSupplierFromTier(tier.id);
+      toast.success(`${tier.nom} ajouté comme fournisseur`);
+      setSearchResults((rs) => rs.map((r) => r.id === tier.id ? { ...r, already_supplier: true } : r));
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setAdding(null); }
+  };
+
   const handleEdit = (s) => { setForm(s); setEditId(s.id); setShowForm(true); };
   const handleDelete = async (s) => {
     if (!confirm(`Désactiver le fournisseur "${s.supplier_name}" ?`)) return;
@@ -55,10 +84,75 @@ export default function SuppliersPanel() {
     <div className="admin-panel">
       <div className="admin-panel-header">
         <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}><FiTruck /> Fournisseurs ({suppliers.length})</h3>
-        <button className="btn btn-primary" onClick={() => { setShowForm(!showForm); setEditId(null); setForm(EMPTY); }}>
-          <FiPlus /> {showForm ? 'Fermer' : 'Nouveau fournisseur'}
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-primary" onClick={() => setShowSearch(true)}>
+            <FiSearch /> Ajouter depuis tiers
+          </button>
+          <button className="btn btn-outline" onClick={() => { setShowForm(!showForm); setEditId(null); setForm(EMPTY); }}>
+            <FiPlus /> {showForm ? 'Fermer' : 'Saisie manuelle'}
+          </button>
+        </div>
       </div>
+
+      {showSearch && (
+        <div onClick={() => setShowSearch(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 720, maxHeight: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.2)' }}>
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4 style={{ margin: 0 }}>Rechercher un tiers Dolibarr</h4>
+              <button className="btn-icon" onClick={() => { setShowSearch(false); setSearchQ(''); setSearchResults([]); }}><FiX /></button>
+            </div>
+            <div style={{ padding: '12px 20px', borderBottom: '1px solid #f1f5f9' }}>
+              <div style={{ position: 'relative' }}>
+                <FiSearch style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                <input
+                  autoFocus
+                  type="text"
+                  placeholder="Nom, code, email, téléphone… (≥ 2 caractères)"
+                  value={searchQ}
+                  onChange={(e) => setSearchQ(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px 10px 38px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 14 }}
+                />
+              </div>
+              <div style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>
+                La recherche couvre tous les tiers actifs (clients, prospects, fournisseurs). L'ajout pose le flag <code>fournisseur=1</code> dans Dolibarr et crée la fiche locale.
+              </div>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+              {searching && <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8' }}>Recherche…</div>}
+              {!searching && searchQ.trim().length >= 2 && searchResults.length === 0 && (
+                <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8' }}>Aucun tiers trouvé.</div>
+              )}
+              {searchResults.map((t) => (
+                <div key={t.id} style={{ padding: '10px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f5f9' }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, color: '#0f172a' }}>{t.nom}</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 3, fontSize: 12, color: '#64748b' }}>
+                      {t.code_fournisseur && <span><FiHash size={10} /> {t.code_fournisseur}</span>}
+                      {t.email && <span><FiMail size={10} /> {t.email}</span>}
+                      {t.phone && <span><FiPhone size={10} /> {t.phone}</span>}
+                      {t.town && <span><FiMapPin size={10} /> {t.town}</span>}
+                    </div>
+                    <div style={{ marginTop: 4, display: 'flex', gap: 4 }}>
+                      {(t.client === 1 || t.client === 3) && <span style={{ background: '#dcfce7', color: '#15803d', padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 600 }}>Client</span>}
+                      {t.client === 2 && <span style={{ background: '#dbeafe', color: '#1d4ed8', padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 600 }}>Prospect</span>}
+                      {t.fournisseur === 1 && <span style={{ background: '#ede9fe', color: '#7c3aed', padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 600 }}>Fourn.</span>}
+                    </div>
+                  </div>
+                  {t.already_supplier ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#10b981', fontSize: 12, fontWeight: 600 }}>
+                      <FiCheck /> Déjà ajouté
+                    </span>
+                  ) : (
+                    <button className="btn btn-primary btn-sm" disabled={adding === t.id} onClick={() => handleAddFromTier(t)}>
+                      <FiPlus size={12} /> {adding === t.id ? '…' : 'Ajouter'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <div className="admin-card" style={{ marginBottom: 16 }}>
@@ -86,12 +180,24 @@ export default function SuppliersPanel() {
         {suppliers.map(s => (
           <div key={s.id} className="sk-supplier-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
+              <div style={{ minWidth: 0, flex: 1 }}>
                 <div className="sk-supplier-name">{s.supplier_name}</div>
+                {s.dolibarr_code && (
+                  <div style={{ fontSize: '0.75rem', color: '#64748b', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                    <FiHash size={11} /> {s.dolibarr_code}
+                  </div>
+                )}
                 <div className="sk-supplier-meta">
                   <span><FiStar size={12} /> Priorité {s.priority_rank}</span>
                   <span>Délai {s.lead_time_avg_days}-{s.lead_time_max_days}j</span>
                 </div>
+                {(s.dolibarr_email || s.dolibarr_phone || s.dolibarr_town) && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6, fontSize: '0.78rem', color: '#475569' }}>
+                    {s.dolibarr_email && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><FiMail size={11} /> {s.dolibarr_email}</span>}
+                    {s.dolibarr_phone && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><FiPhone size={11} /> {s.dolibarr_phone}</span>}
+                    {s.dolibarr_town && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><FiMapPin size={11} /> {s.dolibarr_town}</span>}
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button className="btn-icon" onClick={() => handleEdit(s)} title="Modifier"><FiEdit2 size={14} /></button>

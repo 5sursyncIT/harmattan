@@ -13,7 +13,7 @@ export default function POSReceipt({ sale, onClose }) {
     setPrinting(true);
     try {
       const ok = await printSaleReceipt(sale);
-      if (!ok) htmlPrintFallback();
+      if (!ok) htmlPrintFallback(sale);
     } finally { setPrinting(false); }
   };
 

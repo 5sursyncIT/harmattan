@@ -303,11 +303,38 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // Set default expiry for staff without one (15 days from now)
   db.prepare("UPDATE pos_staff SET pin_expires_at = datetime('now', '+15 days') WHERE pin_expires_at IS NULL").run();
 
-  // Lier chaque appareil à un numéro de terminal fixe (le client ne le choisit plus).
+  // Lier chaque appareil à un numéro de terminal (choisi par le manager à la
+  // génération du code, ou auto-assigné en repli).
   try { db.exec('ALTER TABLE pos_devices ADD COLUMN terminal INTEGER'); } catch { /* colonne déjà présente */ }
+  try { db.exec('ALTER TABLE pos_enrollment_codes ADD COLUMN terminal INTEGER'); } catch { /* colonne déjà présente */ }
   // Migration : attribuer un terminal aux appareils qui n'en ont pas.
   for (const d of db.prepare('SELECT id FROM pos_devices WHERE terminal IS NULL ORDER BY id').all()) {
     db.prepare('UPDATE pos_devices SET terminal = ? WHERE id = ?').run(nextFreeTerminal(), d.id);
+  }
+
+  // Liste des terminaux 1..10 avec leur occupation (appareil actif).
+  function listTerminalsSlots() {
+    const max = 10;
+    const rows = db.prepare(
+      'SELECT id, device_name, terminal, active FROM pos_devices WHERE terminal IS NOT NULL ORDER BY terminal ASC'
+    ).all();
+    const byTerminal = new Map();
+    for (const r of rows) {
+      if (r.active === 1) byTerminal.set(r.terminal, r); // un terminal actif gagne
+      else if (!byTerminal.has(r.terminal)) byTerminal.set(r.terminal, r);
+    }
+    const slots = [];
+    for (let t = 1; t <= max; t++) {
+      const d = byTerminal.get(t);
+      slots.push({
+        terminal: t,
+        free: !d || d.active === 0,
+        device_id: d?.id ?? null,
+        device_name: d?.device_name ?? null,
+        device_active: d?.active === 1,
+      });
+    }
+    return slots;
   }
 
   // ─── POS Auth Middleware ────────────────────────────────
@@ -488,7 +515,10 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         }
         deviceName = req.body.device_name || 'Terminal principal';
         usedBootstrap = true;
-      } else {
+      }
+
+      let presetTerminal = null;
+      if (!usedBootstrap) {
         // Normal enrollment via generated code
         const enrollment = db.prepare(
           "SELECT * FROM pos_enrollment_codes WHERE code = ? AND used = 0 AND expires_at > datetime('now')"
@@ -497,11 +527,19 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         if (!enrollment) return res.status(400).json({ error: 'Code invalide ou expiré' });
 
         deviceName = enrollment.device_name;
+        presetTerminal = enrollment.terminal || null;
         db.prepare('UPDATE pos_enrollment_codes SET used = 1 WHERE code = ?').run(upperCode);
       }
 
       const deviceToken = crypto.randomBytes(64).toString('hex');
-      const terminal = nextFreeTerminal();
+      // Terminal demandé par le manager s'il est encore libre, sinon repli auto.
+      let terminal = nextFreeTerminal();
+      if (presetTerminal) {
+        const conflict = db.prepare(
+          'SELECT id FROM pos_devices WHERE terminal = ? AND active = 1'
+        ).get(presetTerminal);
+        if (!conflict) terminal = presetTerminal;
+      }
       db.prepare('INSERT INTO pos_devices (device_token, device_name, last_ip, terminal) VALUES (?, ?, ?, ?)')
         .run(deviceToken, deviceName, req.socket?.remoteAddress || 'unknown', terminal);
 
@@ -523,16 +561,71 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       return res.status(403).json({ error: 'Seul un manager peut enregistrer un appareil' });
     }
 
-    const { device_name } = req.body;
+    const { device_name, terminal } = req.body;
     if (!device_name?.trim()) return res.status(400).json({ error: "Nom d'appareil requis" });
+
+    let chosenTerminal = null;
+    if (terminal != null && terminal !== '') {
+      const t = parseInt(terminal);
+      if (isNaN(t) || t < 1 || t > 10) return res.status(400).json({ error: 'Terminal invalide (1-10)' });
+      const conflict = db.prepare('SELECT id, device_name FROM pos_devices WHERE terminal = ? AND active = 1').get(t);
+      if (conflict) return res.status(409).json({ error: `Terminal ${t} déjà attribué à « ${conflict.device_name} ». Révoquez-le d'abord.` });
+      chosenTerminal = t;
+    }
 
     const code = crypto.randomBytes(4).toString('hex').toUpperCase();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-    db.prepare('INSERT INTO pos_enrollment_codes (code, created_by, device_name, expires_at) VALUES (?, ?, ?, ?)')
-      .run(code, req.posStaff.id, device_name.trim(), expiresAt);
+    db.prepare('INSERT INTO pos_enrollment_codes (code, created_by, device_name, expires_at, terminal) VALUES (?, ?, ?, ?, ?)')
+      .run(code, req.posStaff.id, device_name.trim(), expiresAt, chosenTerminal);
 
-    res.json({ code, expires_in: 600, device_name: device_name.trim() });
+    res.json({ code, expires_in: 600, device_name: device_name.trim(), terminal: chosenTerminal });
+  });
+
+  // Liste des slots terminaux (1..10) avec leur occupation. Tout caissier
+  // authentifié peut consulter (lecture seule, sert au sélecteur de terminal
+  // de l'écran d'ouverture de caisse + à la modal manager d'enrôlement).
+  router.get('/devices/terminals', requirePosAuth, (req, res) => {
+    res.json(listTerminalsSlots());
+  });
+
+  // Réassigner le terminal d'un appareil existant.
+  // Tout caissier authentifié peut réassigner SON appareil (celui sur lequel il
+  // est connecté). Un manager peut réassigner n'importe quel appareil.
+  router.patch('/devices/:id/terminal', requirePosAuth, csrfProtection, (req, res) => {
+    const id = parseInt(req.params.id);
+    const t = parseInt(req.body?.terminal);
+    if (!id || isNaN(t) || t < 1 || t > 10) return res.status(400).json({ error: 'Paramètres invalides' });
+
+    const device = db.prepare('SELECT id, device_name, terminal, active FROM pos_devices WHERE id = ?').get(id);
+    if (!device) return res.status(404).json({ error: 'Appareil introuvable' });
+
+    // Non-manager : restreint à son propre appareil
+    if (req.posStaff.role !== 'manager' && req.posDevice?.id !== device.id) {
+      return res.status(403).json({ error: 'Vous ne pouvez réassigner que votre propre appareil' });
+    }
+
+    const conflict = db.prepare('SELECT id, device_name FROM pos_devices WHERE terminal = ? AND active = 1 AND id != ?').get(t, id);
+    if (conflict) return res.status(409).json({ error: `Terminal ${t} déjà attribué à « ${conflict.device_name} »` });
+
+    // Refuse le swap si l'appareil a une session en cours côté Dolibarr — sinon
+    // les ventes/clôture seraient comptées sur le mauvais terminal.
+    (async () => {
+      try {
+        const [open] = await dolibarrPool.query(
+          "SELECT rowid FROM llx_pos_cash_fence WHERE posnumber = ? AND posmodule = 'takepos' AND status = 0",
+          [String(device.terminal)],
+        );
+        if (open.length > 0) {
+          return res.status(409).json({ error: 'Session de caisse encore ouverte sur ce terminal — clôturez avant de changer.' });
+        }
+        db.prepare('UPDATE pos_devices SET terminal = ? WHERE id = ?').run(t, id);
+        res.json({ success: true, id, terminal: t });
+      } catch (err) {
+        console.error('Reassign terminal error:', err.message);
+        res.status(500).json({ error: 'Erreur réassignation terminal' });
+      }
+    })();
   });
 
   // List devices (manager only)
@@ -576,28 +669,105 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
   router.get('/customers/search', requirePosAuth, async (req, res) => {
     try {
-      const { q = '' } = req.query;
+      const q = String(req.query?.q || '').trim();
       if (q.length < 2) return res.json([]);
 
-      const response = await adminApi.get('/thirdparties', {
-        params: {
-          sqlfilters: `(t.nom:like:'%${safeSqlFilter(q)}%') OR (t.email:like:'%${safeSqlFilter(q)}%') OR (t.phone:like:'%${safeSqlFilter(q)}%')`,
-          limit: 10,
-        },
-      });
+      // 1) Recherche Dolibarr llx_societe directement (couvre clients, prospects,
+      //    fournisseurs, auteurs déjà liés à un tier). Pas de filtre client/fournisseur
+      //    — le POS doit pouvoir encaisser n'importe quel tier.
+      const pat = `%${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
+      const [dolRows] = await dolibarrPool.query(
+        `SELECT rowid AS id, nom AS name, email, phone, client, fournisseur
+           FROM llx_societe
+          WHERE status = 1
+            AND (nom LIKE ? OR name_alias LIKE ? OR email LIKE ? OR phone LIKE ?)
+          ORDER BY nom ASC
+          LIMIT 15`,
+        [pat, pat, pat, pat],
+      );
 
-      const customers = (response.data || []).map((c) => ({
+      // 2) Recherche auteurs locaux (table SQLite `authors`). Couvre les auteurs
+      //    sans tier Dolibarr (registrés mais sans contrat encore généré).
+      const authorRows = db.prepare(
+        `SELECT id AS author_id, firstname, lastname, email, phone, dolibarr_thirdparty_id
+           FROM authors
+          WHERE firstname LIKE ?
+             OR lastname LIKE ?
+             OR (firstname || ' ' || lastname) LIKE ?
+             OR email LIKE ?
+             OR phone LIKE ?
+          ORDER BY lastname, firstname
+          LIMIT 15`,
+      ).all(pat, pat, pat, pat, pat);
+
+      // 3) Fusion : on évite les doublons (auteur déjà présent dans Dolibarr).
+      const linkedTierIds = new Set(
+        authorRows.filter((a) => a.dolibarr_thirdparty_id).map((a) => a.dolibarr_thirdparty_id),
+      );
+      const dolFmt = dolRows.map((c) => ({
         id: c.id,
-        name: c.name || c.nom,
-        email: c.email,
-        phone: c.phone,
+        name: c.name,
+        email: c.email || null,
+        phone: c.phone || null,
+        source: linkedTierIds.has(c.id) ? 'author' : 'client',
       }));
+      const authorOnly = authorRows
+        .filter((a) => !a.dolibarr_thirdparty_id)
+        .map((a) => ({
+          id: null,
+          author_id: a.author_id,
+          name: `${a.firstname || ''} ${a.lastname || ''}`.trim(),
+          email: a.email || null,
+          phone: a.phone || null,
+          source: 'author_pending', // pas encore de tier Dolibarr — sera créé à la sélection
+        }));
 
-      res.json(customers);
+      res.json([...dolFmt, ...authorOnly].slice(0, 20));
     } catch (err) {
-      if (err.response?.status === 404) return res.json([]);
-      console.error('POS customer search error:', err.response?.data || err.message);
+      console.error('POS customer search error:', err.message);
       res.status(500).json({ error: 'Erreur recherche client' });
+    }
+  });
+
+  // Promeut un auteur local sans tier Dolibarr en client POS. Idempotent :
+  // si l'auteur est déjà lié, retourne simplement les infos du tier.
+  router.post('/customers/from-author/:id', requirePosAuth, csrfProtection, async (req, res) => {
+    try {
+      const authorId = parseInt(req.params.id);
+      if (!authorId) return res.status(400).json({ error: 'ID auteur invalide' });
+
+      const author = db.prepare(
+        'SELECT id, email, firstname, lastname, phone, dolibarr_thirdparty_id FROM authors WHERE id = ?',
+      ).get(authorId);
+      if (!author) return res.status(404).json({ error: 'Auteur introuvable' });
+
+      // Déjà lié à un tier Dolibarr → on récupère + on renvoie.
+      if (author.dolibarr_thirdparty_id) {
+        const [[tier]] = await dolibarrPool.query(
+          'SELECT rowid AS id, nom AS name, email, phone FROM llx_societe WHERE rowid = ?',
+          [author.dolibarr_thirdparty_id],
+        );
+        if (tier) return res.json({ id: tier.id, name: tier.name, email: tier.email, phone: tier.phone });
+        // Le tier a été supprimé côté Dolibarr — on recrée ci-dessous.
+      }
+
+      // Création d'un tier Dolibarr client à partir des infos auteur.
+      const fullName = `${author.firstname || ''} ${author.lastname || ''}`.trim() || `Auteur #${authorId}`;
+      const created = await adminApi.post('/thirdparties', {
+        name: fullName,
+        email: author.email || '',
+        phone: author.phone || '',
+        client: 1,
+        code_client: -1,
+      });
+      const newId = parseInt(created.data);
+
+      db.prepare('UPDATE authors SET dolibarr_thirdparty_id = ? WHERE id = ?').run(newId, authorId);
+
+      res.json({ id: newId, name: fullName, email: author.email || null, phone: author.phone || null });
+    } catch (err) {
+      console.error('POS from-author error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur création client à partir de l\'auteur' });
     }
   });
 
@@ -670,6 +840,18 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           if (!Number.isInteger(pid) || pid <= 0) {
             return res.status(400).json({ error: `Article invalide : product_id manquant ou incorrect` });
           }
+          // Override de prix : autorisé uniquement avec un motif (3-200 caractères).
+          // Le prix override est validé contre les mêmes bornes que les produits libres.
+          if (item?.price_override_reason || item?.price_original != null) {
+            const op = parseInt(item?.price_ttc);
+            if (!Number.isInteger(op) || op <= 0 || op > 10_000_000) {
+              return res.status(400).json({ error: `Prix modifié invalide pour l'article ${item?.label || pid}` });
+            }
+            const r = String(item?.price_override_reason || '').trim();
+            if (r.length < 3 || r.length > 200) {
+              return res.status(400).json({ error: `Motif de modification de prix requis (3-200 caractères) pour ${item?.label || pid}` });
+            }
+          }
         }
       }
 
@@ -728,10 +910,16 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       //     (XOF = no decimals, tva 0) à partir des prix DE CONFIANCE. Rejected
       //     before any Dolibarr write, so an under-paid sale never produces an
       //     orphan invoice.
+      // Helper : prix effectif d'une ligne (override accepté si motif fourni
+      // côté validation, sinon prix catalogue serveur).
+      const effectivePrice = (item) => {
+        if (item.is_free) return parseInt(item.subprice ?? item.price_ttc);
+        const r = String(item.price_override_reason || '').trim();
+        if (r.length >= 3) return parseInt(item.price_ttc);
+        return priceMap[parseInt(item.product_id)].price_ttc;
+      };
       const expectedTotal = items.reduce((sum, item) => {
-        const price = item.is_free
-          ? parseInt(item.subprice ?? item.price_ttc)
-          : priceMap[parseInt(item.product_id)].price_ttc;
+        const price = effectivePrice(item);
         const disc = parseFloat(item.discount) || 0;
         return sum + Math.round(price * item.qty * (1 - disc / 100));
       }, 0);
@@ -756,6 +944,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       // subprice = prix unitaire DE CONFIANCE (côté serveur) pour les produits
       // référencés. Pour les lignes libres, le subprice provient du body (validé
       // ci-dessus : entier 1..10M).
+      // Trace les overrides de prix appliqués (pour la note de facture et
+      // l'audit log) — seuls les overrides validés (motif fourni) atterrissent ici.
+      const priceOverrides = [];
       const lines = items.map((item) => {
         if (item.is_free) {
           return {
@@ -769,10 +960,17 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
             label: String(item.label).trim().slice(0, 200),
           };
         }
+        const pid = parseInt(item.product_id);
+        const catalogPrice = priceMap[pid].price_ttc;
+        const reason = String(item.price_override_reason || '').trim();
+        const subprice = reason.length >= 3 ? parseInt(item.price_ttc) : catalogPrice;
+        if (reason.length >= 3 && subprice !== catalogPrice) {
+          priceOverrides.push({ pid, label: priceMap[pid].label, from: catalogPrice, to: subprice, reason });
+        }
         return {
-          fk_product: parseInt(item.product_id),
+          fk_product: pid,
           qty: item.qty,
-          subprice: priceMap[parseInt(item.product_id)].price_ttc,
+          subprice,
           tva_tx: 0,
           product_type: 0,
           remise_percent: item.discount || 0,
@@ -812,6 +1010,30 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           }
         }
 
+        // Note privée enrichie des éventuels overrides de prix (audit trail).
+        // L'override de prix est ouvert à tous les rôles POS (cashier =
+        // libraire, manager) — l'audit nominatif suffit comme garde-fou.
+        const roleLabel = req.posStaff.role === 'manager' ? 'manager' : 'libraire';
+        let invoiceNote = `POS Terminal ${terminal} | Caissier: ${req.posStaff.name} (${roleLabel})${note ? ' | ' + note : ''}`;
+        if (priceOverrides.length > 0) {
+          const lines = priceOverrides.map((o) =>
+            `[PRIX MODIFIÉ par ${req.posStaff.name}/${roleLabel}] ${o.label} : ${o.from} → ${o.to} F (${o.reason})`,
+          );
+          invoiceNote += '\n' + lines.join('\n');
+          // Audit local : une ligne par override (avec rôle pour filtrage rapport)
+          for (const o of priceOverrides) {
+            try {
+              db.prepare(
+                "INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)",
+              ).run(
+                req.posStaff.name || 'pos',
+                'pos_price_override',
+                `T${terminal} | ${roleLabel} | ${o.label} #${o.pid} : ${o.from} → ${o.to} F | ${o.reason}`,
+              );
+            } catch (e) { void e; }
+          }
+        }
+
         // 1. Create draft invoice
         const invoiceRes = await adminApi.post('/invoices', {
           socid: parseInt(socid),
@@ -820,7 +1042,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           module_source: 'takepos',
           pos_source: String(terminal),
           lines,
-          note_private: `POS Terminal ${terminal} | Caissier: ${req.posStaff.name}${note ? ' | ' + note : ''}`,
+          note_private: invoiceNote,
         });
         sale.invoiceId = invoiceRes.data;
 
@@ -1105,6 +1327,161 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // ═══════════════════════════════════════════════════════
   // SALES HISTORY (today)
   // ═══════════════════════════════════════════════════════
+
+  // Rapport de caisse (équivalent Z-report) — agrège ventes, paiements,
+  // mouvements de caisse et overrides de prix sur la période courante :
+  // depuis l'ouverture de la session si une est en cours, sinon depuis le
+  // début de la journée. Sert au caissier pour contrôle intermédiaire avant
+  // clôture.
+  router.get('/session/report', requirePosAuth, async (req, res) => {
+    try {
+      const terminal = getTerminal(req);
+
+      // 1) Session ouverte (si existe) — fixe le point de départ de la période.
+      const [openSessions] = await dolibarrPool.query(
+        `SELECT rowid AS id, date_creation, cash AS opening_cash, fk_user_creat AS staff_id
+           FROM llx_pos_cash_fence
+          WHERE posnumber = ? AND posmodule = 'takepos' AND status = 0
+          ORDER BY rowid DESC LIMIT 1`,
+        [String(terminal)],
+      );
+      const session = openSessions[0] || null;
+      const periodStart = session
+        ? session.date_creation
+        : new Date(new Date().setHours(0, 0, 0, 0));
+      const periodStartIso = periodStart instanceof Date
+        ? periodStart.toISOString().slice(0, 19).replace('T', ' ')
+        : periodStart;
+
+      // 2) Ventes encaissées sur la période, par moyen de paiement.
+      const [byMethod] = await dolibarrPool.query(
+        `SELECT cp.code,
+                COUNT(DISTINCT pf.fk_facture) AS invoices,
+                COALESCE(SUM(pf.amount), 0) AS amount
+           FROM llx_paiement_facture pf
+           JOIN llx_paiement p ON p.rowid = pf.fk_paiement
+           JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+           JOIN llx_facture f ON f.rowid = pf.fk_facture
+          WHERE f.module_source = 'takepos'
+            AND f.pos_source = ?
+            AND p.datep >= ?
+          GROUP BY cp.code`,
+        [String(terminal), periodStartIso],
+      );
+
+      // 3) Tickets validés sur la période — total, nb, ticket moyen.
+      const [[totals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS invoices,
+                COALESCE(SUM(total_ttc), 0) AS total_ttc,
+                COALESCE(SUM(total_ht), 0) AS total_ht
+           FROM llx_facture f
+          WHERE f.module_source = 'takepos'
+            AND f.pos_source = ?
+            AND f.datef >= UNIX_TIMESTAMP(?)
+            AND f.fk_statut > 0`,
+        [String(terminal), periodStartIso],
+      );
+
+      // 4) Top 5 articles vendus (par quantité) sur la période.
+      const [topItems] = await dolibarrPool.query(
+        `SELECT COALESCE(p.ref, fd.description) AS ref,
+                COALESCE(p.label, fd.description) AS label,
+                SUM(fd.qty) AS qty,
+                SUM(fd.total_ttc) AS total_ttc
+           FROM llx_facturedet fd
+           JOIN llx_facture f ON f.rowid = fd.fk_facture
+      LEFT JOIN llx_product p ON p.rowid = fd.fk_product
+          WHERE f.module_source = 'takepos'
+            AND f.pos_source = ?
+            AND f.datef >= UNIX_TIMESTAMP(?)
+            AND f.fk_statut > 0
+            AND f.type = 0
+          GROUP BY COALESCE(p.rowid, fd.description), label, ref
+          ORDER BY qty DESC
+          LIMIT 5`,
+        [String(terminal), periodStartIso],
+      );
+
+      // 5) Avoirs (remboursements) sur la période — réduisent l'encaisse.
+      const [[refundsTotals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS amount
+           FROM pos_refunds
+          WHERE terminal = ? AND created_at >= ?`,
+        [terminal, periodStartIso],
+      ).catch(() => [[{ n: 0, amount: 0 }]]);
+
+      // 6) Mouvements de caisse (entrées/sorties) — uniquement si session ouverte.
+      let cashMovements = [];
+      if (session) {
+        cashMovements = db.prepare(
+          'SELECT id, type, amount, reason, created_at FROM pos_cash_movements WHERE session_id = ? ORDER BY created_at ASC',
+        ).all(session.id);
+      }
+      const cashIn = cashMovements.filter((m) => m.type === 'in').reduce((s, m) => s + m.amount, 0);
+      const cashOut = cashMovements.filter((m) => m.type === 'out').reduce((s, m) => s + m.amount, 0);
+
+      // 7) Overrides de prix appliqués sur la période — depuis l'audit log.
+      const priceOverrides = db.prepare(
+        `SELECT created_at, admin_username AS staff, details
+           FROM admin_activity_log
+          WHERE action = 'pos_price_override'
+            AND details LIKE ?
+            AND created_at >= ?
+          ORDER BY id DESC LIMIT 20`,
+      ).all(`T${terminal} |%`, periodStartIso);
+
+      // 8) Mapping codes → labels (cohérent avec PAYMENT_MAP).
+      const methods = {};
+      for (const code of Object.keys(PAYMENT_MAP)) {
+        methods[code] = { label: PAYMENT_MAP[code].label, invoices: 0, amount: 0 };
+      }
+      for (const r of byMethod) {
+        const code = normalizePaymentCode(r.code);
+        if (!methods[code]) methods[code] = { label: code, invoices: 0, amount: 0 };
+        methods[code].invoices = parseInt(r.invoices) || 0;
+        methods[code].amount = parseFloat(r.amount) || 0;
+      }
+
+      const totalInvoices = parseInt(totals.invoices) || 0;
+      const totalTtc = parseFloat(totals.total_ttc) || 0;
+      const cashSales = methods.LIQ?.amount || 0;
+      const expectedCash = (session ? parseFloat(session.opening_cash) || 0 : 0) + cashSales + cashIn - cashOut - (parseFloat(refundsTotals?.amount) || 0);
+
+      res.json({
+        terminal,
+        staff: req.posStaff.name,
+        period_start: periodStartIso,
+        generated_at: new Date().toISOString(),
+        session: session ? {
+          id: session.id,
+          opened_at: session.date_creation,
+          opening_cash: parseFloat(session.opening_cash) || 0,
+        } : null,
+        totals: {
+          invoices: totalInvoices,
+          total_ttc: totalTtc,
+          total_ht: parseFloat(totals.total_ht) || 0,
+          avg_ticket: totalInvoices > 0 ? totalTtc / totalInvoices : 0,
+        },
+        methods,
+        cash: {
+          opening: session ? parseFloat(session.opening_cash) || 0 : 0,
+          sales: cashSales,
+          in: cashIn,
+          out: cashOut,
+          refunds: parseFloat(refundsTotals?.amount) || 0,
+          expected: expectedCash,
+        },
+        cash_movements: cashMovements,
+        refunds: { count: parseInt(refundsTotals?.n) || 0, amount: parseFloat(refundsTotals?.amount) || 0 },
+        top_items: topItems.map((i) => ({ ref: i.ref, label: i.label, qty: parseFloat(i.qty), total_ttc: parseFloat(i.total_ttc) })),
+        price_overrides: priceOverrides,
+      });
+    } catch (err) {
+      console.error('POS report error:', err);
+      res.status(500).json({ error: 'Erreur rapport de caisse' });
+    }
+  });
 
   router.get('/sales/today', requirePosAuth, async (req, res) => {
     try {
@@ -1704,11 +2081,25 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // ═══════════════════════════════════════════════════════
 
   router.get('/config', requirePosAuth, (req, res) => {
+    const terminal = getTerminal(req);
+    const deviceId = req.posDevice?.id || null;
+    const deviceName = req.posDevice?.device_name || null;
+    // Dernière clôture sur ce terminal → suggère le fond de caisse pour la
+    // prochaine ouverture (TakePOS / Dolibarr fait pareil).
+    const lastClose = db.prepare(
+      `SELECT counted_cash, closed_at, staff_name
+         FROM pos_session_closures
+        WHERE terminal = ?
+        ORDER BY id DESC LIMIT 1`,
+    ).get(terminal) || null;
     res.json({
-      terminal: getTerminal(req),
+      terminal,
+      device_id: deviceId,
+      device_name: deviceName,
       warehouse: POS_CONFIG.warehouse,
       defaultCustomer: POS_CONFIG.defaultCustomer,
       receiptName: POS_CONFIG.receiptName,
+      last_close: lastClose,
       paymentMethods: Object.entries(PAYMENT_MAP).map(([code, m]) => ({
         code,
         label: m.label,

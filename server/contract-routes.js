@@ -95,9 +95,9 @@ function getDefaultsForType(type) {
 // Types activement proposés à la création
 export const ACTIVE_CONTRACT_TYPES = Object.keys(COMBINED_CONTRACT_TYPES);
 
-// Signataire éditeur par défaut (surchargeable par contrat)
-const DEFAULT_EDITOR_NAME = process.env.CONTRACT_EDITOR_SIGNATORY_NAME || '';
-const DEFAULT_EDITOR_TITLE = process.env.CONTRACT_EDITOR_SIGNATORY_TITLE || 'Directeur général';
+// Signataire éditeur par défaut (surchargeable par contrat ou par variables d'env)
+const DEFAULT_EDITOR_NAME = process.env.CONTRACT_EDITOR_SIGNATORY_NAME || 'Dr Abdoulaye DIALLO';
+const DEFAULT_EDITOR_TITLE = process.env.CONTRACT_EDITOR_SIGNATORY_TITLE || 'Administrateur Général';
 
 const COMMERCIAL_SIGNATURE_ID = process.env.CONTRACT_COMMERCIAL_SIGNATURE_ID || '1';
 const COMMERCIAL_SUIVI_ID = process.env.CONTRACT_COMMERCIAL_SUIVI_ID || '1';
@@ -499,6 +499,12 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
           authorPurchaseEnabled: contract.array_options?.options_author_purchase_enabled,
           authorPurchaseQty: contract.array_options?.options_author_purchase_qty,
           authorPurchaseDiscount: contract.array_options?.options_author_purchase_discount,
+          // Production / fabrication (utilisés par le formulaire de devis)
+          tirageInitial: contract.array_options?.options_tirage_initial,
+          formatOuvrage: contract.array_options?.options_format_ouvrage,
+          nombrePagesEstime: contract.array_options?.options_nombre_pages_estime,
+          prixPublicPrevisionnel: contract.array_options?.options_prix_public_previsionnel,
+          exemplairesSp: contract.array_options?.options_exemplaires_sp,
         },
         lines: (contract.lines || []).map(l => ({
           id: l.id, description: l.description || l.product_label, qty: l.qty,

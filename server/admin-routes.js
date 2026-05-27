@@ -261,7 +261,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // Portail auteur
   db.exec(`CREATE TABLE IF NOT EXISTS authors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE,
     password TEXT,
     firstname TEXT NOT NULL,
     lastname TEXT NOT NULL,

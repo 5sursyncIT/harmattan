@@ -170,8 +170,8 @@ export default function ContractCreate() {
     exemplaires_sp: 5,
     // Signature
     date_signature: today,
-    editeur_signataire_nom: '',
-    editeur_signataire_qualite: 'Directeur général',
+    editeur_signataire_nom: 'Dr Abdoulaye DIALLO',
+    editeur_signataire_qualite: 'Administrateur Général',
     note_private: '',
     manuscript_id: searchParams.get('manuscript_id') || '',
   });
@@ -547,8 +547,11 @@ export default function ContractCreate() {
               <input type="number" value={form.tirage_initial} onChange={e => set('tirage_initial', e.target.value)}
                 onBlur={() => handleBlur('tirage_initial')} min={1} />
             </Field>
-            <Field label="Format" hint="Ex : 15 × 21 cm">
-              <input type="text" value={form.format_ouvrage} onChange={e => set('format_ouvrage', e.target.value)} />
+            <Field label="Format">
+              <select value={form.format_ouvrage} onChange={e => set('format_ouvrage', e.target.value)}>
+                <option value="15 × 21 cm">15 × 21 cm (standard)</option>
+                <option value="13,5 × 21,5 cm">13,5 × 21,5 cm (devis-fabrication)</option>
+              </select>
             </Field>
             <Field label="Pages (estimé)" error={errors.nombre_pages_estime}>
               <input type="number" value={form.nombre_pages_estime} onChange={e => set('nombre_pages_estime', e.target.value)}
@@ -626,7 +629,7 @@ export default function ContractCreate() {
           <div className="ct-form-row cols-2-1">
             <Field label="Nom du signataire éditeur" required error={errors.editeur_signataire_nom} hint="Personne qui signe côté L'Harmattan">
               <input type="text" value={form.editeur_signataire_nom} onChange={e => set('editeur_signataire_nom', e.target.value)}
-                onBlur={() => handleBlur('editeur_signataire_nom')} placeholder="Ex : Moussa Mbaye" />
+                onBlur={() => handleBlur('editeur_signataire_nom')} placeholder="Ex : Dr Abdoulaye DIALLO" />
             </Field>
             <Field label="Qualité">
               <input type="text" value={form.editeur_signataire_qualite} onChange={e => set('editeur_signataire_qualite', e.target.value)} />

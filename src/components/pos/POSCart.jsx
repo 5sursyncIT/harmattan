@@ -198,6 +198,12 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
                 <div className="pos-cart-item-row1">
                   <span className="pos-cart-item-ref">{item.ref}</span>
                   <span className="pos-cart-item-label" title={item.label}>{item.label}</span>
+                  {item.price_override_reason && (
+                    <span
+                      title={`Prix modifié : ${Math.round(item.price_original).toLocaleString('fr-FR')} F → ${Math.round(item.price_ttc).toLocaleString('fr-FR')} F\nMotif : ${item.price_override_reason}`}
+                      style={{ marginLeft: 6, background: '#fef3c7', color: '#92400e', padding: '1px 6px', borderRadius: 10, fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}
+                    >PRIX MODIFIÉ</span>
+                  )}
                 </div>
                 <div className="pos-cart-item-row2">
                   <div className="pos-cart-item-actions">

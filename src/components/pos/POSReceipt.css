@@ -194,46 +194,93 @@
   margin-top: 6px !important;
 }
 
-/* ─── Print — thermal receipt 80mm ────────────────────── */
+/* ─── Print — thermal receipt 80mm ──────────────────────
+   Stratégie : `display: none` sur toute la page sauf l'arbre du ticket
+   (ancêtres réaffichés en `display: block` neutralisés, descendants en
+   `display: revert`). Plus fiable que `visibility: hidden` qui laissait
+   des pages vides sur les pilotes thermiques (NetumScan POS-80).
+   Aucune position absolute en print — le ticket flue naturellement. */
 @media print {
-  /* Hide everything except the receipt */
-  .no-print,
-  .pos-header,
-  .pos-body,
-  .pos-page > *:not(.pos-receipt-overlay) {
-    display: none !important;
-  }
+  /* 1) Tout le document part en display:none */
+  body * { display: none !important; }
 
+  /* 2) Réaffiche les ancêtres + le ticket. `:has()` cible tous les
+     éléments qui contiennent le ticket en descendance (= ancêtres) ;
+     supporté par tous les navigateurs modernes (Chrome 105+, Firefox
+     121+, Safari 15.4+). On ajoute des sélecteurs nommés en repli pour
+     les anciens moteurs. */
+  html,
+  body,
+  #root,
+  .pos-page,
+  .pos-receipt-overlay,
+  .pos-receipt-panel,
+  body :has(#pos-receipt-printable),
+  #pos-receipt-printable {
+    display: block !important;
+  }
+  #pos-receipt-printable * { display: revert !important; }
+  /* `table` et descendants ont besoin de leur display propre */
+  #pos-receipt-printable table { display: table !important; }
+  #pos-receipt-printable thead  { display: table-header-group !important; }
+  #pos-receipt-printable tbody  { display: table-row-group !important; }
+  #pos-receipt-printable tr     { display: table-row !important; }
+  #pos-receipt-printable th,
+  #pos-receipt-printable td     { display: table-cell !important; }
+
+  /* 3) Neutralise les contraintes de mise en page sur les ancêtres */
   html, body {
     margin: 0 !important;
     padding: 0 !important;
     background: #fff !important;
-    width: 80mm !important;
+    height: auto !important;
+    overflow: visible !important;
+    width: auto !important;
   }
-
-  .pos-receipt-overlay {
+  .pos-receipt-overlay,
+  .pos-receipt-panel,
+  .pos-page,
+  .pos-body,
+  #root {
     position: static !important;
-    display: block !important;
-    background: none !important;
+    overflow: visible !important;
+    max-height: none !important;
+    height: auto !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    transform: none !important;
     padding: 0 !important;
+    margin: 0 !important;
+    width: auto !important;
   }
 
-  .pos-receipt-panel {
+  #pos-receipt-printable {
+    width: 76mm !important;          /* 80mm - marges @page */
+    max-width: 76mm !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #fff !important;
+    color: #000 !important;
+    font-size: 11px !important;
     box-shadow: none !important;
     border-radius: 0 !important;
-    padding: 0 !important;
-    max-width: none !important;
-    width: 100% !important;
   }
 
-  .pos-receipt-ticket {
-    width: 100% !important;
-    font-size: 11px !important;
+  /* 4) Couleurs forcées pour les pilotes navigateur (Chrome/Edge/POS-80) */
+  #pos-receipt-printable,
+  #pos-receipt-printable * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color: #000 !important;
   }
 
+  /* 5) Ajustements typographiques pour 80mm */
   .pos-receipt-header-section h2 { font-size: 14px !important; }
-  .pos-receipt-header-section p { font-size: 9px !important; }
-  .pos-receipt-total-line { font-size: 13px !important; }
+  .pos-receipt-header-section p  { font-size: 9px  !important; }
+  .pos-receipt-total-line        { font-size: 13px !important; }
+  .pos-receipt-footer            { font-size: 9px  !important; }
 
   @page {
     size: 80mm auto;

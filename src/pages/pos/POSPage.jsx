@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { FiSmartphone, FiGrid, FiSidebar } from 'react-icons/fi';
-import { posGetCurrentSession, posCreateQuote, posCreateSale, posGetTodaySales } from '../../api/pos';
+import { posGetCurrentSession, posCreateQuote, posCreateSale } from '../../api/pos';
 import { syncOfflineSales, getPendingSales } from '../../utils/offlineQueue';
 import usePosCartStore from '../../store/posCartStore';
 import usePosSessionStore from '../../store/posSessionStore';
@@ -16,6 +16,8 @@ import POSReceipt from '../../components/pos/POSReceipt';
 import POSQuoteReceipt from '../../components/pos/POSQuoteReceipt';
 import CustomerSelect from '../../components/pos/CustomerSelect';
 import CashRegister from '../../components/pos/CashRegister';
+import POSCashReport from '../../components/pos/POSCashReport';
+import POSOpenSessionScreen from '../../components/pos/POSOpenSessionScreen';
 import POSChangePin from '../../components/pos/POSChangePin';
 import POSReturn from '../../components/pos/POSReturn';
 import POSHistory from '../../components/pos/POSHistory';
@@ -42,9 +44,11 @@ export default function POSPage() {
   const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [showCustomer, setShowCustomer] = useState(false);
   const [showCashRegister, setShowCashRegister] = useState(false);
+  const [showCashReport, setShowCashReport] = useState(false);
   const [completedSale, setCompletedSale] = useState(null);
   const [completedQuote, setCompletedQuote] = useState(null);
   const [session, setSession] = useState(null);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
   const [touchMode, setTouchMode] = useState(() => {
     const saved = localStorage.getItem('pos-touch-mode');
     return saved !== null ? saved === 'true' : true;
@@ -103,6 +107,8 @@ export default function POSPage() {
     } catch {
       setSession(null);
       closeSessionStore();
+    } finally {
+      setSessionLoaded(true);
     }
   }, [closeSessionStore, openSessionStore]);
 
@@ -176,16 +182,7 @@ export default function POSPage() {
     toast.success(`Remise ${pct}% appliquée à ${items.length} ligne${items.length > 1 ? 's' : ''}`);
   };
 
-  const handleCashReport = async () => {
-    try {
-      const res = await posGetTodaySales();
-      const sales = res.data || [];
-      const total = sales.reduce((s, v) => s + parseFloat(v.total_ttc || 0), 0);
-      toast.success(`Aujourd'hui : ${sales.length} ventes · ${Math.round(total).toLocaleString('fr-FR')} F`, { duration: 5000 });
-    } catch {
-      toast.error('Impossible de récupérer le rapport de caisse');
-    }
-  };
+  const handleCashReport = () => setShowCashReport(true);
 
   const handlePayCash = () => {
     if (!items.length) return;
@@ -195,6 +192,28 @@ export default function POSPage() {
   const handleSoon = (label) => () => {
     toast(`${label} — bientôt disponible`, { icon: '🚧' });
   };
+
+  // Évite le flash de l'UI POS pendant le chargement initial de la session :
+  // tant qu'on ne sait pas s'il y a une session ouverte, on n'instancie aucun
+  // sous-composant (sinon header/catalogue se montent et déclenchent leurs
+  // fetch). Loader plein écran qui se fond visuellement dans l'écran d'ouverture.
+  if (!sessionLoaded) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, background: '#0a1628',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: '#94a3b8', fontSize: '0.9rem', letterSpacing: '0.5px',
+        zIndex: 2000,
+      }}>
+        Chargement…
+      </div>
+    );
+  }
+  // Bloque l'accès au POS tant qu'aucune session caisse n'est ouverte
+  // (alignement avec le flux Dolibarr TakePOS : PIN → ouverture caisse → POS).
+  if (!session) {
+    return <POSOpenSessionScreen onOpened={loadSession} />;
+  }
 
   return (
     <div className={`pos-page ${touchMode ? 'touch-mode' : ''} panel-${activePanel}`}>
@@ -300,6 +319,10 @@ export default function POSPage() {
           onClose={() => setShowCashRegister(false)}
           onUpdate={loadSession}
         />
+      )}
+
+      {showCashReport && (
+        <POSCashReport onClose={() => setShowCashReport(false)} />
       )}
 
       {showChangePin && (

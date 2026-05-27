@@ -15,6 +15,7 @@
 
 import { Router } from 'express';
 import axios from 'axios';
+import { dolibarrApi } from './dolibarr-client.js';
 
 // Client Dolibarr avec clé admin (opérations d'écriture sur factures).
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -26,6 +27,10 @@ const adminApi = axios.create({
   headers: { DOLAPIKEY: ADMIN_API_KEY, 'Content-Type': 'application/json' },
   timeout: 30000,
 });
+
+// Endpoint PHP custom (Dolibarr internal) — utilisé en fallback quand l'API REST builddoc échoue.
+const DOC_BUILDDOC_URL = 'http://localhost/dolibarr/htdocs/custom/senharmattansync/document-builddoc.php';
+const DOLIBARR_WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
 
 // Codes paiement Dolibarr → libellés.
 const PAYMENT_METHOD_LABELS = {
@@ -125,8 +130,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
       if (req.query.socid) { where.push('f.fk_soc = ?'); params.push(parseInt(req.query.socid)); }
       if (req.query.search) {
-        where.push('(f.ref LIKE ? OR s.nom LIKE ?)');
-        params.push(`%${req.query.search}%`, `%${req.query.search}%`);
+        where.push('(f.ref LIKE ? OR s.nom LIKE ? OR s.code_client LIKE ? OR s.email LIKE ? OR s.town LIKE ? OR s.phone LIKE ?)');
+        const pat = `%${req.query.search}%`;
+        params.push(pat, pat, pat, pat, pat, pat);
       }
       if (req.query.date_from) { where.push('f.datef >= ?'); params.push(req.query.date_from); }
       if (req.query.date_to)   { where.push('f.datef <= ?'); params.push(req.query.date_to); }
@@ -151,7 +157,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       );
 
       const [rows] = await dolibarrPool.query(
-        `SELECT f.rowid AS id, f.ref, f.datef, f.date_lim_reglement,
+        `SELECT f.rowid AS id, f.ref,
+                DATE_FORMAT(f.datef, '%Y-%m-%d') AS datef,
+                DATE_FORMAT(f.date_lim_reglement, '%Y-%m-%d') AS date_lim_reglement,
                 f.fk_soc, s.nom AS customer_name,
                 f.fk_statut, f.paye, f.type, f.module_source,
                 f.total_ht, f.total_tva, f.total_ttc,
@@ -275,7 +283,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
       // 1. Toutes les factures de la période (pas de pagination, garde-fou 5 000 lignes).
       const [invoiceRows] = await dolibarrPool.query(
-        `SELECT f.rowid AS id, f.ref, f.datef, f.fk_soc, s.nom AS customer_name,
+        `SELECT f.rowid AS id, f.ref,
+                DATE_FORMAT(f.datef, '%Y-%m-%d') AS datef,
+                f.fk_soc, s.nom AS customer_name,
                 f.fk_statut, f.paye, f.type, f.module_source,
                 f.total_ht, f.total_tva, f.total_ttc,
                 COALESCE(pf.paid, 0) AS paid_amount
@@ -399,7 +409,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
     try {
       const id = parseInt(req.params.id);
       const [[invoice]] = await dolibarrPool.query(
-        `SELECT f.rowid AS id, f.ref, f.datef, f.date_lim_reglement,
+        `SELECT f.rowid AS id, f.ref,
+                DATE_FORMAT(f.datef, '%Y-%m-%d') AS datef,
+                DATE_FORMAT(f.date_lim_reglement, '%Y-%m-%d') AS date_lim_reglement,
                 f.fk_soc, s.nom AS customer_name, s.code_client,
                 f.fk_statut, f.paye, f.type, f.fk_facture_source,
                 f.module_source, f.total_ht, f.total_tva, f.total_ttc,
@@ -421,13 +433,16 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       );
 
       const [payments] = await dolibarrPool.query(
-        `SELECT pf.fk_paiement, pf.amount, p.datep, p.num_paiement,
+        `SELECT pf.fk_paiement, pf.amount,
+                DATE_FORMAT(p.datep, '%Y-%m-%d') AS datep,
+                p.num_paiement,
                 cp.code AS method_code, cp.libelle AS method_label,
                 ba.label AS bank_label
          FROM llx_paiement_facture pf
          JOIN llx_paiement p ON p.rowid = pf.fk_paiement
          LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
-         LEFT JOIN llx_bank b ON b.fk_payment = p.rowid
+         LEFT JOIN llx_bank_url bu ON bu.url_id = p.rowid AND bu.type = 'payment'
+         LEFT JOIN llx_bank b ON b.rowid = bu.fk_bank
          LEFT JOIN llx_bank_account ba ON ba.rowid = b.fk_account
          WHERE pf.fk_facture = ?
          ORDER BY p.datep DESC`, [id]
@@ -468,6 +483,47 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
   });
 
   // ═══════════════════════════════════════════════════════════
+  // PDF — génère et stream le PDF via endpoint PHP custom Dolibarr
+  // (l'API REST /invoices/:id/builddoc renvoie 404 en v21)
+  // ═══════════════════════════════════════════════════════════
+  router.get('/:id/pdf', auth, async (req, res) => {
+    const invoiceId = parseInt(req.params.id);
+    if (!invoiceId) return res.status(400).json({ error: 'Id invalide' });
+    if (!DOLIBARR_WEBHOOK_SECRET) {
+      return res.status(500).json({ error: 'DOLIBARR_WEBHOOK_SECRET non configuré' });
+    }
+    try {
+      const phpRes = await axios.post(
+        DOC_BUILDDOC_URL,
+        { type: 'invoice', id: invoiceId },
+        {
+          headers: { 'X-Dolibarr-Secret': DOLIBARR_WEBHOOK_SECRET, 'Content-Type': 'application/json' },
+          responseType: 'arraybuffer',
+          timeout: 30000,
+          validateStatus: () => true,
+        }
+      );
+      const contentType = phpRes.headers['content-type'] || '';
+      if (phpRes.status >= 200 && phpRes.status < 300 && contentType.includes('application/pdf')) {
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', `inline; filename="invoice-${invoiceId}.pdf"`);
+        return res.send(Buffer.from(phpRes.data));
+      }
+      // Erreur côté PHP : décoder le JSON
+      let detail = 'Erreur génération PDF';
+      try {
+        const json = JSON.parse(Buffer.from(phpRes.data).toString());
+        detail = json.error || detail;
+        console.warn('[INVOICES /pdf] php endpoint error:', json);
+      } catch { void 0; }
+      return res.status(phpRes.status || 500).json({ error: detail });
+    } catch (err) {
+      console.error('[INVOICES /pdf] exception:', err.message);
+      res.status(500).json({ error: 'Erreur téléchargement PDF', detail: err.message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // PAY — encaissement manuel d'une facture impayée
   // ═══════════════════════════════════════════════════════════
   router.post('/:id/pay', auth, noCsrf, async (req, res) => {
@@ -477,12 +533,13 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
     const method = String(req.body?.method || '').toUpperCase();
     const bankAccount = parseInt(req.body?.bank_account);
     const datepRaw = req.body?.date || new Date().toISOString().split('T')[0];
+    const datepUnix = Math.floor(new Date(`${datepRaw}T12:00:00Z`).getTime() / 1000);
     const numPayment = String(req.body?.num_payment || '').slice(0, 64);
 
     if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
-    if (!PAYMENT_METHODS_ALLOWED.has(method)) return res.status(400).json({ error: 'Méthode de paiement invalide' });
-    if (!bankAccount) return res.status(400).json({ error: 'Compte bancaire requis' });
-    if (!(amountRaw > 0)) return res.status(400).json({ error: 'Montant invalide' });
+    if (!PAYMENT_METHODS_ALLOWED.has(method)) return res.status(400).json({ error: 'Méthode de paiement invalide', received: req.body?.method });
+    if (!bankAccount) return res.status(400).json({ error: 'Compte bancaire requis', received: req.body?.bank_account });
+    if (!(amountRaw > 0)) return res.status(400).json({ error: 'Montant invalide', received: req.body?.amount });
 
     try {
       const before = await loadInvoiceRow(dolibarrPool, id);
@@ -497,10 +554,13 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         return res.status(400).json({ error: `Montant supérieur au reste à payer (${remaining})` });
       }
 
+      const paymentId = await resolvePaymentId(dolibarrPool, method);
+      if (!paymentId) return res.status(400).json({ error: `Code paiement inconnu dans Dolibarr`, received: method });
+
       // Création du paiement via API Dolibarr (gère llx_paiement + llx_paiement_facture + llx_bank)
       const payRes = await adminApi.post(`/invoices/${id}/payments`, {
-        datepaye: datepRaw,
-        paymentid: paymentCodeId(method),
+        datepaye: datepUnix,
+        paymentid: paymentId,
         closepaidinvoices: 'yes',
         accountid: bankAccount,
         num_payment: numPayment || undefined,
@@ -748,10 +808,15 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
-// Mapping code paiement → fk_paiement (id Dolibarr) ; à ajuster selon
-// l'instance. Les codes principaux suivent les conventions Dolibarr standard.
-function paymentCodeId(code) {
-  // L'API Dolibarr /invoices/{id}/payments accepte aussi le code (string) ;
-  // on essaie le code direct, le serveur Dolibarr le résout.
-  return code;
+// Dolibarr v21 exige un id entier pour paymentid ; on résout dynamiquement
+// le code (LIQ/CB/CHQ/WAVE/OM/VIR) en id via llx_c_paiement, avec un cache mémoire.
+const paymentIdCache = new Map();
+async function resolvePaymentId(pool, code) {
+  if (paymentIdCache.has(code)) return paymentIdCache.get(code);
+  const [rows] = await pool.query(
+    `SELECT id FROM llx_c_paiement WHERE code = ? LIMIT 1`, [code]
+  );
+  const id = rows[0]?.id ? Number(rows[0].id) : null;
+  if (id) paymentIdCache.set(code, id);
+  return id;
 }

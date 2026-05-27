@@ -352,6 +352,45 @@
 }
 .ct-new-btn:hover { background: #0d4516; }
 
+/* ── Quote Modal ──────────────────────────────────────── */
+.ct-modal-large { max-width: 780px; max-height: 90vh; overflow-y: auto; }
+.ct-quote-form { display: flex; flex-direction: column; gap: 4px; }
+.ct-quote-section {
+  margin: 14px 0 6px; padding-top: 8px;
+  color: #10531a; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em;
+  border-top: 1px solid #e5e7eb;
+}
+.ct-quote-section:first-of-type { border-top: none; padding-top: 0; }
+.ct-quote-items { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.ct-quote-item-row {
+  display: grid; grid-template-columns: 1fr 110px auto auto; gap: 8px; align-items: center;
+}
+.ct-quote-item-label,
+.ct-quote-item-price {
+  padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 0.85rem;
+}
+.ct-quote-item-label:focus,
+.ct-quote-item-price:focus { border-color: #10531a; outline: none; }
+.ct-quote-item-price { text-align: right; }
+.ct-quote-item-unit { font-size: 0.78rem; color: #64748b; }
+.ct-quote-total {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 14px; padding: 12px 16px;
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px;
+  font-weight: 700; color: #10531a;
+}
+.ct-quote-total span:last-child { font-size: 1.1rem; }
+
+.ct-quotes-list { display: flex; flex-direction: column; gap: 6px; }
+.ct-quote-row {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
+  padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px;
+}
+.ct-quote-row-info { display: flex; flex-direction: column; gap: 2px; }
+.ct-quote-row-ref { font-family: monospace; font-weight: 700; color: #0f172a; font-size: 0.88rem; }
+.ct-quote-row-meta { font-size: 0.78rem; color: #64748b; }
+.ct-quote-row-total { font-weight: 700; color: #10531a; font-size: 0.95rem; white-space: nowrap; }
+
 /* ── Animations ───────────────────────────────────────── */
 @keyframes ct-fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ct-slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }

@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
-import { posSearchCustomers, posCreateCustomer } from '../../api/pos';
+import { posSearchCustomers, posCreateCustomer, posPromoteAuthorToCustomer } from '../../api/pos';
 import usePosCartStore from '../../store/posCartStore';
-import { FiX, FiSearch, FiUser, FiUserPlus } from 'react-icons/fi';
+import { FiX, FiSearch, FiUser, FiUserPlus, FiBookOpen } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import './CustomerSelect.css';
 
@@ -32,7 +32,21 @@ export default function CustomerSelect({ onClose }) {
     timer.current = setTimeout(() => doSearch(e.target.value), 300);
   };
 
-  const handleSelect = (c) => {
+  const handleSelect = async (c) => {
+    // Auteur local sans tier Dolibarr → on le promeut (création + lien)
+    // avant de l'utiliser, sinon la vente repartirait sur le client comptoir.
+    if (c.source === 'author_pending' && c.author_id) {
+      try {
+        const res = await posPromoteAuthorToCustomer(c.author_id);
+        setCustomer({ ...res.data, source: 'author' });
+        toast.success(`${res.data.name} ajouté comme client`);
+        onClose();
+        return;
+      } catch (err) {
+        toast.error(err.response?.data?.error || 'Erreur ajout auteur');
+        return;
+      }
+    }
     setCustomer(c);
     onClose();
   };
@@ -89,12 +103,33 @@ export default function CustomerSelect({ onClose }) {
 
             <div className="pos-cust-results">
               {loading && <div className="pos-cust-loading">Recherche...</div>}
-              {results.map((c) => (
-                <button key={c.id} className="pos-cust-result" onClick={() => handleSelect(c)}>
-                  <span className="pos-cust-name">{c.name}</span>
-                  <span className="pos-cust-detail">{c.email || c.phone}</span>
-                </button>
-              ))}
+              {results.map((c, idx) => {
+                const isAuthor = c.source === 'author' || c.source === 'author_pending';
+                const pending = c.source === 'author_pending';
+                return (
+                  <button
+                    key={c.id ?? `author-${c.author_id ?? idx}`}
+                    className="pos-cust-result"
+                    onClick={() => handleSelect(c)}
+                  >
+                    <span className="pos-cust-name" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      {isAuthor && <FiBookOpen size={12} style={{ color: '#7c3aed' }} />}
+                      {c.name}
+                      {isAuthor && (
+                        <span style={{
+                          background: pending ? '#fef3c7' : '#ede9fe',
+                          color: pending ? '#92400e' : '#6d28d9',
+                          padding: '1px 6px', borderRadius: 10,
+                          fontSize: 10, fontWeight: 700,
+                        }}>
+                          {pending ? 'AUTEUR (à lier)' : 'AUTEUR'}
+                        </span>
+                      )}
+                    </span>
+                    <span className="pos-cust-detail">{c.email || c.phone}</span>
+                  </button>
+                );
+              })}
               {!loading && query.length >= 2 && results.length === 0 && (
                 <div className="pos-cust-empty">Aucun client trouvé</div>
               )}

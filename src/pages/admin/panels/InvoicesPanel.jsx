@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   FiFileText, FiDollarSign, FiRefreshCw, FiEdit, FiTrash2, FiUser,
   FiCornerUpLeft, FiX, FiAlertTriangle, FiList, FiCalendar, FiPrinter,
-  FiDownload,
+  FiDownload, FiSearch,
 } from 'react-icons/fi';
 import {
   listInvoices, getInvoice, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
@@ -114,7 +114,42 @@ export default function InvoicesPanel() {
         </div>
       )}
 
-      {/* Filtres */}
+      {/* Barre de recherche proéminente */}
+      <div style={{
+        position: 'relative', marginBottom: 12,
+        background: '#fff', borderRadius: 10, boxShadow: '0 1px 4px rgba(0,0,0,.06)',
+      }}>
+        <FiSearch style={{
+          position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
+          color: '#9ca3af', fontSize: 18, pointerEvents: 'none',
+        }} />
+        <input
+          type="text"
+          value={filters.search}
+          onChange={e => update('search', e.target.value)}
+          placeholder="Rechercher par référence (LIBFAC…), nom client, code client, email, ville ou téléphone…"
+          style={{
+            width: '100%', padding: '12px 44px 12px 42px', border: '1px solid #e5e7eb',
+            borderRadius: 10, fontSize: 14, background: 'transparent', outline: 'none',
+          }}
+        />
+        {filters.search && (
+          <button
+            type="button"
+            onClick={() => update('search', '')}
+            title="Effacer"
+            style={{
+              position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
+              background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280',
+              padding: 6, display: 'flex',
+            }}
+          >
+            <FiX />
+          </button>
+        )}
+      </div>
+
+      {/* Filtres avancés */}
       <div className="ac-filters">
         <div className="ac-filter-group">
           <label className="ac-filter-label">Statut</label>
@@ -127,12 +162,6 @@ export default function InvoicesPanel() {
           <select className="ac-filter-select" value={filters.source} onChange={e => update('source', e.target.value)}>
             {SOURCE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-        </div>
-        <div className="ac-filter-group">
-          <label className="ac-filter-label">Recherche (ref / client)</label>
-          <input className="ac-filter-input" type="text" value={filters.search}
-            placeholder="LIBFAC… ou nom client"
-            onChange={e => update('search', e.target.value)} />
         </div>
         <div className="ac-filter-group">
           <label className="ac-filter-label">Du</label>
@@ -494,11 +523,14 @@ function PayFields({ invoice, extra, setExtra }) {
   const [banks, setBanks] = useState([]);
   useEffect(() => { getInvoiceBanks().then(r => setBanks(r.data.accounts || [])); }, []);
   const remaining = Number(invoice.total_ttc) - Number(invoice.paid_amount || 0);
+  useEffect(() => {
+    if (extra.amount == null) setExtra(prev => ({ ...prev, amount: remaining }));
+  }, [remaining]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="ac-form-grid">
       <div>
         <label className="ac-form-label">Montant *</label>
-        <input type="number" className="ac-form-input" step="100" min="1" max={remaining}
+        <input type="number" className="ac-form-input" step="1" min="1" max={remaining}
           required value={extra.amount ?? remaining}
           onChange={e => setExtra({ ...extra, amount: Number(e.target.value) })} />
         <div style={{ fontSize: '0.7rem', color: '#64748b' }}>Reste à payer : {formatPrice(remaining)}</div>

@@ -20,6 +20,9 @@ export const posSearchCustomers = (q) => api.get('/pos/customers/search', { para
 
 export const posCreateCustomer = (data) => api.post('/pos/customers', data);
 
+// Promeut un auteur local en client POS (crée le tier Dolibarr si absent).
+export const posPromoteAuthorToCustomer = (authorId) => api.post(`/pos/customers/from-author/${authorId}`);
+
 export const posCreateSale = (data) => api.post('/pos/sales', {
   ...data,
   terminal: getTerminal(),
@@ -36,6 +39,8 @@ export const posOpenSession = (data) => api.post('/pos/session/open', { ...data,
 export const posCloseSession = (data) => api.post('/pos/session/close', { ...data, terminal: getTerminal() });
 
 export const posGetCurrentSession = () => api.get('/pos/session/current', { params: { terminal: getTerminal() } });
+
+export const posGetSessionReport = () => api.get('/pos/session/report', { params: { terminal: getTerminal() } });
 
 export const posCashInOut = (data) => api.post('/pos/session/cash-in-out', data);
 
@@ -54,6 +59,8 @@ export const posCreateReturn = (data) => api.post('/pos/returns', { ...data, ter
 
 // Device management
 export const posEnrollDevice = (code, device_name) => api.post('/pos/devices/enroll', { code, device_name });
-export const posGenerateEnrollCode = (device_name) => api.post('/pos/devices/generate-code', { device_name });
+export const posGenerateEnrollCode = (device_name, terminal) => api.post('/pos/devices/generate-code', { device_name, terminal });
 export const posListDevices = () => api.get('/pos/devices');
 export const posRevokeDevice = (id) => api.delete(`/pos/devices/${id}`);
+export const posListTerminalSlots = () => api.get('/pos/devices/terminals');
+export const posReassignTerminal = (id, terminal) => api.patch(`/pos/devices/${id}/terminal`, { terminal });

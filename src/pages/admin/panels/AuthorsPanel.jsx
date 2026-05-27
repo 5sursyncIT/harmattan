@@ -139,7 +139,11 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
         {!loading && data && (
           <div className="admin-modal-body">
             <div className="admin-info-grid">
-              <div><strong>Email</strong><span>{data.author.email} {data.author.email_verified ? <FiCheckCircle style={{ color: '#10531a', verticalAlign: 'middle' }} /> : null}</span></div>
+              <div><strong>Email</strong><span>
+                {data.author.email
+                  ? <>{data.author.email} {data.author.email_verified ? <FiCheckCircle style={{ color: '#10531a', verticalAlign: 'middle' }} /> : null}</>
+                  : <em style={{ color: '#9ca3af' }}>aucun email saisi</em>}
+              </span></div>
               <div><strong>Téléphone</strong><span>{data.author.phone || '—'}</span></div>
               <div><strong>Inscrit le</strong><span>{formatDate(data.author.created_at)}</span></div>
               <div>
@@ -338,19 +342,24 @@ export default function AuthorsPanel() {
                 <tr key={a.id}>
                   <td>
                     <strong>{a.firstname} {a.lastname}</strong>
-                    {!a.email_verified && <span style={{ marginLeft: 6, fontSize: 11, color: '#dc2626' }}>(email non vérifié)</span>}
+                    {a.email && !a.email_verified && <span style={{ marginLeft: 6, fontSize: 11, color: '#dc2626' }}>(email non vérifié)</span>}
+                    {!a.email && <span style={{ marginLeft: 6, fontSize: 11, color: '#9ca3af', fontStyle: 'italic' }}>(sans email)</span>}
                     {a.public_listed ? (
                       <span style={{ marginLeft: 6, fontSize: 10, padding: '2px 6px', background: '#dcfce7', color: '#166534', borderRadius: 999, fontWeight: 700 }}>PUBLIC</span>
                     ) : null}
                   </td>
-                  <td><a href={`mailto:${a.email}`} style={{ color: '#10531a' }}>{a.email}</a></td>
+                  <td>
+                    {a.email
+                      ? <a href={`mailto:${a.email}`} style={{ color: '#10531a' }}>{a.email}</a>
+                      : <span style={{ color: '#9ca3af' }}>—</span>}
+                  </td>
                   <td>{a.phone || '—'}</td>
                   <td style={{ textAlign: 'center' }}>{a.manuscript_count || 0}</td>
                   <td><StageBadge stage={a.latest_stage} /></td>
                   <td>{formatDate(a.created_at)}</td>
                   <td>
                     <button className="btn-ghost" onClick={() => setSelected(a.id)} title="Voir détails"><FiEye /></button>
-                    <a href={`mailto:${a.email}`} className="btn-ghost" title="Envoyer un email"><FiMail /></a>
+                    {a.email && <a href={`mailto:${a.email}`} className="btn-ghost" title="Envoyer un email"><FiMail /></a>}
                   </td>
                 </tr>
               ))

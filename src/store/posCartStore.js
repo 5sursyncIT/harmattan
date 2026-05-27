@@ -34,14 +34,25 @@ const usePosCartStore = create(persist((set, get) => ({
     return get().items.find((i) => i.product_id === id) || null;
   },
 
-  setPrice: (productId, price) => {
+  // Modifie le prix d'une ligne. Pour les produits référencés (non `is_free`),
+  // un `reason` non vide est requis : il est attaché à la ligne pour l'audit
+  // (envoyé au serveur et tracé dans la note de facture). Pour les produits
+  // libres, le prix est libre par construction et `reason` est optionnel.
+  setPrice: (productId, price, reason) => {
     const p = Math.max(0, parseInt(price, 10) || 0);
     set({
-      items: get().items.map((i) =>
-        i.product_id === productId
-          ? { ...i, price_ttc: p, line_total: calcLineTotal(p, i.qty, i.discount) }
-          : i
-      ),
+      items: get().items.map((i) => {
+        if (i.product_id !== productId) return i;
+        const overridden = !i.is_free && p !== Math.round(i.price_original ?? i.price_ttc);
+        return {
+          ...i,
+          price_ttc: p,
+          // Conserve le prix de référence initial à la première modification
+          price_original: i.price_original ?? (i.is_free ? null : i.price_ttc),
+          price_override_reason: overridden ? (reason || i.price_override_reason || null) : null,
+          line_total: calcLineTotal(p, i.qty, i.discount),
+        };
+      }),
     });
   },
 

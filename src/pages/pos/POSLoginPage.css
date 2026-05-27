@@ -61,14 +61,16 @@
   margin-bottom: 12px;
 }
 
-.pos-numpad {
+/* Scopé sous .pos-login pour éviter d'écraser le pavé numérique du POS
+   principal (POSNumpad.css) qui partage les mêmes noms de classes. */
+.pos-login .pos-numpad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
   margin-bottom: 20px;
 }
 
-.pos-numpad-btn {
+.pos-login .pos-numpad-btn {
   height: 60px;
   font-size: 1.4rem;
   font-weight: 600;
@@ -83,22 +85,22 @@
   justify-content: center;
 }
 
-.pos-numpad-btn:active {
+.pos-login .pos-numpad-btn:active {
   background: #10531a;
   color: #fff;
   transform: scale(0.95);
 }
 
-.pos-numpad-btn:disabled {
+.pos-login .pos-numpad-btn:disabled {
   opacity: 0.5;
 }
 
-.pos-numpad-clear {
+.pos-login .pos-numpad-clear {
   color: #e74c3c;
   font-weight: 700;
 }
 
-.pos-numpad-delete {
+.pos-login .pos-numpad-delete {
   color: #888;
 }
 
