@@ -182,6 +182,16 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // Déduplique les ventes : un même client_sale_id ne crée qu'une facture,
   // quel que soit le nombre de soumissions (double-clic, rejeu file offline,
   // réponse réseau perdue).
+  // Idempotence retours/avoirs — pattern identique à `pos_sale_idempotency`
+  // pour éviter qu'un double-clic UI ou un retry réseau crée deux avoirs.
+  db.exec(`CREATE TABLE IF NOT EXISTS pos_return_idempotency (
+    client_return_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    response TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.prepare("DELETE FROM pos_return_idempotency WHERE created_at < datetime('now', '-7 days')").run();
+
   db.exec(`CREATE TABLE IF NOT EXISTS pos_sale_idempotency (
     client_sale_id TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'processing',
@@ -199,6 +209,19 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     ).run(id);
     try {
       db.prepare("INSERT INTO pos_sale_idempotency (client_sale_id, status) VALUES (?, 'processing')").run(id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Mirror de `claimSaleId` pour les retours.
+  function claimReturnId(id) {
+    db.prepare(
+      "DELETE FROM pos_return_idempotency WHERE client_return_id = ? AND status = 'processing' AND created_at < datetime('now', '-2 minutes')",
+    ).run(id);
+    try {
+      db.prepare("INSERT INTO pos_return_idempotency (client_return_id, status) VALUES (?, 'processing')").run(id);
       return true;
     } catch {
       return false;
@@ -1161,12 +1184,32 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const inv = invoices[0];
       // Quantités déjà retournées — pour borner ce qui reste retournable.
       const returned = await getReturnedQuantities(inv.id);
+
+      // Moyens de paiement utilisés sur la facture d'origine — utilisé côté UI
+      // pour pré-sélectionner le moyen de remboursement et imposer une
+      // validation manager si le caissier veut rembourser via un autre canal.
+      let originalPaymentMethods = [];
+      try {
+        const [methodRows] = await dolibarrPool.query(
+          `SELECT DISTINCT cp.code
+             FROM llx_paiement_facture pf
+             JOIN llx_paiement p ON p.rowid = pf.fk_paiement
+             JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+            WHERE pf.fk_facture = ?`,
+          [inv.id],
+        );
+        originalPaymentMethods = methodRows.map((r) => normalizePaymentCode(r.code)).filter(Boolean);
+      } catch (e) {
+        console.warn('Original payment methods lookup error:', e.message);
+      }
+
       res.json({
         id: inv.id,
         ref: inv.ref,
         total_ttc: parseFloat(inv.total_ttc),
         date: inv.date,
         customer_name: inv.thirdparty?.name || '',
+        original_payment_methods: originalPaymentMethods,
         lines: (inv.lines || []).map(l => {
           const qty = parseInt(l.qty);
           const alreadyReturned = returned[l.fk_product] || 0;
@@ -1191,10 +1234,83 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // Create credit note (return)
   router.post('/returns', requirePosAuth, csrfProtection, async (req, res) => {
     try {
-      const { invoice_id, invoice_ref, items, reason, refund_method } = req.body;
+      const { invoice_id, invoice_ref, items, reason, refund_method, client_return_id, manager_pin } = req.body;
       const terminal = getTerminal(req);
 
       if (!invoice_id || !items?.length) return res.status(400).json({ error: 'Facture et articles requis' });
+      if (client_return_id && (typeof client_return_id !== 'string' || client_return_id.length > 64)) {
+        return res.status(400).json({ error: 'client_return_id invalide' });
+      }
+
+      // FIX #1 — Idempotence : si déjà finalisé, on rejoue la réponse.
+      if (client_return_id) {
+        const done = db.prepare(
+          "SELECT response FROM pos_return_idempotency WHERE client_return_id = ? AND status = 'done'",
+        ).get(client_return_id);
+        if (done) return res.json({ ...JSON.parse(done.response), idempotent_replay: true });
+      }
+
+      // FIX #5 — Vérifie que le compte bancaire du moyen de remboursement est
+      // configuré AVANT toute écriture. Sinon on créerait un avoir orphelin
+      // sans la ligne bancaire compensatoire (catch silencieux plus bas).
+      const refundMethod = PAYMENT_MAP[refund_method] ? refund_method : 'LIQ';
+      const refundMapping = PAYMENT_MAP[refundMethod];
+      if (!refundMapping?.bankAccount) {
+        return res.status(400).json({
+          error: `Le moyen de remboursement « ${refundMapping?.label || refundMethod} » n'a pas de compte bancaire configuré.`,
+        });
+      }
+
+      // FIX #2+#3 — Cross-method requiert un PIN manager. On récupère d'abord
+      // les moyens de paiement de la facture source.
+      let originalMethods = [];
+      try {
+        const [rows] = await dolibarrPool.query(
+          `SELECT DISTINCT cp.code
+             FROM llx_paiement_facture pf
+             JOIN llx_paiement p ON p.rowid = pf.fk_paiement
+             JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+            WHERE pf.fk_facture = ?`,
+          [invoice_id],
+        );
+        originalMethods = rows.map((r) => normalizePaymentCode(r.code)).filter(Boolean);
+      } catch (e) {
+        console.warn('Return — original methods lookup failed:', e.message);
+      }
+      const crossMethod = originalMethods.length > 0 && !originalMethods.includes(refundMethod);
+      let managerOverrideId = null;
+      if (crossMethod && req.posStaff.role !== 'manager') {
+        if (!manager_pin || typeof manager_pin !== 'string') {
+          return res.status(403).json({
+            error: `Remboursement en ${refundMapping.label} alors que la vente initiale était en ${originalMethods.join('/')}. Un PIN manager est requis.`,
+            code: 'MANAGER_PIN_REQUIRED',
+            original_methods: originalMethods,
+          });
+        }
+        // Vérifie le PIN manager — bcrypt comparaison constant-time.
+        const managers = db.prepare(
+          "SELECT id, name, pin FROM pos_staff WHERE role = 'manager' AND active = 1",
+        ).all();
+        const match = managers.find((m) => bcrypt.compareSync(String(manager_pin), m.pin));
+        if (!match) {
+          return res.status(403).json({ error: 'PIN manager invalide', code: 'MANAGER_PIN_INVALID' });
+        }
+        managerOverrideId = match.id;
+        // Audit immédiat — quel manager a validé quel cross-method.
+        try {
+          db.prepare(
+            "INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)",
+          ).run(
+            req.posStaff.name || 'pos',
+            'pos_refund_method_override',
+            `T${terminal} | caissier=${req.posStaff.name} | manager=${match.name} | facture=${invoice_ref} | original=${originalMethods.join(',')} → remboursement=${refundMethod}`,
+          );
+        } catch (e) { void e; }
+      }
+
+      if (client_return_id && !claimReturnId(client_return_id)) {
+        return res.status(409).json({ error: 'Remboursement déjà en cours de traitement', code: 'RETURN_IN_PROGRESS' });
+      }
 
       // Get original invoice
       const original = await adminApi.get(`/invoices/${invoice_id}`);
@@ -1261,7 +1377,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         module_source: 'takepos',
         pos_source: String(terminal),
         lines,
-        note_private: `AVOIR POS T${terminal} | ${req.posStaff.name} | Ref: ${invoice_ref} | Motif: ${reason || 'Retour'}`,
+        note_private: `AVOIR POS T${terminal} | caissier=${req.posStaff.name}${managerOverrideId ? ` | manager-override=${managerOverrideId}` : ''} | Ref: ${invoice_ref} | Motif: ${reason || 'Retour'}${crossMethod ? ` | ${originalMethods.join(',')}→${refundMethod}` : ''}`,
       });
 
       const creditId = creditRes.data;
@@ -1269,8 +1385,6 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
       const creditDetail = await adminApi.get(`/invoices/${creditId}`);
       const refundAmount = Math.abs(parseFloat(creditDetail.data.total_ttc)) || 0;
-      const refundMethod = PAYMENT_MAP[refund_method] ? refund_method : 'LIQ';
-      const refundMapping = PAYMENT_MAP[refundMethod];
 
       // Rattacher le remboursement à la session de caisse ouverte sur ce
       // terminal — la clôture de caisse en tiendra compte.
@@ -1310,16 +1424,30 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         console.error('POS return — création ligne bancaire échouée (avoir créé):', bankErr.message);
       }
 
-      res.json({
+      const response = {
         credit_id: creditId,
         credit_ref: creditDetail.data.ref,
         total_ttc: parseFloat(creditDetail.data.total_ttc),
         original_ref: invoice_ref,
         refund_method: refundMethod,
         refund_amount: refundAmount,
-      });
+      };
+
+      // FIX #1 — cache la réponse pour rejouer un éventuel retry idempotent.
+      if (client_return_id) {
+        try {
+          db.prepare("UPDATE pos_return_idempotency SET status = 'done', response = ? WHERE client_return_id = ?")
+            .run(JSON.stringify(response), client_return_id);
+        } catch (e) { void e; }
+      }
+
+      res.json(response);
     } catch (err) {
       console.error('POS return error:', err.response?.data || err.message);
+      // Libère le claim pour permettre un retry propre.
+      if (req.body?.client_return_id) {
+        try { db.prepare('DELETE FROM pos_return_idempotency WHERE client_return_id = ?').run(req.body.client_return_id); } catch { /* ignore */ }
+      }
       res.status(500).json({ error: 'Erreur création avoir' });
     }
   });

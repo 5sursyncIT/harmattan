@@ -53,6 +53,7 @@ const NAV_GROUPS = [
     label: 'Ventes',
     items: [
       { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
+      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support', 'librarian', 'comptable'] },
       { path: 'invoices', label: 'Factures', icon: <FiFileText />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
       { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin', 'comptable'] },
       { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin', 'comptable'] },
@@ -68,7 +69,6 @@ const NAV_GROUPS = [
       { path: 'faq', label: 'FAQ', icon: <FiHelpCircle />, roles: ['super_admin', 'admin', 'support'] },
       { path: 'contacts', label: 'Messages', icon: <FiMail />, roles: ['super_admin', 'admin', 'support'] },
       { path: 'newsletter', label: 'Newsletter', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support'] },
-      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support', 'librarian', 'comptable'] },
       { path: 'customers', label: 'Comptes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'support'] },
     ],
   },

@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { FiPackage, FiAlertTriangle, FiTrendingUp, FiClock, FiDollarSign, FiArchive, FiRefreshCw, FiList } from 'react-icons/fi';
+import { FiPackage, FiAlertTriangle, FiTrendingUp, FiClock, FiArchive, FiRefreshCw, FiList } from 'react-icons/fi';
 import { getStockDashboard, runStockBatch } from '../../../api/admin';
-import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Stock.css';
@@ -77,7 +76,6 @@ export default function StockDashboardPanel() {
       {/* KPIs */}
       <div className="sk-kpi-grid">
         <KPI icon={<FiPackage size={20} />} value={data.total_products?.toLocaleString('fr-FR')} label="Références actives" />
-        <KPI icon={<FiDollarSign size={20} />} value={formatPrice(data.value_public)} label="Valeur stock (prix public)" color="#0284c7" />
         <KPI icon={<FiAlertTriangle size={20} />} value={data.ruptures} label={`Ruptures (${data.taux_rupture}%)`} color="#dc2626" />
         <KPI icon={<FiArchive size={20} />} value={data.stock_bas} label="Stock bas" color="#f59e0b" />
         <KPI icon={<FiClock size={20} />} value={`${data.avg_coverage_days}j`} label="Couverture moyenne" color="#7c3aed" />
