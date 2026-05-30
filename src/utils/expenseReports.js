@@ -3,7 +3,7 @@
 // HTML stylée + window.print(). Calque de utils/invoiceReports.js.
 //
 // Le rapport rapproche les RECETTES encaissées (Dolibarr, lecture seule) et les
-// DÉPENSES natives sur la période → solde net de caisse.
+// DÉPENSES natives (prises dans la caisse POS) sur la période → solde net de caisse.
 
 const fmtDateFr = (d) => (d ? new Date(d).toLocaleDateString('fr-FR') : '');
 const fmtNum = (n) => new Intl.NumberFormat('fr-FR').format(Math.round(Number(n) || 0));
@@ -44,7 +44,6 @@ export function downloadCashCsv({ report, title, periodLabel, filename }) {
   lines.push(['Recettes encaissées', fmtNum(report.receipts_total)].map(csvEscape).join(sep));
   lines.push(['Total des dépenses', fmtNum(report.expenses_total)].map(csvEscape).join(sep));
   lines.push(['Solde net (recettes − dépenses)', fmtNum(report.net)].map(csvEscape).join(sep));
-  lines.push(['Approvisionnements de caisse', fmtNum(report.topups_total)].map(csvEscape).join(sep));
   lines.push('');
 
   // Recettes par méthode
@@ -64,7 +63,7 @@ export function downloadCashCsv({ report, title, periodLabel, filename }) {
   lines.push('');
 
   // Détail des dépenses
-  const headers = ['Référence', 'Date', 'Catégorie', 'Bénéficiaire', 'Méthode', 'Source', 'Montant (FCFA)', 'Motif', 'Saisi par'];
+  const headers = ['Référence', 'Date', 'Catégorie', 'Bénéficiaire', 'Montant (FCFA)', 'Motif', 'Saisi par', 'Origine'];
   lines.push(headers.map(csvEscape).join(sep));
   for (const e of (report.expenses || [])) {
     lines.push([
@@ -72,11 +71,10 @@ export function downloadCashCsv({ report, title, periodLabel, filename }) {
       fmtDateFr(e.expense_date || e.created_at),
       e.category_label,
       e.beneficiary,
-      e.method_label,
-      e.source_label,
       fmtNum(e.amount),
       e.reason,
       e.created_by,
+      e.in_register ? `Caisse${e.terminal ? ' T' + e.terminal : ''}` : 'Hors-caisse',
     ].map(csvEscape).join(sep));
   }
 
@@ -139,7 +137,6 @@ export function openCashPdf({ report, title, periodLabel }) {
       <td>${escapeHtml(fmtDateFr(e.expense_date || e.created_at))}</td>
       <td>${escapeHtml(e.category_label)}</td>
       <td>${escapeHtml(e.beneficiary)}</td>
-      <td>${escapeHtml(e.method_label)}</td>
       <td class="num">${escapeHtml(fmtNum(e.amount))}</td>
       <td>${escapeHtml(e.reason)}</td>
     </tr>`).join('');
@@ -194,7 +191,6 @@ export function openCashPdf({ report, title, periodLabel }) {
     <div class="kpi in"><div class="label">Recettes encaissées</div><div class="value">${escapeHtml(fmtNum(report.receipts_total))} FCFA</div></div>
     <div class="kpi out"><div class="label">Total des dépenses</div><div class="value">${escapeHtml(fmtNum(report.expenses_total))} FCFA</div></div>
     <div class="kpi ${net >= 0 ? 'net-pos' : 'net-neg'}"><div class="label">Solde net</div><div class="value">${escapeHtml(fmtNum(net))} FCFA</div></div>
-    <div class="kpi"><div class="label">Approvisionnements</div><div class="value">${escapeHtml(fmtNum(report.topups_total))} FCFA</div></div>
   </div>
 
   <h2>Dépenses par catégorie</h2>
@@ -216,8 +212,8 @@ export function openCashPdf({ report, title, periodLabel }) {
 
   <h2>Détail des dépenses</h2>
   <table>
-    <thead><tr><th>Référence</th><th>Date</th><th>Catégorie</th><th>Bénéficiaire</th><th>Méthode</th><th class="num">Montant</th><th>Motif</th></tr></thead>
-    <tbody>${detailRows || '<tr><td colspan="7" class="empty">Aucune dépense sur cette période</td></tr>'}</tbody>
+    <thead><tr><th>Référence</th><th>Date</th><th>Catégorie</th><th>Bénéficiaire</th><th class="num">Montant</th><th>Motif</th></tr></thead>
+    <tbody>${detailRows || '<tr><td colspan="6" class="empty">Aucune dépense sur cette période</td></tr>'}</tbody>
   </table>
 
   <div class="footer">L'Harmattan Sénégal — Rapport de caisse généré automatiquement</div>
@@ -229,7 +225,7 @@ export function openCashPdf({ report, title, periodLabel }) {
   win.document.close();
 }
 
-// ─── Helpers de période (identiques à invoiceReports) ──────────────
+// ─── Helpers de période ────────────────────────────────────────────
 export function dailyRange(dateIso) {
   return { date_from: dateIso, date_to: dateIso };
 }

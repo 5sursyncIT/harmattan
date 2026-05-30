@@ -17,6 +17,7 @@ import POSQuoteReceipt from '../../components/pos/POSQuoteReceipt';
 import CustomerSelect from '../../components/pos/CustomerSelect';
 import CashRegister from '../../components/pos/CashRegister';
 import POSCashReport from '../../components/pos/POSCashReport';
+import POSExpense from '../../components/pos/POSExpense';
 import POSOpenSessionScreen from '../../components/pos/POSOpenSessionScreen';
 import POSChangePin from '../../components/pos/POSChangePin';
 import POSReturn from '../../components/pos/POSReturn';
@@ -48,6 +49,7 @@ export default function POSPage() {
   const [showCustomer, setShowCustomer] = useState(false);
   const [showCashRegister, setShowCashRegister] = useState(false);
   const [showCashReport, setShowCashReport] = useState(false);
+  const [showExpense, setShowExpense] = useState(false);
   const [completedSale, setCompletedSale] = useState(null);
   const [completedQuote, setCompletedQuote] = useState(null);
   const [session, setSession] = useState(null);
@@ -276,6 +278,7 @@ export default function POSPage() {
             onPay={() => { setPaymentSplitMode(false); setActivePanel('ticket'); setShowPayment(true); }}
             onPayCash={handlePayCash}
             onUnpaid={() => setShowUnpaid(true)}
+            onExpense={() => setShowExpense(true)}
             onCashReport={handleCashReport}
             onCloseRegister={() => setShowCashRegister(true)}
           />
@@ -323,6 +326,14 @@ export default function POSPage() {
 
       {showCashReport && (
         <POSCashReport onClose={() => setShowCashReport(false)} />
+      )}
+
+      {showExpense && (
+        <POSExpense
+          session={session}
+          onClose={() => setShowExpense(false)}
+          onDone={loadSession}
+        />
       )}
 
       {showChangePin && (

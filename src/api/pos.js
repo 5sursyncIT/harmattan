@@ -44,6 +44,10 @@ export const posGetSessionReport = () => api.get('/pos/session/report', { params
 
 export const posCashInOut = (data) => api.post('/pos/session/cash-in-out', data);
 
+// Sorties d'argent / dépenses (prises dans la caisse POS, manager requis)
+export const posGetExpenseCategories = () => api.get('/pos/expenses/categories');
+export const posRecordExpense = (data) => api.post('/pos/expenses', { ...data, terminal: getTerminal() });
+
 export const posCreateQuote = (data) => api.post('/pos/quotes', {
   ...data,
   terminal: getTerminal(),

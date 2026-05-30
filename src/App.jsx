@@ -105,6 +105,7 @@ const DevisPanel = lazy(() => import('./pages/admin/panels/DevisPanel'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
+const StockAdjustPanel = lazy(() => import('./pages/admin/panels/StockAdjustPanel'));
 const StockRecommendationsPanel = lazy(() => import('./pages/admin/panels/StockRecommendationsPanel'));
 const StockPurchaseOrdersPanel = lazy(() => import('./pages/admin/panels/StockPurchaseOrdersPanel'));
 const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'));
@@ -198,6 +199,7 @@ export default function App() {
             <Route path="stock" element={<StockDashboardPanel />} />
             <Route path="stock/alerts" element={<StockAlertsPanel />} />
             <Route path="stock/products" element={<StockProductsPanel />} />
+            <Route path="stock/adjust" element={<StockAdjustPanel />} />
             <Route path="stock/recommendations" element={<StockRecommendationsPanel />} />
             <Route path="stock/purchase-orders" element={<StockPurchaseOrdersPanel />} />
             <Route path="suppliers" element={<SuppliersPanel />} />

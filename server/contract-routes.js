@@ -4,6 +4,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { transition as wfTransition } from './manuscript-workflow.js';
+import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 
 // ─── Shared admin Dolibarr API client ────────────────────
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -1030,46 +1031,39 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   router.post('/thirdparties', auth, csrfProtection, async (req, res) => {
     try {
       const name = String(req.body.name || '').trim();
+      const firstname = String(req.body.firstname || '').trim();
       const email = String(req.body.email || '').trim();
       const phone = String(req.body.phone || '').trim();
       const address = String(req.body.address || '').trim();
 
-      if (name.length < 2) return res.status(400).json({ error: 'Nom requis (2 caractères min.)' });
-      if (!email) return res.status(400).json({ error: 'Email requis' });
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        return res.status(400).json({ error: 'Email invalide' });
-      }
-      if (!phone) return res.status(400).json({ error: 'Téléphone requis' });
-      if (phone.replace(/[\s.\-()]/g, '').length < 6) {
-        return res.status(400).json({ error: 'Téléphone invalide' });
-      }
+      // Un auteur est un particulier : nom + prénom + (téléphone OU email).
+      const vErr = validateTierIdentity({ name, firstname, email, phone, isCompany: false });
+      if (vErr) return res.status(400).json({ error: vErr });
 
-      // Doublon : si un thirdparty existe déjà avec ce nom (exact, insensible à la casse), le retourner
+      // Doublon : on rapproche par identité fiable (email puis téléphone), JAMAIS
+      // par le nom (patronymes communs = personnes distinctes). Si un tier actif
+      // correspond, on le réutilise plutôt que d'en créer un doublon.
       try {
-        const safeName = safeSql(name);
-        const dup = await adminApi.get('/thirdparties', {
-          params: { sqlfilters: `(t.nom:=:'${safeName}')`, limit: 1 },
-        });
-        if (Array.isArray(dup.data) && dup.data.length > 0) {
-          const t = dup.data[0];
+        const existing = await findExistingTier(dolibarrPool, { email, phone });
+        if (existing) {
           return res.status(200).json({
             created: false,
-            id: t.id, name: t.name || t.nom, email: t.email, phone: t.phone,
+            id: existing.id, name: existing.name, email: existing.email, phone: existing.phone,
+            matchedBy: existing.matchedBy,
           });
         }
       } catch (dupErr) {
-        if (dupErr.response?.status !== 404) {
-          console.warn('Thirdparty dedup check warning:', dupErr.message);
-        }
+        console.warn('Thirdparty dedup check warning:', dupErr.message);
       }
 
       const createRes = await adminApi.post('/thirdparties', {
-        name,
+        name: buildTierName({ name, firstname, isCompany: false }),
         email: email || '',
         phone: phone || '',
         address: address || '',
         client: 1,
         code_client: -1,
+        typent_id: TYPENT_PARTICULIER,
       });
 
       const newId = createRes.data;

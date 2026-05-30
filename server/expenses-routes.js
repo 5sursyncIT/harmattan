@@ -1,28 +1,32 @@
 /**
  * Expenses Routes — Sorties d'argent / Dépenses (module NATIF).
  *
- * Enregistre toute sortie d'argent de l'entreprise (loyer, salaires, fournitures,
- * transport, services, taxes…) avec :
- *   - justification obligatoire (motif + catégorie + bénéficiaire + méthode + source) ;
+ * Enregistre toute sortie d'argent prise DANS LA CAISSE POS (loyer, salaires,
+ * fournitures, transport, services, taxes…) avec :
+ *   - justification obligatoire (motif + catégorie + bénéficiaire) ;
  *   - traçabilité complète (qui/quand/combien/pourquoi) via expense_audit_log immuable ;
- *   - notification automatique des admins dès qu'un retrait est enregistré (email + badge) ;
- *   - suivi du solde par source de fonds (caisse, banque, Wave, OM…).
+ *   - notification automatique des admins dès qu'un retrait est enregistré (email + badge).
  *
- * Workflow « a posteriori » : la dépense est enregistrée immédiatement (pas de blocage),
- * les admins sont notifiés juste après. L'annulation (réservée admin) reste tracée.
+ * SAISIE : uniquement au POS (par le caissier/manager). La dépense est posée comme
+ * un mouvement de caisse `out` (pos_cash_movements) rattaché à la session POS ouverte,
+ * donc DÉDUITE automatiquement par le rapport de caisse et la clôture. Si aucune session
+ * n'est ouverte, la dépense est tout de même enregistrée (hors-caisse) pour la traçabilité.
  *
- * 100 % natif SQLite — aucune écriture dans Dolibarr. La lecture des recettes encaissées
- * (pour le rapport de caisse net) interroge llx_paiement en lecture seule.
+ * Cet écran admin est en CONSULTATION : liste, détail, journal d'audit, rapport de caisse
+ * (recettes encaissées − dépenses = solde net) et ANNULATION (admins). La création se fait
+ * au POS via [server/pos-routes.js] qui réutilise les helpers exportés ci-dessous.
  *
- * Sécurité : monté sur /api/admin/expenses, whitelist RBAC (super_admin, admin, comptable)
- * dans roles-config.js. Mutations protégées CSRF. Actions sensibles (annulation, sources,
- * approvisionnements) réservées aux admins par garde-fou applicatif.
+ * 100 % natif SQLite — aucune écriture comptable Dolibarr (la ligne de banque caisse est
+ * créée côté POS comme pour tout mouvement de caisse).
+ *
+ * Sécurité : monté sur /api/admin/expenses, whitelist RBAC (super_admin, admin, comptable).
+ * Annulation réservée aux admins (garde-fou applicatif).
  */
 
 import { Router } from 'express';
 
-// ─── CONSTANTES MÉTIER ───────────────────────────────────────
-const CATEGORY_LABELS = {
+// ─── CONSTANTES MÉTIER (partagées avec le POS) ───────────────
+export const CATEGORY_LABELS = {
   loyer: 'Loyer',
   salaire: 'Salaire / Personnel',
   fournitures: 'Fournitures',
@@ -35,56 +39,27 @@ const CATEGORY_LABELS = {
   autre: 'Autre',
 };
 
-const METHOD_LABELS = {
-  especes: 'Espèces',
-  wave: 'Wave',
-  om: 'Orange Money',
-  virement: 'Virement',
-  cheque: 'Chèque',
-};
-
-const SOURCE_TYPE_LABELS = { caisse: 'Caisse', banque: 'Banque', mobile: 'Mobile money' };
-
-const STATUS_LABELS = { recorded: 'Enregistrée', cancelled: 'Annulée' };
+export const EXPENSE_STATUS_LABELS = { recorded: 'Enregistrée', cancelled: 'Annulée' };
 
 const ADMIN_ROLES = ['super_admin', 'admin'];
-const CREATOR_ROLES = ['super_admin', 'admin', 'comptable'];
 
-// ─── HELPERS ─────────────────────────────────────────────────
-function ensureTables(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS cash_sources (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT NOT NULL UNIQUE,
-    label TEXT NOT NULL,
-    type TEXT NOT NULL DEFAULT 'caisse',
-    opening_balance REAL NOT NULL DEFAULT 0,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
-  db.exec(`CREATE TABLE IF NOT EXISTS cash_topups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id INTEGER NOT NULL,
-    amount REAL NOT NULL,
-    label TEXT,
-    created_by TEXT,
-    created_by_role TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
+// ─── SCHÉMA (partagé : appelé au montage des deux routeurs) ───
+export function ensureExpenseTables(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ref TEXT NOT NULL UNIQUE,
     category TEXT NOT NULL,
     beneficiary TEXT NOT NULL,
     amount REAL NOT NULL,
-    payment_method TEXT NOT NULL,
-    source_id INTEGER,
     reason TEXT NOT NULL,
     note TEXT,
     expense_date DATE,
     status TEXT NOT NULL DEFAULT 'recorded',
     acknowledged INTEGER NOT NULL DEFAULT 0,
+    terminal INTEGER,
+    session_id INTEGER,
+    cash_movement_id INTEGER,
+    in_register INTEGER NOT NULL DEFAULT 1,
     created_by TEXT,
     created_by_role TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -92,9 +67,21 @@ function ensureTables(db) {
     cancelled_at DATETIME,
     cancel_reason TEXT
   )`);
+  // Migration défensive : une table `expenses` antérieure peut exister sans les
+  // colonnes du modèle « caisse POS » (terminal/session_id/cash_movement_id/in_register).
+  // CREATE TABLE IF NOT EXISTS ne les ajoute pas → on les ajoute à la volée.
+  for (const ddl of [
+    'ALTER TABLE expenses ADD COLUMN terminal INTEGER',
+    'ALTER TABLE expenses ADD COLUMN session_id INTEGER',
+    'ALTER TABLE expenses ADD COLUMN cash_movement_id INTEGER',
+    'ALTER TABLE expenses ADD COLUMN in_register INTEGER NOT NULL DEFAULT 1',
+  ]) {
+    try { db.exec(ddl); } catch { /* colonne déjà présente */ }
+  }
+
   db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_source ON expenses(source_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_session ON expenses(session_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)');
 
   db.exec(`CREATE TABLE IF NOT EXISTS expense_audit_log (
@@ -111,23 +98,16 @@ function ensureTables(db) {
   )`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_expense_audit_expense ON expense_audit_log(fk_expense)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_expense_audit_created ON expense_audit_log(created_at)');
-
-  // Seed des sources de fonds par défaut (idempotent).
-  const seed = db.prepare('INSERT OR IGNORE INTO cash_sources (key, label, type) VALUES (?,?,?)');
-  seed.run('caisse', 'Caisse espèces', 'caisse');
-  seed.run('banque', 'Compte bancaire', 'banque');
-  seed.run('wave', 'Wave', 'mobile');
-  seed.run('om', 'Orange Money', 'mobile');
 }
 
-// Montant entier FCFA positif borné (FCFA n'a pas de centimes).
-function cleanAmount(v) {
+// ─── HELPERS (partagés) ──────────────────────────────────────
+export function cleanAmount(v) {
   const n = Math.round(Number(v));
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.min(n, 1_000_000_000);
 }
 
-function nonEmpty(s, { min = 2, max = 500 } = {}) {
+export function nonEmptyText(s, { min = 2, max = 500 } = {}) {
   const t = String(s ?? '').trim();
   return t.length >= min && t.length <= max ? t : null;
 }
@@ -136,22 +116,18 @@ function isIsoDate(s) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 }
 
-function writeAudit(db, { expense_id, ref, action, reason, admin, snapshot }) {
-  try {
-    db.prepare(`INSERT INTO expense_audit_log
-      (fk_expense, ref_expense, action, reason, user_id, user_name, user_role, snapshot)
-      VALUES (?,?,?,?,?,?,?,?)`).run(
-      expense_id, ref || null, action, reason || null,
-      admin?.id || null, admin?.username || null, admin?.role || null,
-      snapshot ? JSON.stringify(snapshot) : null,
-    );
-  } catch (e) {
-    console.error('[EXPENSES] échec écriture audit:', e.message);
-  }
+// Génère une réf DEP{aamm}-{0001}.
+export function generateExpenseRef(db) {
+  const now = new Date();
+  const yymm = String(now.getFullYear() % 100).padStart(2, '0') + String(now.getMonth() + 1).padStart(2, '0');
+  const prefix = `DEP${yymm}-`;
+  const max = db.prepare('SELECT MAX(ref) AS max FROM expenses WHERE ref LIKE ?').get(`${prefix}%`);
+  let next = 1;
+  if (max?.max) next = (parseInt(String(max.max).split('-')[1], 10) || 0) + 1;
+  return `${prefix}${String(next).padStart(4, '0')}`;
 }
 
-function rowToDto(r, sourceMap) {
-  const src = r.source_id ? sourceMap?.get(r.source_id) : null;
+export function expenseRowToDto(r) {
   return {
     id: r.id,
     ref: r.ref,
@@ -159,16 +135,15 @@ function rowToDto(r, sourceMap) {
     category_label: CATEGORY_LABELS[r.category] || r.category,
     beneficiary: r.beneficiary,
     amount: Number(r.amount),
-    method: r.payment_method,
-    method_label: METHOD_LABELS[r.payment_method] || r.payment_method,
-    source_id: r.source_id,
-    source_label: src ? src.label : (r.source_id ? `#${r.source_id}` : '—'),
     reason: r.reason,
     note: r.note,
     expense_date: r.expense_date,
     status: r.status,
-    status_label: STATUS_LABELS[r.status] || r.status,
+    status_label: EXPENSE_STATUS_LABELS[r.status] || r.status,
     acknowledged: !!r.acknowledged,
+    terminal: r.terminal,
+    session_id: r.session_id,
+    in_register: !!r.in_register,
     created_by: r.created_by,
     created_by_role: r.created_by_role,
     created_at: r.created_at,
@@ -178,33 +153,22 @@ function rowToDto(r, sourceMap) {
   };
 }
 
-// Solde par source = ouverture + Σ approvisionnements − Σ dépenses actives.
-function computeSourceBalances(db) {
-  const sources = db.prepare('SELECT * FROM cash_sources ORDER BY is_active DESC, label ASC').all();
-  const topups = db.prepare('SELECT source_id, COALESCE(SUM(amount),0) AS t FROM cash_topups GROUP BY source_id').all();
-  const spent = db.prepare("SELECT source_id, COALESCE(SUM(amount),0) AS t FROM expenses WHERE status='recorded' AND source_id IS NOT NULL GROUP BY source_id").all();
-  const topupMap = new Map(topups.map(r => [r.source_id, Number(r.t)]));
-  const spentMap = new Map(spent.map(r => [r.source_id, Number(r.t)]));
-  return sources.map(s => {
-    const inflow = Number(s.opening_balance) + (topupMap.get(s.id) || 0);
-    const outflow = spentMap.get(s.id) || 0;
-    return {
-      id: s.id,
-      key: s.key,
-      label: s.label,
-      type: s.type,
-      type_label: SOURCE_TYPE_LABELS[s.type] || s.type,
-      opening_balance: Number(s.opening_balance),
-      topups_total: topupMap.get(s.id) || 0,
-      spent_total: outflow,
-      balance: inflow - outflow,
-      is_active: !!s.is_active,
-    };
-  });
+export function writeExpenseAudit(db, { expense_id, ref, action, reason, actor, snapshot }) {
+  try {
+    db.prepare(`INSERT INTO expense_audit_log
+      (fk_expense, ref_expense, action, reason, user_id, user_name, user_role, snapshot)
+      VALUES (?,?,?,?,?,?,?,?)`).run(
+      expense_id, ref || null, action, reason || null,
+      actor?.id ?? null, actor?.name ?? null, actor?.role ?? null,
+      snapshot ? JSON.stringify(snapshot) : null,
+    );
+  } catch (e) {
+    console.error('[EXPENSES] échec écriture audit:', e.message);
+  }
 }
 
-// Notification admins (best-effort, ne bloque jamais la création).
-async function notifyAdmins(transporter, db, dto, siteUrl) {
+// Notification admins (best-effort, ne bloque jamais la création). Partagé avec le POS.
+export async function notifyAdminsExpense(transporter, db, dto, siteUrl) {
   try {
     if (!transporter) return;
     const admins = db.prepare(
@@ -216,17 +180,19 @@ async function notifyAdmins(transporter, db, dto, siteUrl) {
     const fmt = (n) => (Number(n) || 0).toLocaleString('fr-FR') + ' FCFA';
     const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const link = `${siteUrl || ''}/admin/expenses`;
+    const origin = dto.in_register
+      ? `Caisse POS ${dto.terminal ? '· Terminal ' + dto.terminal : ''}`
+      : 'Hors-caisse (aucune session POS ouverte)';
     const html = `<!DOCTYPE html><html lang="fr"><body style="font-family:Arial,sans-serif;color:#374151;background:#fafafa;padding:24px">
       <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05)">
-        <div style="background:#9a3412;padding:16px 24px"><h1 style="margin:0;color:#fff;font-size:17px">⚠️ Sortie d'argent enregistrée</h1></div>
+        <div style="background:#9a3412;padding:16px 24px"><h1 style="margin:0;color:#fff;font-size:17px">⚠️ Sortie d'argent (caisse)</h1></div>
         <div style="padding:24px">
           <p style="font-size:22px;font-weight:800;color:#9a3412;margin:0 0 12px">${esc(fmt(dto.amount))}</p>
           <table style="width:100%;border-collapse:collapse;font-size:14px">
             <tr><td style="padding:6px 0;color:#6b7280">Référence</td><td style="padding:6px 0;text-align:right;font-weight:600">${esc(dto.ref)}</td></tr>
             <tr><td style="padding:6px 0;color:#6b7280">Catégorie</td><td style="padding:6px 0;text-align:right">${esc(dto.category_label)}</td></tr>
             <tr><td style="padding:6px 0;color:#6b7280">Bénéficiaire</td><td style="padding:6px 0;text-align:right">${esc(dto.beneficiary)}</td></tr>
-            <tr><td style="padding:6px 0;color:#6b7280">Méthode</td><td style="padding:6px 0;text-align:right">${esc(dto.method_label)}</td></tr>
-            <tr><td style="padding:6px 0;color:#6b7280">Source</td><td style="padding:6px 0;text-align:right">${esc(dto.source_label)}</td></tr>
+            <tr><td style="padding:6px 0;color:#6b7280">Origine</td><td style="padding:6px 0;text-align:right">${esc(origin)}</td></tr>
             <tr><td style="padding:6px 0;color:#6b7280">Saisi par</td><td style="padding:6px 0;text-align:right">${esc(dto.created_by)} (${esc(dto.created_by_role)})</td></tr>
           </table>
           <p style="margin:16px 0 4px;color:#6b7280;font-size:13px">Motif :</p>
@@ -248,23 +214,55 @@ async function notifyAdmins(transporter, db, dto, siteUrl) {
   }
 }
 
-// ─── ROUTER FACTORY ──────────────────────────────────────────
-export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, getTransporter }) {
-  const router = Router();
-  ensureTables(db);
-  const noCsrf = csrfProtection || ((req, res, next) => next());
-  const siteUrl = process.env.SITE_URL || process.env.PUBLIC_URL || '';
+/**
+ * Crée une dépense (sortie d'argent). Réutilisé par le POS.
+ * Valide les champs, insère expense + audit `create`, et notifie les admins.
+ * NE crée PAS le mouvement de caisse (pos_cash_movements) : c'est au POS de le faire
+ * et de renvoyer cash_movement_id pour le rattachement.
+ * @returns { ok:true, id, ref, dto } ou { ok:false, error }
+ */
+export function createExpenseRecord(db, {
+  category, beneficiary, amount, reason, note,
+  terminal = null, session_id = null, cash_movement_id = null, in_register = true,
+  actor, // { id, name, role }
+}) {
+  const amt = cleanAmount(amount);
+  if (!amt) return { ok: false, error: 'Montant invalide (entier positif requis)' };
+  if (!CATEGORY_LABELS[category]) return { ok: false, error: 'Catégorie invalide' };
+  const ben = nonEmptyText(beneficiary, { min: 2, max: 200 });
+  if (!ben) return { ok: false, error: 'Bénéficiaire requis' };
+  const rsn = nonEmptyText(reason, { min: 4, max: 1000 });
+  if (!rsn) return { ok: false, error: 'Motif/justification requis (4 caractères min.)' };
+  const cleanNote = String(note || '').trim().slice(0, 1000) || null;
 
-  // Génère une réf DEP{aamm}-{0001}.
-  function generateRef() {
-    const now = new Date();
-    const yymm = String(now.getFullYear() % 100).padStart(2, '0') + String(now.getMonth() + 1).padStart(2, '0');
-    const prefix = `DEP${yymm}-`;
-    const max = db.prepare('SELECT MAX(ref) AS max FROM expenses WHERE ref LIKE ?').get(`${prefix}%`);
-    let next = 1;
-    if (max?.max) next = (parseInt(String(max.max).split('-')[1], 10) || 0) + 1;
-    return `${prefix}${String(next).padStart(4, '0')}`;
-  }
+  const create = db.transaction(() => {
+    const ref = generateExpenseRef(db);
+    const today = new Date().toISOString().slice(0, 10);
+    const r = db.prepare(`INSERT INTO expenses
+      (ref, category, beneficiary, amount, reason, note, expense_date, status,
+       terminal, session_id, cash_movement_id, in_register, created_by, created_by_role)
+      VALUES (?,?,?,?,?,?,?, 'recorded', ?,?,?,?,?,?)`).run(
+      ref, category, ben, amt, rsn, cleanNote, today,
+      terminal, session_id, cash_movement_id, in_register ? 1 : 0,
+      actor?.name || 'POS', actor?.role || null,
+    );
+    const id = r.lastInsertRowid;
+    writeExpenseAudit(db, {
+      expense_id: id, ref, action: 'create', reason: rsn, actor,
+      snapshot: { amount: amt, category, beneficiary: ben, terminal, in_register },
+    });
+    return { id, ref };
+  });
+  const { id, ref } = create();
+  const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id);
+  return { ok: true, id, ref, dto: expenseRowToDto(row) };
+}
+
+// ─── ROUTER FACTORY (admin : consultation + rapport + annulation) ──
+export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection }) {
+  const router = Router();
+  ensureExpenseTables(db);
+  const noCsrf = csrfProtection || ((req, res, next) => next());
 
   const requireAdmin = (req, res) => {
     if (!ADMIN_ROLES.includes(req.admin?.role)) {
@@ -274,75 +272,12 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
     return true;
   };
 
-  // ═══════════════════════════════════════════════════════════
-  // CONSTANTES UI (catégories / méthodes) — pour les <select>
-  // ═══════════════════════════════════════════════════════════
+  // ── Métadonnées (catégories) pour les <select> ──
   router.get('/meta', auth, (req, res) => {
-    res.json({
-      categories: Object.entries(CATEGORY_LABELS).map(([value, label]) => ({ value, label })),
-      methods: Object.entries(METHOD_LABELS).map(([value, label]) => ({ value, label })),
-    });
+    res.json({ categories: Object.entries(CATEGORY_LABELS).map(([value, label]) => ({ value, label })) });
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // SOURCES DE FONDS (+ soldes)
-  // ═══════════════════════════════════════════════════════════
-  router.get('/sources', auth, (req, res) => {
-    try {
-      res.json({ sources: computeSourceBalances(db) });
-    } catch (err) {
-      console.error('[EXPENSES] sources error:', err.message);
-      res.status(500).json({ error: 'Erreur chargement des sources' });
-    }
-  });
-
-  router.post('/sources', auth, noCsrf, (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    try {
-      const b = req.body || {};
-      const label = nonEmpty(b.label, { min: 2, max: 120 });
-      if (!label) return res.status(400).json({ error: 'Libellé requis' });
-      const type = ['caisse', 'banque', 'mobile'].includes(b.type) ? b.type : 'caisse';
-      const opening = Math.max(0, Math.round(Number(b.opening_balance) || 0));
-      // Clé unique dérivée du libellé.
-      let key = String(b.key || label).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
-        .replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40) || `src_${Date.now()}`;
-      const exists = db.prepare('SELECT 1 FROM cash_sources WHERE key = ?').get(key);
-      if (exists) key = `${key}_${Date.now().toString(36)}`;
-      const r = db.prepare('INSERT INTO cash_sources (key, label, type, opening_balance) VALUES (?,?,?,?)')
-        .run(key, label, type, opening);
-      res.status(201).json({ id: r.lastInsertRowid, key });
-    } catch (err) {
-      console.error('[EXPENSES] create source error:', err.message);
-      res.status(500).json({ error: 'Erreur création de la source' });
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════
-  // APPROVISIONNEMENT D'UNE SOURCE (top-up) — admin uniquement
-  // ═══════════════════════════════════════════════════════════
-  router.post('/topups', auth, noCsrf, (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    try {
-      const b = req.body || {};
-      const sourceId = parseInt(b.source_id, 10);
-      const source = sourceId ? db.prepare('SELECT * FROM cash_sources WHERE id = ?').get(sourceId) : null;
-      if (!source) return res.status(400).json({ error: 'Source invalide' });
-      const amount = cleanAmount(b.amount);
-      if (!amount) return res.status(400).json({ error: 'Montant invalide' });
-      const label = String(b.label || '').trim().slice(0, 200) || null;
-      db.prepare('INSERT INTO cash_topups (source_id, amount, label, created_by, created_by_role) VALUES (?,?,?,?,?)')
-        .run(sourceId, amount, label, req.admin?.username || 'admin', req.admin?.role || null);
-      res.status(201).json({ success: true });
-    } catch (err) {
-      console.error('[EXPENSES] topup error:', err.message);
-      res.status(500).json({ error: 'Erreur approvisionnement' });
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════
-  // RAPPORT DE CAISSE — recettes encaissées − dépenses = solde net
-  // ═══════════════════════════════════════════════════════════
+  // ── Rapport de caisse : recettes encaissées − dépenses = solde net ──
   router.get('/report', auth, async (req, res) => {
     try {
       const dateFrom = String(req.query.date_from || '').trim();
@@ -375,14 +310,13 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
       const receiptsTotal = receiptsByMethod.reduce((s, m) => s + m.total, 0);
 
       // 2. Dépenses natives de la période (status='recorded').
-      const sourceMap = new Map(db.prepare('SELECT id, label FROM cash_sources').all().map(s => [s.id, { label: s.label }]));
       const expenseRows = db.prepare(
         `SELECT * FROM expenses
          WHERE status='recorded' AND date(COALESCE(expense_date, created_at)) >= date(?)
            AND date(COALESCE(expense_date, created_at)) <= date(?)
          ORDER BY COALESCE(expense_date, created_at) ASC, id ASC`
       ).all(dateFrom, dateTo);
-      const expenses = expenseRows.map(r => rowToDto(r, sourceMap));
+      const expenses = expenseRows.map(expenseRowToDto);
       const expensesTotal = expenses.reduce((s, e) => s + e.amount, 0);
 
       // 3. Cumul par catégorie.
@@ -395,12 +329,6 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
       }
       const expensesByCategory = Array.from(byCat.values()).sort((a, b) => b.total - a.total);
 
-      // 4. Approvisionnements de la période (entrées de fonds hors ventes).
-      const [[topupAgg]] = [[db.prepare(
-        `SELECT COALESCE(SUM(amount),0) AS t FROM cash_topups WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)`
-      ).get(dateFrom, dateTo)]];
-      const topupsTotal = Number(topupAgg.t) || 0;
-
       res.json({
         date_from: dateFrom,
         date_to: dateTo,
@@ -409,7 +337,6 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
         expenses,
         expenses_by_category: expensesByCategory,
         expenses_total: expensesTotal,
-        topups_total: topupsTotal,
         net: receiptsTotal - expensesTotal,
       });
     } catch (err) {
@@ -418,9 +345,7 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
     }
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // JOURNAL D'AUDIT GLOBAL
-  // ═══════════════════════════════════════════════════════════
+  // ── Journal d'audit global ──
   router.get('/audit-log', auth, (req, res) => {
     try {
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -435,9 +360,7 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
     }
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // LISTE + FILTRES + KPIs
-  // ═══════════════════════════════════════════════════════════
+  // ── Liste + filtres + KPIs ──
   router.get('/', auth, (req, res) => {
     try {
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -447,9 +370,8 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
       const where = [];
       const params = [];
       if (req.query.category && CATEGORY_LABELS[req.query.category]) { where.push('category = ?'); params.push(req.query.category); }
-      if (req.query.method && METHOD_LABELS[req.query.method]) { where.push('payment_method = ?'); params.push(req.query.method); }
-      if (req.query.source_id) { where.push('source_id = ?'); params.push(parseInt(req.query.source_id, 10)); }
-      if (req.query.status && STATUS_LABELS[req.query.status]) { where.push('status = ?'); params.push(req.query.status); }
+      if (req.query.status && EXPENSE_STATUS_LABELS[req.query.status]) { where.push('status = ?'); params.push(req.query.status); }
+      if (req.query.terminal) { where.push('terminal = ?'); params.push(parseInt(req.query.terminal, 10)); }
       if (req.query.search) {
         where.push('(ref LIKE ? OR beneficiary LIKE ? OR reason LIKE ?)');
         const pat = `%${req.query.search}%`;
@@ -464,19 +386,14 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
         `SELECT * FROM expenses ${whereSql} ORDER BY COALESCE(expense_date, created_at) DESC, id DESC LIMIT ? OFFSET ?`
       ).all(...params, limit, offset);
 
-      const sourceMap = new Map(db.prepare('SELECT id, label FROM cash_sources').all().map(s => [s.id, { label: s.label }]));
-
-      // KPIs sur le filtre courant (hors pagination), dépenses actives uniquement.
       const kpiWhere = where.length ? whereSql + " AND status='recorded'" : "WHERE status='recorded'";
-      const kpi = db.prepare(
-        `SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS nb FROM expenses ${kpiWhere}`
-      ).get(...params);
+      const kpi = db.prepare(`SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS nb FROM expenses ${kpiWhere}`).get(...params);
       const byCatRows = db.prepare(
         `SELECT category, COALESCE(SUM(amount),0) AS total, COUNT(*) AS nb FROM expenses ${kpiWhere} GROUP BY category ORDER BY total DESC`
       ).all(...params);
 
       res.json({
-        expenses: rows.map(r => rowToDto(r, sourceMap)),
+        expenses: rows.map(expenseRowToDto),
         total, page, pages: Math.max(1, Math.ceil(total / limit)),
         kpis: {
           total: Number(kpi.total) || 0,
@@ -493,84 +410,20 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
     }
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // DÉTAIL (+ audit de la dépense)
-  // ═══════════════════════════════════════════════════════════
+  // ── Détail (+ audit) ──
   router.get('/:id', auth, (req, res) => {
     try {
       const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(parseInt(req.params.id, 10));
       if (!row) return res.status(404).json({ error: 'Dépense introuvable' });
-      const sourceMap = new Map(db.prepare('SELECT id, label FROM cash_sources').all().map(s => [s.id, { label: s.label }]));
       const audit = db.prepare('SELECT * FROM expense_audit_log WHERE fk_expense = ? ORDER BY id DESC').all(row.id);
-      res.json({ expense: rowToDto(row, sourceMap), audit });
+      res.json({ expense: expenseRowToDto(row), audit });
     } catch (err) {
       console.error('[EXPENSES] detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement de la dépense' });
     }
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // CRÉATION D'UNE SORTIE D'ARGENT (+ notification admins)
-  // ═══════════════════════════════════════════════════════════
-  router.post('/', auth, noCsrf, async (req, res) => {
-    try {
-      if (!CREATOR_ROLES.includes(req.admin?.role)) {
-        return res.status(403).json({ error: 'Accès refusé' });
-      }
-      const b = req.body || {};
-      const amount = cleanAmount(b.amount);
-      if (!amount) return res.status(400).json({ error: 'Montant invalide (entier positif requis)' });
-      const category = CATEGORY_LABELS[b.category] ? b.category : null;
-      if (!category) return res.status(400).json({ error: 'Catégorie invalide' });
-      const method = METHOD_LABELS[b.payment_method] ? b.payment_method : null;
-      if (!method) return res.status(400).json({ error: 'Méthode de paiement invalide' });
-      const beneficiary = nonEmpty(b.beneficiary, { min: 2, max: 200 });
-      if (!beneficiary) return res.status(400).json({ error: 'Bénéficiaire requis' });
-      const reason = nonEmpty(b.reason, { min: 4, max: 1000 });
-      if (!reason) return res.status(400).json({ error: 'Motif/justification requis (4 caractères min.)' });
-
-      const sourceId = b.source_id ? parseInt(b.source_id, 10) : null;
-      if (sourceId) {
-        const src = db.prepare('SELECT id FROM cash_sources WHERE id = ? AND is_active = 1').get(sourceId);
-        if (!src) return res.status(400).json({ error: 'Source de fonds invalide' });
-      } else {
-        return res.status(400).json({ error: 'Source de fonds requise' });
-      }
-      const note = String(b.note || '').trim().slice(0, 1000) || null;
-      const expenseDate = isIsoDate(b.expense_date) ? b.expense_date : null;
-
-      const create = db.transaction(() => {
-        const ref = generateRef();
-        const r = db.prepare(`INSERT INTO expenses
-          (ref, category, beneficiary, amount, payment_method, source_id, reason, note, expense_date, status, created_by, created_by_role)
-          VALUES (?,?,?,?,?,?,?,?,?, 'recorded', ?, ?)`).run(
-          ref, category, beneficiary, amount, method, sourceId, reason, note, expenseDate,
-          req.admin?.username || 'admin', req.admin?.role || null,
-        );
-        const id = r.lastInsertRowid;
-        writeAudit(db, {
-          expense_id: id, ref, action: 'create', reason, admin: req.admin,
-          snapshot: { amount, category, beneficiary, method, source_id: sourceId },
-        });
-        return { id, ref };
-      });
-      const { id, ref } = create();
-
-      // Notification admins (best-effort, après commit).
-      const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id);
-      const sourceMap = new Map(db.prepare('SELECT id, label FROM cash_sources').all().map(s => [s.id, { label: s.label }]));
-      notifyAdmins(typeof getTransporter === 'function' ? getTransporter() : null, db, rowToDto(row, sourceMap), siteUrl);
-
-      res.status(201).json({ id, ref });
-    } catch (err) {
-      console.error('[EXPENSES] create error:', err.message);
-      res.status(500).json({ error: 'Erreur enregistrement de la sortie' });
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════
-  // ACQUITTEMENT (admin marque le retrait comme vu → badge à zéro)
-  // ═══════════════════════════════════════════════════════════
+  // ── Acquittement (admin marque le retrait comme vu → badge à zéro) ──
   router.post('/:id/acknowledge', auth, noCsrf, (req, res) => {
     if (!requireAdmin(req, res)) return;
     try {
@@ -585,9 +438,10 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
     }
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // ANNULATION (tracée) — admin uniquement, motif requis
-  // ═══════════════════════════════════════════════════════════
+  // ── Annulation (tracée) — admin uniquement, motif requis ──
+  // NB : ne re-crédite PAS automatiquement la caisse POS (le mouvement de caisse a
+  // déjà été passé à la session, souvent déjà clôturée). L'annulation est comptable
+  // (la dépense sort des totaux/rapports) et tracée dans l'audit.
   router.post('/:id/cancel', auth, noCsrf, (req, res) => {
     if (!requireAdmin(req, res)) return;
     try {
@@ -595,13 +449,14 @@ export function createExpensesRouter({ db, dolibarrPool, auth, csrfProtection, g
       const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id);
       if (!row) return res.status(404).json({ error: 'Dépense introuvable' });
       if (row.status === 'cancelled') return res.status(409).json({ error: 'Dépense déjà annulée' });
-      const reason = nonEmpty(req.body?.reason, { min: 4, max: 500 });
+      const reason = nonEmptyText(req.body?.reason, { min: 4, max: 500 });
       if (!reason) return res.status(400).json({ error: 'Motif d\'annulation requis (4 caractères min.)' });
 
       db.prepare(`UPDATE expenses SET status='cancelled', cancelled_by=?, cancelled_at=CURRENT_TIMESTAMP, cancel_reason=? WHERE id=?`)
         .run(req.admin?.username || 'admin', reason, id);
-      writeAudit(db, {
-        expense_id: id, ref: row.ref, action: 'cancel', reason, admin: req.admin,
+      writeExpenseAudit(db, {
+        expense_id: id, ref: row.ref, action: 'cancel', reason,
+        actor: { id: req.admin?.id, name: req.admin?.username, role: req.admin?.role },
         snapshot: { amount: row.amount, category: row.category, beneficiary: row.beneficiary },
       });
       res.json({ success: true });

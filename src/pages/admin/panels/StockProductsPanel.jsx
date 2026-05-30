@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { getStockProducts, updateStockPolicy, requestReprint, requestSupplierOrder, stockEntry } from '../../../api/admin';
-import { FiArrowLeft, FiSearch, FiEdit2, FiSave, FiX, FiChevronLeft, FiChevronRight, FiPrinter, FiShoppingCart, FiPlusCircle, FiAlertCircle, FiPackage } from 'react-icons/fi';
+import { FiArrowLeft, FiSearch, FiEdit2, FiSave, FiX, FiChevronLeft, FiChevronRight, FiPrinter, FiShoppingCart, FiPlusCircle, FiAlertCircle, FiPackage, FiClipboard } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import StockNav from './StockNav';
+import StockAdjustModal from './StockAdjustModal';
 import './Stock.css';
 
 function CoverageBar({ days }) {
@@ -24,6 +25,7 @@ export default function StockProductsPanel() {
   const [loadError, setLoadError] = useState(false);
   const [entry, setEntry] = useState(null); // { product, qty }
   const [entrying, setEntrying] = useState(false);
+  const [adjust, setAdjust] = useState(null); // produit en cours d'ajustement
   // Pré-remplit la recherche depuis ?q= (liens depuis les alertes).
   const [q, setQ] = useState(() => new URLSearchParams(window.location.search).get('q') || '');
   const [page, setPage] = useState(1);
@@ -223,6 +225,7 @@ export default function StockProductsPanel() {
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: 4 }}>
+                          <button className="btn-icon" onClick={() => setAdjust(p)} title="Ajuster le stock (comptage physique)" style={{ color: '#1e40af' }}><FiClipboard size={15} /></button>
                           <button className="btn-icon" onClick={() => setEntry({ product: p, qty: 1, reason: '' })} title="Entrée de stock (réception)" style={{ color: '#10531a' }}><FiPlusCircle size={15} /></button>
                           <button className="btn-icon" onClick={() => startEdit(p)} title="Modifier les seuils"><FiEdit2 size={14} /></button>
                         </div>
@@ -339,6 +342,18 @@ export default function StockProductsPanel() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal d'ajustement d'inventaire */}
+      {adjust && (
+        <StockAdjustModal
+          product={adjust}
+          onClose={() => setAdjust(null)}
+          onDone={async () => {
+            const r = await getStockProducts({ q, page, sort, order, limit: 30 });
+            setData(r.data);
+          }}
+        />
       )}
 
       {/* Modal de succès */}

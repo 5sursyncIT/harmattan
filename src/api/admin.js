@@ -149,6 +149,8 @@ export const runStockClassify = () => api.post('/admin/stock/batch/classify');
 export const requestReprint = (product_id, qty) => api.post('/admin/stock/reprint', { product_id, qty });
 export const requestSupplierOrder = (product_id, qty, supplier_id) => api.post('/admin/stock/order-supplier', { product_id, qty, supplier_id });
 export const stockEntry = (product_id, qty, reason, warehouse_id) => api.post('/admin/stock/entry', { product_id, qty, reason, warehouse_id });
+// Ajustement d'inventaire : on envoie la quantité PHYSIQUE comptée, le serveur calcule l'écart.
+export const adjustStock = (product_id, counted_qty, reason, warehouse_id) => api.post('/admin/stock/adjust', { product_id, counted_qty, reason, warehouse_id });
 // Commandes d'approvisionnement (suivi local + réception)
 export const getPurchaseOrders = (params = {}) => api.get('/admin/stock/purchase-orders', { params });
 export const getPurchaseOrder = (id) => api.get(`/admin/stock/purchase-orders/${id}`);

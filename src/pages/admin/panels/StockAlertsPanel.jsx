@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { getStockAlerts, acknowledgeStockAlert, resolveStockAlert, ignoreStockAlert } from '../../../api/admin';
-import { FiAlertTriangle, FiArrowLeft, FiCheck, FiEye, FiXCircle, FiAlertCircle } from 'react-icons/fi';
+import { FiAlertTriangle, FiArrowLeft, FiCheck, FiEye, FiXCircle, FiAlertCircle, FiClipboard } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import StockNav from './StockNav';
+import StockAdjustModal from './StockAdjustModal';
 import './Stock.css';
 
 const TYPE_LABELS = {
@@ -28,6 +29,7 @@ export default function StockAlertsPanel() {
   const [page, setPage] = useState(1);
   const [error, setError] = useState(false);
   const [openCount, setOpenCount] = useState(0);
+  const [adjust, setAdjust] = useState(null); // alerte en cours d'ajustement
 
   const [fetchKey, setFetchKey] = useState(0);
 
@@ -123,6 +125,7 @@ export default function StockAlertsPanel() {
               </div>
               {status === 'open' && (
                 <div className="sk-alert-actions">
+                  <button className="sk-alert-btn" onClick={() => setAdjust(a)} title="Ajuster le stock (comptage physique)" style={{ color: '#1e40af', borderColor: '#bfdbfe', background: '#eff6ff' }}><FiClipboard size={12} /></button>
                   <button className="sk-alert-btn" onClick={() => handleAction(a.id, 'acknowledge')} title="Prendre en compte"><FiEye size={12} /></button>
                   <button className="sk-alert-btn resolve" onClick={() => handleAction(a.id, 'resolve')} title="Résoudre"><FiCheck size={12} /></button>
                   <button className="sk-alert-btn" onClick={() => handleAction(a.id, 'ignore')} title="Ignorer"><FiXCircle size={12} /></button>
@@ -144,6 +147,20 @@ export default function StockAlertsPanel() {
             </div>
           )}
         </>
+      )}
+
+      {/* Modal d'ajustement d'inventaire (depuis une alerte) */}
+      {adjust && (
+        <StockAdjustModal
+          product={{
+            product_id: adjust.product_id,
+            ref: adjust.product_ref || `#${adjust.product_id}`,
+            label: adjust.product_label || `Produit #${adjust.product_id}`,
+            stock: adjust.current_stock_live ?? adjust.current_stock ?? 0,
+          }}
+          onClose={() => setAdjust(null)}
+          onDone={reload}
+        />
       )}
     </div>
   );

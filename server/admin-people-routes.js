@@ -9,6 +9,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
 import { dolibarrApi } from './dolibarr-client.js';
+import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 
 // Convertit un buffer ODT en PDF via LibreOffice headless. Le modèle de devis
 // (module custom devislibrairie) génère de l'ODT, pas du PDF — sans conversion,
@@ -719,12 +720,27 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
   router.post('/societes', auth, requireRoles('super_admin', 'admin', 'editor', 'support'), csrfProtection, async (req, res) => {
     try {
       const data = sanitizeSocieteInput(req.body);
-      if (!data.name || data.name.length < 2) {
-        return res.status(400).json({ error: 'Nom du tiers requis (2 caractères min.)' });
+      const firstname = String(req.body.firstname || '').trim();
+      const isCompany = !!req.body.is_company;
+
+      // Validation : nom + (prénom si particulier) + (téléphone OU email).
+      const vErr = validateTierIdentity({ name: data.name, firstname, email: data.email, phone: data.phone, isCompany });
+      if (vErr) return res.status(400).json({ error: vErr });
+
+      // Dédup : si un tier actif a déjà cet email / téléphone, on n'en crée pas
+      // un doublon — on informe l'admin du tiers existant (409).
+      const existing = await findExistingTier(dolibarrPool, { email: data.email, phone: data.phone });
+      if (existing) {
+        return res.status(409).json({
+          error: `Un tiers actif existe déjà avec ce ${existing.matchedBy === 'email' ? 'email' : 'téléphone'} : « ${existing.name} » (#${existing.id}).`,
+          existing,
+        });
       }
-      if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
-        return res.status(400).json({ error: 'Email invalide' });
-      }
+
+      // Nom combiné « Prénom NOM » + marquage particulier.
+      data.name = buildTierName({ name: data.name, firstname, isCompany });
+      if (!isCompany) data.typent_id = TYPENT_PARTICULIER;
+
       // Au moins un type doit être renseigné
       if (!data.client && !data.fournisseur) data.client = 1;
 

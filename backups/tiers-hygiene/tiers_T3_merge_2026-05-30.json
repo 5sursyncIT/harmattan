@@ -1,0 +1,2846 @@
+{
+  "date": "2026-05-30",
+  "key": "both",
+  "clusters": [
+    {
+      "master": 1903,
+      "absorbed": [
+        17
+      ],
+      "moves": {
+        "llx_facture": 17,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 25
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "17": [
+            2011,
+            7187,
+            7222,
+            7345,
+            15108,
+            15111,
+            15122,
+            16621,
+            16623,
+            17911,
+            18090,
+            30556,
+            37464,
+            37762,
+            38013,
+            38716,
+            38779
+          ]
+        },
+        "llx_propal": {
+          "17": [
+            6
+          ]
+        },
+        "llx_notify": {
+          "17": [
+            3
+          ]
+        },
+        "llx_actioncomm": {
+          "17": [
+            4100,
+            4101,
+            4169,
+            4179,
+            4405,
+            4465,
+            20319,
+            20338,
+            20343,
+            22645,
+            22646,
+            22647,
+            23206,
+            23207,
+            23208,
+            23209,
+            25705,
+            25706,
+            25717,
+            26085,
+            26086,
+            51149,
+            51150,
+            65705,
+            65706
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        17
+      ]
+    },
+    {
+      "master": 37,
+      "absorbed": [
+        1039
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1039": [
+            339
+          ]
+        },
+        "llx_actioncomm": {
+          "1039": [
+            17128,
+            17129
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1039
+      ]
+    },
+    {
+      "master": 51,
+      "absorbed": [
+        618
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "618": [
+            179
+          ]
+        },
+        "llx_actioncomm": {
+          "618": [
+            470,
+            471
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        618
+      ]
+    },
+    {
+      "master": 1663,
+      "absorbed": [
+        88
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "88": [
+            20
+          ]
+        },
+        "llx_notify": {
+          "88": [
+            16
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        88
+      ]
+    },
+    {
+      "master": 114,
+      "absorbed": [
+        731
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 3
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "731": [
+            230
+          ]
+        },
+        "llx_actioncomm": {
+          "731": [
+            4250,
+            4251,
+            28843
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        731
+      ]
+    },
+    {
+      "master": 126,
+      "absorbed": [
+        832
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "832": [
+            253
+          ]
+        },
+        "llx_actioncomm": {
+          "832": [
+            7699,
+            7700
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null,
+        "address": null,
+        "zip": null
+      },
+      "archived": [
+        832
+      ]
+    },
+    {
+      "master": 132,
+      "absorbed": [
+        1773
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1773": [
+            825
+          ]
+        },
+        "llx_notify": {
+          "1773": [
+            436
+          ]
+        },
+        "llx_actioncomm": {
+          "1773": [
+            58828,
+            58831
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1773
+      ]
+    },
+    {
+      "master": 1320,
+      "absorbed": [
+        154,
+        1566
+      ],
+      "moves": {
+        "llx_facture": 9,
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 17
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "154": [
+            3534,
+            4181,
+            4894,
+            10199,
+            11215,
+            11793,
+            15652,
+            15653,
+            31382
+          ]
+        },
+        "llx_propal": {
+          "154": [
+            43
+          ],
+          "1566": [
+            668
+          ]
+        },
+        "llx_notify": {
+          "1566": [
+            267
+          ]
+        },
+        "llx_actioncomm": {
+          "154": [
+            10198,
+            10596,
+            12288,
+            12289,
+            13444,
+            13451,
+            13459,
+            13464,
+            13465,
+            21356,
+            21357,
+            21361,
+            21362,
+            52825,
+            52826
+          ],
+          "1566": [
+            48075,
+            48076
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        154,
+        1566
+      ]
+    },
+    {
+      "master": 1107,
+      "absorbed": [
+        156
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "156": [
+            45
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        156
+      ]
+    },
+    {
+      "master": 1800,
+      "absorbed": [
+        180,
+        1644
+      ],
+      "moves": {
+        "llx_facture": 10,
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 11
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "180": [
+            842,
+            1355,
+            1680,
+            1822,
+            4429,
+            5427,
+            6119,
+            6861,
+            31132
+          ],
+          "1644": [
+            33156
+          ]
+        },
+        "llx_propal": {
+          "180": [
+            50
+          ],
+          "1644": [
+            731
+          ]
+        },
+        "llx_notify": {
+          "1644": [
+            337
+          ]
+        },
+        "llx_actioncomm": {
+          "180": [
+            334,
+            335,
+            1835,
+            1836,
+            3392,
+            3393,
+            52290
+          ],
+          "1644": [
+            51737,
+            51738,
+            56419,
+            56420
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        180,
+        1644
+      ]
+    },
+    {
+      "master": 497,
+      "absorbed": [
+        181,
+        1248
+      ],
+      "moves": {
+        "llx_facture": 3,
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 6
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "181": [
+            1591
+          ],
+          "1248": [
+            20519,
+            24003
+          ]
+        },
+        "llx_propal": {
+          "181": [
+            51
+          ],
+          "1248": [
+            447
+          ]
+        },
+        "llx_notify": {
+          "1248": [
+            86
+          ]
+        },
+        "llx_actioncomm": {
+          "1248": [
+            26807,
+            26809,
+            30942,
+            30943,
+            37941,
+            37942
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        181,
+        1248
+      ]
+    },
+    {
+      "master": 199,
+      "absorbed": [
+        200
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "200": [
+            62
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        200
+      ]
+    },
+    {
+      "master": 1687,
+      "absorbed": [
+        209
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "209": [
+            64
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        209
+      ]
+    },
+    {
+      "master": 1413,
+      "absorbed": [
+        225
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "225": [
+            68
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        225
+      ]
+    },
+    {
+      "master": 306,
+      "absorbed": [
+        1192
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 2,
+        "llx_actioncomm": 3
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1192": [
+            415
+          ]
+        },
+        "llx_notify": {
+          "1192": [
+            52,
+            273
+          ]
+        },
+        "llx_actioncomm": {
+          "1192": [
+            24529,
+            24530,
+            49068
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        1192
+      ]
+    },
+    {
+      "master": 320,
+      "absorbed": [
+        695,
+        696,
+        715,
+        726,
+        1334
+      ],
+      "moves": {
+        "llx_facture": 2,
+        "llx_propal": 5,
+        "llx_notify": 1,
+        "llx_actioncomm": 13
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "695": [
+            28090
+          ],
+          "715": [
+            8943
+          ]
+        },
+        "llx_propal": {
+          "695": [
+            209
+          ],
+          "696": [
+            210
+          ],
+          "715": [
+            222
+          ],
+          "726": [
+            226
+          ],
+          "1334": [
+            506
+          ]
+        },
+        "llx_notify": {
+          "1334": [
+            145
+          ]
+        },
+        "llx_actioncomm": {
+          "695": [
+            3040,
+            3041,
+            46121,
+            46122
+          ],
+          "696": [
+            3048,
+            3049
+          ],
+          "715": [
+            3721,
+            3722,
+            7610
+          ],
+          "726": [
+            3921,
+            3922
+          ],
+          "1334": [
+            30686,
+            30687
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null,
+        "address": null
+      },
+      "archived": [
+        695,
+        696,
+        715,
+        726,
+        1334
+      ]
+    },
+    {
+      "master": 456,
+      "absorbed": [
+        336
+      ],
+      "moves": {
+        "llx_facture": 3,
+        "llx_commande": 1,
+        "llx_socpeople": 1
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "336": [
+            1141,
+            1142,
+            28607
+          ]
+        },
+        "llx_commande": {
+          "336": [
+            7
+          ]
+        },
+        "llx_socpeople": {
+          "336": [
+            4
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        336
+      ]
+    },
+    {
+      "master": 338,
+      "absorbed": [
+        339
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "339": [
+            99
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        339
+      ]
+    },
+    {
+      "master": 1024,
+      "absorbed": [
+        342,
+        1022,
+        1023,
+        1025
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 4,
+        "llx_actioncomm": 8
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "342": [
+            36557
+          ]
+        },
+        "llx_propal": {
+          "342": [
+            101
+          ],
+          "1022": [
+            331
+          ],
+          "1023": [
+            332
+          ],
+          "1025": [
+            333
+          ]
+        },
+        "llx_actioncomm": {
+          "342": [
+            63691,
+            63692
+          ],
+          "1022": [
+            16265,
+            16266
+          ],
+          "1023": [
+            16267,
+            16268
+          ],
+          "1025": [
+            16270,
+            16271
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        342,
+        1022,
+        1023,
+        1025
+      ]
+    },
+    {
+      "master": 1303,
+      "absorbed": [
+        345
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "345": [
+            105
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        345
+      ]
+    },
+    {
+      "master": 348,
+      "absorbed": [
+        347
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_actioncomm": 1
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "347": [
+            10275
+          ]
+        },
+        "llx_propal": {
+          "347": [
+            107
+          ]
+        },
+        "llx_actioncomm": {
+          "347": [
+            10361
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        347
+      ]
+    },
+    {
+      "master": 377,
+      "absorbed": [
+        1086
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1086": [
+            375
+          ]
+        },
+        "llx_actioncomm": {
+          "1086": [
+            18927,
+            18928
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        1086
+      ]
+    },
+    {
+      "master": 493,
+      "absorbed": [
+        1420
+      ],
+      "moves": {
+        "llx_facture": 10,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 19
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1420": [
+            25975,
+            26541,
+            28217,
+            30691,
+            30776,
+            31377,
+            31379,
+            31380,
+            32011,
+            38541
+          ]
+        },
+        "llx_propal": {
+          "1420": [
+            561
+          ]
+        },
+        "llx_notify": {
+          "1420": [
+            200
+          ]
+        },
+        "llx_actioncomm": {
+          "1420": [
+            39180,
+            39181,
+            41835,
+            41836,
+            43061,
+            43062,
+            46374,
+            46552,
+            51429,
+            51430,
+            51606,
+            51607,
+            52815,
+            52816,
+            52820,
+            52821,
+            52822,
+            54128,
+            54129
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1420
+      ]
+    },
+    {
+      "master": 1620,
+      "absorbed": [
+        563
+      ],
+      "moves": {
+        "llx_facture": 2,
+        "llx_propal": 1,
+        "llx_actioncomm": 1
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "563": [
+            6470,
+            39655
+          ]
+        },
+        "llx_propal": {
+          "563": [
+            160
+          ]
+        },
+        "llx_actioncomm": {
+          "563": [
+            2610
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null,
+        "address": null,
+        "zip": null
+      },
+      "archived": [
+        563
+      ]
+    },
+    {
+      "master": 1386,
+      "absorbed": [
+        566,
+        1428
+      ],
+      "moves": {
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "566": [
+            163
+          ],
+          "1428": [
+            568
+          ]
+        },
+        "llx_notify": {
+          "1428": [
+            206
+          ]
+        },
+        "llx_actioncomm": {
+          "1428": [
+            39779,
+            39781
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        566,
+        1428
+      ]
+    },
+    {
+      "master": 604,
+      "absorbed": [
+        603
+      ],
+      "moves": {
+        "llx_propal": 1
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "603": [
+            173
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        603
+      ]
+    },
+    {
+      "master": 611,
+      "absorbed": [
+        612
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "612": [
+            178
+          ]
+        },
+        "llx_actioncomm": {
+          "612": [
+            185,
+            186
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        612
+      ]
+    },
+    {
+      "master": 631,
+      "absorbed": [
+        894
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "894": [
+            282
+          ]
+        },
+        "llx_actioncomm": {
+          "894": [
+            10106,
+            10107
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        894
+      ]
+    },
+    {
+      "master": 636,
+      "absorbed": [
+        1321
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1321": [
+            496
+          ]
+        },
+        "llx_notify": {
+          "1321": [
+            135
+          ]
+        },
+        "llx_actioncomm": {
+          "1321": [
+            30184,
+            30185
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1321
+      ]
+    },
+    {
+      "master": 660,
+      "absorbed": [
+        1256
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 4
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1256": [
+            19555
+          ]
+        },
+        "llx_propal": {
+          "1256": [
+            453
+          ]
+        },
+        "llx_notify": {
+          "1256": [
+            92
+          ]
+        },
+        "llx_actioncomm": {
+          "1256": [
+            27184,
+            27185,
+            29044,
+            29045
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1256
+      ]
+    },
+    {
+      "master": 681,
+      "absorbed": [
+        1742
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1742": [
+            797
+          ]
+        },
+        "llx_notify": {
+          "1742": [
+            406
+          ]
+        },
+        "llx_actioncomm": {
+          "1742": [
+            56721,
+            56722
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1742
+      ]
+    },
+    {
+      "master": 1079,
+      "absorbed": [
+        692,
+        693,
+        694
+      ],
+      "moves": {
+        "llx_propal": 3,
+        "llx_actioncomm": 6
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "692": [
+            206
+          ],
+          "693": [
+            207
+          ],
+          "694": [
+            208
+          ]
+        },
+        "llx_actioncomm": {
+          "692": [
+            3032,
+            3033
+          ],
+          "693": [
+            3034,
+            3035
+          ],
+          "694": [
+            3036,
+            3037
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        692,
+        693,
+        694
+      ]
+    },
+    {
+      "master": 699,
+      "absorbed": [
+        700
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "700": [
+            213
+          ]
+        },
+        "llx_actioncomm": {
+          "700": [
+            3100,
+            3102
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        700
+      ]
+    },
+    {
+      "master": 791,
+      "absorbed": [
+        1434,
+        1435
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 5
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1434": [
+            27587
+          ]
+        },
+        "llx_propal": {
+          "1435": [
+            576
+          ]
+        },
+        "llx_notify": {
+          "1435": [
+            212
+          ]
+        },
+        "llx_actioncomm": {
+          "1434": [
+            39852,
+            45112,
+            45113
+          ],
+          "1435": [
+            39853,
+            39854
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1434,
+        1435
+      ]
+    },
+    {
+      "master": 826,
+      "absorbed": [
+        827,
+        1268
+      ],
+      "moves": {
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 4
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "827": [
+            250
+          ],
+          "1268": [
+            461
+          ]
+        },
+        "llx_notify": {
+          "1268": [
+            100
+          ]
+        },
+        "llx_actioncomm": {
+          "827": [
+            7628,
+            7629
+          ],
+          "1268": [
+            28020,
+            28021
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        827,
+        1268
+      ]
+    },
+    {
+      "master": 844,
+      "absorbed": [
+        1252,
+        1769
+      ],
+      "moves": {
+        "llx_facture": 2,
+        "llx_propal": 2,
+        "llx_notify": 3,
+        "llx_actioncomm": 9
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1252": [
+            24919
+          ],
+          "1769": [
+            37015
+          ]
+        },
+        "llx_propal": {
+          "1252": [
+            449
+          ],
+          "1769": [
+            821
+          ]
+        },
+        "llx_notify": {
+          "1252": [
+            88
+          ],
+          "1769": [
+            432,
+            439
+          ]
+        },
+        "llx_actioncomm": {
+          "1252": [
+            26838,
+            26839,
+            39704,
+            39705
+          ],
+          "1769": [
+            58747,
+            58751,
+            58974,
+            64766,
+            64767
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        1252,
+        1769
+      ]
+    },
+    {
+      "master": 1459,
+      "absorbed": [
+        845
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "845": [
+            260
+          ]
+        },
+        "llx_actioncomm": {
+          "845": [
+            8250,
+            8251
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        845
+      ]
+    },
+    {
+      "master": 859,
+      "absorbed": [
+        1307
+      ],
+      "moves": {
+        "llx_facture": 13,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 22
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1307": [
+            26855,
+            32489,
+            32648,
+            33439,
+            35034,
+            35035,
+            35968,
+            36151,
+            36563,
+            37268,
+            37666,
+            38121,
+            38372
+          ]
+        },
+        "llx_propal": {
+          "1307": [
+            485
+          ]
+        },
+        "llx_notify": {
+          "1307": [
+            124
+          ]
+        },
+        "llx_actioncomm": {
+          "1307": [
+            29385,
+            29386,
+            43690,
+            43691,
+            55081,
+            55082,
+            55372,
+            55373,
+            57021,
+            57022,
+            60432,
+            60433,
+            60434,
+            60435,
+            62279,
+            62280,
+            62769,
+            62770,
+            63704,
+            63705,
+            65323,
+            65324
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1307
+      ]
+    },
+    {
+      "master": 883,
+      "absorbed": [
+        1010
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1010": [
+            321
+          ]
+        },
+        "llx_actioncomm": {
+          "1010": [
+            15616,
+            15619
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        1010
+      ]
+    },
+    {
+      "master": 910,
+      "absorbed": [
+        1586
+      ],
+      "moves": {
+        "llx_facture": 8,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 16
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1586": [
+            30321,
+            30507,
+            32009,
+            32169,
+            32798,
+            32799,
+            36391,
+            39575
+          ]
+        },
+        "llx_propal": {
+          "1586": [
+            680
+          ]
+        },
+        "llx_notify": {
+          "1586": [
+            281
+          ]
+        },
+        "llx_actioncomm": {
+          "1586": [
+            49946,
+            49947,
+            50660,
+            50661,
+            51038,
+            51039,
+            54120,
+            54121,
+            54443,
+            54444,
+            55679,
+            55680,
+            55681,
+            55682,
+            63348,
+            63351
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1586
+      ]
+    },
+    {
+      "master": 1069,
+      "absorbed": [
+        946,
+        947
+      ],
+      "moves": {
+        "llx_propal": 2,
+        "llx_actioncomm": 4
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "946": [
+            296
+          ],
+          "947": [
+            297
+          ]
+        },
+        "llx_actioncomm": {
+          "946": [
+            11879,
+            11880
+          ],
+          "947": [
+            11881,
+            11882
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        946,
+        947
+      ]
+    },
+    {
+      "master": 1013,
+      "absorbed": [
+        953
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "953": [
+            299
+          ]
+        },
+        "llx_actioncomm": {
+          "953": [
+            12249,
+            12250
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        953
+      ]
+    },
+    {
+      "master": 1795,
+      "absorbed": [
+        956
+      ],
+      "moves": {
+        "llx_facture": 2,
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 7
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "956": [
+            14107,
+            14113
+          ]
+        },
+        "llx_propal": {
+          "956": [
+            300,
+            764
+          ]
+        },
+        "llx_notify": {
+          "956": [
+            371
+          ]
+        },
+        "llx_actioncomm": {
+          "956": [
+            12350,
+            12351,
+            18010,
+            18011,
+            18021,
+            18022,
+            53694
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        956
+      ]
+    },
+    {
+      "master": 980,
+      "absorbed": [
+        1137
+      ],
+      "moves": {
+        "llx_facture": 2,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 6
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1137": [
+            18344,
+            29238
+          ]
+        },
+        "llx_propal": {
+          "1137": [
+            394
+          ]
+        },
+        "llx_notify": {
+          "1137": [
+            32
+          ]
+        },
+        "llx_actioncomm": {
+          "1137": [
+            21933,
+            21936,
+            26569,
+            26570,
+            48429,
+            48430
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1137
+      ]
+    },
+    {
+      "master": 1000,
+      "absorbed": [
+        999
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "999": [
+            310
+          ]
+        },
+        "llx_actioncomm": {
+          "999": [
+            15254,
+            15255
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        999
+      ]
+    },
+    {
+      "master": 1001,
+      "absorbed": [
+        1700
+      ],
+      "moves": {
+        "llx_propal": 2,
+        "llx_notify": 2,
+        "llx_actioncomm": 3
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1700": [
+            770,
+            860
+          ]
+        },
+        "llx_notify": {
+          "1700": [
+            377,
+            474
+          ]
+        },
+        "llx_actioncomm": {
+          "1700": [
+            54253,
+            54254,
+            63262
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1700
+      ]
+    },
+    {
+      "master": 1011,
+      "absorbed": [
+        1051
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1051": [
+            351
+          ]
+        },
+        "llx_actioncomm": {
+          "1051": [
+            17282,
+            17283
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1051
+      ]
+    },
+    {
+      "master": 1015,
+      "absorbed": [
+        1016
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_actioncomm": 6
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1016": [
+            34266
+          ]
+        },
+        "llx_propal": {
+          "1016": [
+            327
+          ]
+        },
+        "llx_actioncomm": {
+          "1016": [
+            15696,
+            15697,
+            58776,
+            58777,
+            58778,
+            58790
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1016
+      ]
+    },
+    {
+      "master": 1020,
+      "absorbed": [
+        1333
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_notify": 2,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1333": [
+            38503
+          ]
+        },
+        "llx_propal": {
+          "1333": [
+            505
+          ]
+        },
+        "llx_notify": {
+          "1333": [
+            144,
+            518
+          ]
+        },
+        "llx_actioncomm": {
+          "1333": [
+            30680,
+            30683
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1333
+      ]
+    },
+    {
+      "master": 1365,
+      "absorbed": [
+        1035
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1035": [
+            337
+          ]
+        },
+        "llx_actioncomm": {
+          "1035": [
+            17001,
+            17002
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        1035
+      ]
+    },
+    {
+      "master": 1063,
+      "absorbed": [
+        1090
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1090": [
+            378
+          ]
+        },
+        "llx_actioncomm": {
+          "1090": [
+            19100,
+            19104
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1090
+      ]
+    },
+    {
+      "master": 1078,
+      "absorbed": [
+        1610,
+        1657
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 2,
+        "llx_notify": 2,
+        "llx_actioncomm": 6
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1610": [
+            36289
+          ]
+        },
+        "llx_propal": {
+          "1610": [
+            702
+          ],
+          "1657": [
+            740
+          ]
+        },
+        "llx_notify": {
+          "1610": [
+            307
+          ],
+          "1657": [
+            346
+          ]
+        },
+        "llx_actioncomm": {
+          "1610": [
+            50673,
+            50674,
+            63092,
+            63093
+          ],
+          "1657": [
+            52485,
+            52486
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        1610,
+        1657
+      ]
+    },
+    {
+      "master": 1479,
+      "absorbed": [
+        1082,
+        1083
+      ],
+      "moves": {
+        "llx_propal": 2,
+        "llx_facture": 1,
+        "llx_actioncomm": 5
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1082": [
+            372
+          ],
+          "1083": [
+            373
+          ]
+        },
+        "llx_facture": {
+          "1083": [
+            19652
+          ]
+        },
+        "llx_actioncomm": {
+          "1082": [
+            18822,
+            18823
+          ],
+          "1083": [
+            18824,
+            18825,
+            29245
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        1082,
+        1083
+      ]
+    },
+    {
+      "master": 1108,
+      "absorbed": [
+        1092,
+        1642
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 3,
+        "llx_notify": 2,
+        "llx_actioncomm": 6
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1092": [
+            15891
+          ]
+        },
+        "llx_propal": {
+          "1092": [
+            379
+          ],
+          "1642": [
+            729,
+            730
+          ]
+        },
+        "llx_notify": {
+          "1642": [
+            335,
+            336
+          ]
+        },
+        "llx_actioncomm": {
+          "1092": [
+            19148,
+            19151,
+            21814
+          ],
+          "1642": [
+            51624,
+            51625,
+            51626
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1092,
+        1642
+      ]
+    },
+    {
+      "master": 1122,
+      "absorbed": [
+        1483,
+        1624
+      ],
+      "moves": {
+        "llx_propal": 2,
+        "llx_notify": 1,
+        "llx_actioncomm": 4
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1483": [
+            609
+          ],
+          "1624": [
+            713
+          ]
+        },
+        "llx_notify": {
+          "1624": [
+            318
+          ]
+        },
+        "llx_actioncomm": {
+          "1483": [
+            42909,
+            42910
+          ],
+          "1624": [
+            51097,
+            51098
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1483,
+        1624
+      ]
+    },
+    {
+      "master": 1205,
+      "absorbed": [
+        1179
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1179": [
+            413
+          ]
+        },
+        "llx_notify": {
+          "1179": [
+            50
+          ]
+        },
+        "llx_actioncomm": {
+          "1179": [
+            23694,
+            23695
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1179
+      ]
+    },
+    {
+      "master": 1266,
+      "absorbed": [
+        1213
+      ],
+      "moves": {
+        "llx_facture": 3,
+        "llx_propal": 1,
+        "llx_notify": 3,
+        "llx_actioncomm": 13
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1213": [
+            28810,
+            29906,
+            35813
+          ]
+        },
+        "llx_propal": {
+          "1213": [
+            425
+          ]
+        },
+        "llx_notify": {
+          "1213": [
+            62,
+            68,
+            69
+          ]
+        },
+        "llx_actioncomm": {
+          "1213": [
+            25664,
+            25665,
+            25676,
+            25677,
+            47507,
+            47508,
+            49802,
+            49829,
+            49836,
+            49837,
+            51145,
+            61968,
+            61971
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        1213
+      ]
+    },
+    {
+      "master": 1221,
+      "absorbed": [
+        1735
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1735": [
+            795
+          ]
+        },
+        "llx_notify": {
+          "1735": [
+            404
+          ]
+        },
+        "llx_actioncomm": {
+          "1735": [
+            56207,
+            56208
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1735
+      ]
+    },
+    {
+      "master": 1539,
+      "absorbed": [
+        1245
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1245": [
+            444
+          ]
+        },
+        "llx_notify": {
+          "1245": [
+            83
+          ]
+        },
+        "llx_actioncomm": {
+          "1245": [
+            26667,
+            26668
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1245
+      ]
+    },
+    {
+      "master": 1324,
+      "absorbed": [
+        1462
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1462": [
+            593
+          ]
+        },
+        "llx_actioncomm": {
+          "1462": [
+            41920,
+            41921
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1462
+      ]
+    },
+    {
+      "master": 1325,
+      "absorbed": [
+        1725
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1725": [
+            790
+          ]
+        },
+        "llx_notify": {
+          "1725": [
+            399
+          ]
+        },
+        "llx_actioncomm": {
+          "1725": [
+            56114,
+            56117
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        1725
+      ]
+    },
+    {
+      "master": 1376,
+      "absorbed": [
+        1704
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1704": [
+            774
+          ]
+        },
+        "llx_notify": {
+          "1704": [
+            382
+          ]
+        },
+        "llx_actioncomm": {
+          "1704": [
+            54695,
+            54696
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1704
+      ]
+    },
+    {
+      "master": 1780,
+      "absorbed": [
+        1389
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1389": [
+            539
+          ]
+        },
+        "llx_notify": {
+          "1389": [
+            176
+          ]
+        },
+        "llx_actioncomm": {
+          "1389": [
+            35632,
+            35633
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null
+      },
+      "archived": [
+        1389
+      ]
+    },
+    {
+      "master": 1421,
+      "absorbed": [
+        1589
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_notify": 2,
+        "llx_actioncomm": 5
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1589": [
+            32020
+          ]
+        },
+        "llx_propal": {
+          "1589": [
+            683
+          ]
+        },
+        "llx_notify": {
+          "1589": [
+            284,
+            285
+          ]
+        },
+        "llx_actioncomm": {
+          "1589": [
+            49970,
+            49971,
+            49972,
+            54149,
+            54150
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1589
+      ]
+    },
+    {
+      "master": 1430,
+      "absorbed": [
+        1728
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1728": [
+            792
+          ]
+        },
+        "llx_notify": {
+          "1728": [
+            401
+          ]
+        },
+        "llx_actioncomm": {
+          "1728": [
+            56128,
+            56131
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1728
+      ]
+    },
+    {
+      "master": 1605,
+      "absorbed": [
+        1432
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1432": [
+            574
+          ]
+        },
+        "llx_notify": {
+          "1432": [
+            210
+          ]
+        },
+        "llx_actioncomm": {
+          "1432": [
+            39848,
+            39849
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1432
+      ]
+    },
+    {
+      "master": 1517,
+      "absorbed": [
+        1828
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1828": [
+            872
+          ]
+        },
+        "llx_notify": {
+          "1828": [
+            487
+          ]
+        },
+        "llx_actioncomm": {
+          "1828": [
+            63699,
+            63702
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "phone": null
+      },
+      "archived": [
+        1828
+      ]
+    },
+    {
+      "master": 1546,
+      "absorbed": [
+        1733
+      ],
+      "moves": {
+        "llx_facture": 1,
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 3
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1733": [
+            36903
+          ]
+        },
+        "llx_propal": {
+          "1733": [
+            793
+          ]
+        },
+        "llx_notify": {
+          "1733": [
+            402
+          ]
+        },
+        "llx_actioncomm": {
+          "1733": [
+            56184,
+            56185,
+            64538
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1733
+      ]
+    },
+    {
+      "master": 1588,
+      "absorbed": [
+        1818
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1818": [
+            861
+          ]
+        },
+        "llx_notify": {
+          "1818": [
+            475
+          ]
+        },
+        "llx_actioncomm": {
+          "1818": [
+            63328,
+            63329
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1818
+      ]
+    },
+    {
+      "master": 1617,
+      "absorbed": [
+        1782
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1782": [
+            832
+          ]
+        },
+        "llx_notify": {
+          "1782": [
+            444
+          ]
+        },
+        "llx_actioncomm": {
+          "1782": [
+            59440,
+            59445
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1782
+      ]
+    },
+    {
+      "master": 1695,
+      "absorbed": [
+        1768
+      ],
+      "moves": {
+        "llx_propal": 1,
+        "llx_notify": 1,
+        "llx_actioncomm": 2
+      },
+      "movesByAbsorbed": {
+        "llx_propal": {
+          "1768": [
+            820
+          ]
+        },
+        "llx_notify": {
+          "1768": [
+            431
+          ]
+        },
+        "llx_actioncomm": {
+          "1768": [
+            58693,
+            58696
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1768
+      ]
+    },
+    {
+      "master": 1827,
+      "absorbed": [
+        1938
+      ],
+      "moves": {
+        "llx_facture": 4
+      },
+      "movesByAbsorbed": {
+        "llx_facture": {
+          "1938": [
+            39329,
+            39432,
+            39755,
+            39765
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {},
+      "archived": [
+        1938
+      ]
+    },
+    {
+      "master": 1963,
+      "absorbed": [
+        1962
+      ],
+      "moves": {
+        "llx_commande": 2,
+        "llx_actioncomm": 3
+      },
+      "movesByAbsorbed": {
+        "llx_commande": {
+          "1962": [
+            49,
+            50
+          ]
+        },
+        "llx_actioncomm": {
+          "1962": [
+            65888,
+            65889,
+            65890
+          ]
+        }
+      },
+      "conflicts": {},
+      "enrich": {
+        "address": null,
+        "town": null
+      },
+      "archived": [
+        1962
+      ]
+    }
+  ],
+  "pk": {
+    "llx_actioncomm": "id"
+  }
+}

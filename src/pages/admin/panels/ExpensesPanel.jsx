@@ -1,12 +1,12 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import {
-  FiTrendingDown, FiPlus, FiX, FiRefreshCw, FiCalendar, FiSearch, FiList,
-  FiDownload, FiAlertTriangle, FiCheck, FiSlash, FiDatabase, FiPlusCircle,
+  FiTrendingDown, FiX, FiRefreshCw, FiCalendar, FiSearch, FiList,
+  FiDownload, FiCheck, FiSlash, FiInfo,
 } from 'react-icons/fi';
 import {
-  listExpenses, getExpense, createExpense, cancelExpense, acknowledgeExpense,
-  getExpenseMeta, getCashSources, createCashSource, createTopup, getCashReport,
+  listExpenses, getExpense, cancelExpense, acknowledgeExpense,
+  getExpenseMeta, getCashReport,
 } from '../../../api/expenses';
 import { formatPrice } from '../../../utils/formatters';
 import {
@@ -22,38 +22,33 @@ function today() { return new Date().toISOString().split('T')[0]; }
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('fr-FR') : '—');
 const fmtDateTime = (d) => (d ? new Date(d).toLocaleString('fr-FR') : '—');
 
+const labelStyle = { display: 'block', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: '#6b7280', marginBottom: 2 };
+
 const STATUS_OPTIONS = [
   { value: '', label: 'Tous statuts' },
   { value: 'recorded', label: 'Enregistrées' },
   { value: 'cancelled', label: 'Annulées' },
 ];
 
+const ACTION_LABELS = { create: 'Création', cancel: 'Annulation' };
+
 function statusBadge(status) {
   if (status === 'cancelled') return <span className="ac-badge ac-badge-cancel">Annulée</span>;
   return <span className="ac-badge ac-badge-paid">Enregistrée</span>;
 }
 
-const ACTION_LABELS = { create: 'Création', cancel: 'Annulation' };
-
-// Style libellé champ (classe ac-label inexistante dans Accounting.css → inline).
-const labelStyle = { display: 'block', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: '#6b7280', marginBottom: 2 };
-
 export default function ExpensesPanel() {
   const [data, setData] = useState({ expenses: [], total: 0, pages: 1, kpis: { total: 0, nb: 0, by_category: [] } });
   const [loading, setLoading] = useState(true);
-  const [meta, setMeta] = useState({ categories: [], methods: [] });
-  const [sources, setSources] = useState([]);
+  const [meta, setMeta] = useState({ categories: [] });
   const [filters, setFilters] = useState({
-    category: '', method: '', source_id: '', status: '',
-    search: '', date_from: firstDayOfMonth(), date_to: today(), page: 1,
+    category: '', status: '', search: '',
+    date_from: firstDayOfMonth(), date_to: today(), page: 1,
   });
-  const [selected, setSelected] = useState(null);   // détail dépense
-  const [createOpen, setCreateOpen] = useState(false);
+  const [selected, setSelected] = useState(null);
   const [cancelTarget, setCancelTarget] = useState(null);
-  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [reportModal, setReportModal] = useState(null); // 'daily' | 'monthly'
 
-  // role courant (fourni par AdminDashboard via Outlet) — réserve annulation / sources aux admins
   const ctx = useOutletContext() || {};
   const isAdmin = ctx.adminRole === 'super_admin' || ctx.adminRole === 'admin';
 
@@ -64,15 +59,8 @@ export default function ExpensesPanel() {
       .catch(() => { toast.error('Erreur chargement des dépenses'); setLoading(false); });
   }, [filters]);
 
-  const reloadSources = useCallback(() => {
-    getCashSources().then(r => setSources(r.data.sources || [])).catch(() => {});
-  }, []);
-
   useEffect(() => { reload(); }, [reload]);
-  useEffect(() => {
-    getExpenseMeta().then(r => setMeta(r.data)).catch(() => {});
-    reloadSources();
-  }, [reloadSources]);
+  useEffect(() => { getExpenseMeta().then(r => setMeta(r.data)).catch(() => {}); }, []);
 
   const update = (k, v) => setFilters(f => ({ ...f, [k]: v, page: 1 }));
   const changePage = (p) => setFilters(f => ({ ...f, page: p }));
@@ -83,15 +71,12 @@ export default function ExpensesPanel() {
     catch { toast.error('Erreur chargement de la dépense'); setSelected(null); }
   };
 
-  const onCreated = () => { setCreateOpen(false); reload(); reloadSources(); };
-  const onCancelled = () => { setCancelTarget(null); reload(); reloadSources(); if (selected?.expense?.id) openDetail(selected.expense.id); };
+  const onCancelled = () => { setCancelTarget(null); reload(); if (selected?.expense?.id) openDetail(selected.expense.id); };
 
   const ack = async (id) => {
     try { await acknowledgeExpense(id); reload(); }
     catch { toast.error('Erreur'); }
   };
-
-  const totalBalance = useMemo(() => sources.reduce((s, x) => s + (x.balance || 0), 0), [sources]);
 
   return (
     <div className="admin-panel">
@@ -100,12 +85,6 @@ export default function ExpensesPanel() {
           <FiTrendingDown /> Sorties d'argent ({data.total})
         </h3>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={() => setCreateOpen(true)}>
-            <FiPlus size={14} /> Nouvelle sortie
-          </button>
-          <button className="btn btn-outline" onClick={() => setSourcesOpen(true)}>
-            <FiDatabase size={14} /> Sources & soldes
-          </button>
           <button className="btn btn-outline" onClick={() => setReportModal('daily')}>
             <FiCalendar size={14} /> Rapport journalier
           </button>
@@ -115,6 +94,10 @@ export default function ExpensesPanel() {
         </div>
       </div>
 
+      <div className="ac-info-box" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <FiInfo /> Les sorties d'argent sont saisies au POS (caisse). Cet écran est en consultation ; un administrateur peut annuler une sortie.
+      </div>
+
       {/* KPIs */}
       {!loading && (
         <div className="ac-breakdown">
@@ -122,11 +105,7 @@ export default function ExpensesPanel() {
             <strong style={{ color: '#9a3412' }}>{formatPrice(data.kpis.total || 0)}</strong>
             Total dépenses ({data.kpis.nb || 0})
           </div>
-          <div className="ac-breakdown-item" style={{ background: '#ecfdf5' }}>
-            <strong style={{ color: '#166534' }}>{formatPrice(totalBalance)}</strong>
-            Solde de caisse global
-          </div>
-          {(data.kpis.by_category || []).slice(0, 3).map(c => (
+          {(data.kpis.by_category || []).slice(0, 4).map(c => (
             <div key={c.category} className="ac-breakdown-item" style={{ background: '#f3f4f6' }}>
               <strong style={{ color: '#4b5563' }}>{formatPrice(c.total)}</strong>
               {c.label} ({c.nb})
@@ -153,14 +132,6 @@ export default function ExpensesPanel() {
           <option value="">Toutes catégories</option>
           {meta.categories.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
         </select>
-        <select value={filters.method} onChange={e => update('method', e.target.value)}>
-          <option value="">Toutes méthodes</option>
-          {meta.methods.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-        </select>
-        <select value={filters.source_id} onChange={e => update('source_id', e.target.value)}>
-          <option value="">Toutes sources</option>
-          {sources.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-        </select>
         <select value={filters.status} onChange={e => update('status', e.target.value)}>
           {STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -176,21 +147,20 @@ export default function ExpensesPanel() {
               <thead>
                 <tr>
                   <th>Date</th><th>Référence</th><th>Catégorie</th><th>Bénéficiaire</th>
-                  <th>Méthode</th><th>Source</th><th style={{ textAlign: 'right' }}>Montant</th>
+                  <th>Origine</th><th style={{ textAlign: 'right' }}>Montant</th>
                   <th>Saisi par</th><th>Statut</th><th></th>
                 </tr>
               </thead>
               <tbody>
                 {data.expenses.length === 0 ? (
-                  <tr><td colSpan={10} style={{ textAlign: 'center', color: '#94a3b8', padding: 24 }}>Aucune dépense</td></tr>
+                  <tr><td colSpan={9} style={{ textAlign: 'center', color: '#94a3b8', padding: 24 }}>Aucune dépense</td></tr>
                 ) : data.expenses.map(e => (
                   <tr key={e.id} style={{ cursor: 'pointer', opacity: e.status === 'cancelled' ? 0.55 : 1 }} onClick={() => openDetail(e.id)}>
                     <td>{fmtDate(e.expense_date || e.created_at)}</td>
                     <td style={{ fontFamily: 'monospace' }}>{e.ref}</td>
                     <td>{e.category_label}</td>
                     <td>{e.beneficiary}</td>
-                    <td>{e.method_label}</td>
-                    <td>{e.source_label}</td>
+                    <td>{e.in_register ? `Caisse${e.terminal ? ' T' + e.terminal : ''}` : 'Hors-caisse'}</td>
                     <td style={{ textAlign: 'right', fontWeight: 600, color: '#9a3412' }}>{formatPrice(e.amount)}</td>
                     <td>{e.created_by}</td>
                     <td>{statusBadge(e.status)}</td>
@@ -205,7 +175,6 @@ export default function ExpensesPanel() {
             </table>
           </div>
 
-          {/* Pagination */}
           {data.pages > 1 && (
             <div className="ac-pagination">
               <button className="btn btn-outline" disabled={filters.page <= 1} onClick={() => changePage(filters.page - 1)}>Précédent</button>
@@ -217,9 +186,7 @@ export default function ExpensesPanel() {
       )}
 
       {selected && <DetailModal data={selected} isAdmin={isAdmin} onClose={() => setSelected(null)} onCancel={(exp) => setCancelTarget(exp)} />}
-      {createOpen && <CreateModal meta={meta} sources={sources} onClose={() => setCreateOpen(false)} onDone={onCreated} />}
       {cancelTarget && <CancelModal expense={cancelTarget} onClose={() => setCancelTarget(null)} onDone={onCancelled} />}
-      {sourcesOpen && <SourcesModal sources={sources} isAdmin={isAdmin} onClose={() => setSourcesOpen(false)} onChanged={reloadSources} />}
       {reportModal && <ReportModal kind={reportModal} onClose={() => setReportModal(null)} />}
     </div>
   );
@@ -238,8 +205,7 @@ function DetailModal({ data, isAdmin, onClose, onCancel }) {
         <div><span style={labelStyle}>Montant</span><strong style={{ color: '#9a3412', fontSize: '1.2rem' }}>{formatPrice(expense.amount)}</strong></div>
         <div><span style={labelStyle}>Catégorie</span>{expense.category_label}</div>
         <div><span style={labelStyle}>Bénéficiaire</span>{expense.beneficiary}</div>
-        <div><span style={labelStyle}>Méthode</span>{expense.method_label}</div>
-        <div><span style={labelStyle}>Source</span>{expense.source_label}</div>
+        <div><span style={labelStyle}>Origine</span>{expense.in_register ? `Caisse POS${expense.terminal ? ' · Terminal ' + expense.terminal : ''}` : 'Hors-caisse'}</div>
         <div><span style={labelStyle}>Date</span>{fmtDate(expense.expense_date || expense.created_at)}</div>
         <div><span style={labelStyle}>Saisi par</span>{expense.created_by} ({expense.created_by_role})</div>
       </div>
@@ -282,84 +248,6 @@ function DetailModal({ data, isAdmin, onClose, onCancel }) {
   );
 }
 
-// ─── Modal création ─────────────────────────────────────────
-function CreateModal({ meta, sources, onClose, onDone }) {
-  const [form, setForm] = useState({
-    amount: '', category: '', beneficiary: '', payment_method: '',
-    source_id: '', expense_date: today(), reason: '', note: '',
-  });
-  const [submitting, setSubmitting] = useState(false);
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const activeSources = sources.filter(s => s.is_active);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!form.amount || Number(form.amount) <= 0) return toast.error('Montant invalide');
-    if (!form.category) return toast.error('Catégorie requise');
-    if (!form.beneficiary.trim()) return toast.error('Bénéficiaire requis');
-    if (!form.payment_method) return toast.error('Méthode requise');
-    if (!form.source_id) return toast.error('Source de fonds requise');
-    if (form.reason.trim().length < 4) return toast.error('Motif/justification requis (4 caractères min.)');
-    setSubmitting(true);
-    try {
-      await createExpense(form);
-      toast.success('Sortie enregistrée — admins notifiés');
-      onDone();
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur enregistrement');
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <ModalShell onClose={onClose}>
-      <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: 8 }}><FiPlus /> Nouvelle sortie d'argent</h3>
-      <form onSubmit={submit} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }} className="ac-form">
-        <label>Montant (FCFA) *
-          <input type="number" min="1" step="1" value={form.amount} onChange={e => set('amount', e.target.value)} autoFocus />
-        </label>
-        <label>Catégorie *
-          <select value={form.category} onChange={e => set('category', e.target.value)}>
-            <option value="">— Choisir —</option>
-            {meta.categories.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
-          </select>
-        </label>
-        <label>Bénéficiaire *
-          <input type="text" value={form.beneficiary} onChange={e => set('beneficiary', e.target.value)} placeholder="Nom du fournisseur / personne" />
-        </label>
-        <label>Méthode de paiement *
-          <select value={form.payment_method} onChange={e => set('payment_method', e.target.value)}>
-            <option value="">— Choisir —</option>
-            {meta.methods.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-          </select>
-        </label>
-        <label>Source des fonds *
-          <select value={form.source_id} onChange={e => set('source_id', e.target.value)}>
-            <option value="">— Choisir —</option>
-            {activeSources.map(s => <option key={s.id} value={s.id}>{s.label} (solde : {formatPrice(s.balance)})</option>)}
-          </select>
-        </label>
-        <label>Date
-          <input type="date" value={form.expense_date} onChange={e => set('expense_date', e.target.value)} />
-        </label>
-        <label style={{ gridColumn: '1 / -1' }}>Motif / justification *
-          <textarea rows={2} value={form.reason} onChange={e => set('reason', e.target.value)} placeholder="Pourquoi cette dépense ?" />
-        </label>
-        <label style={{ gridColumn: '1 / -1' }}>Note (facultatif)
-          <textarea rows={2} value={form.note} onChange={e => set('note', e.target.value)} />
-        </label>
-        <div className="ac-modal-footer" style={{ gridColumn: '1 / -1' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#9a3412', fontSize: '0.82rem' }}>
-            <FiAlertTriangle /> Les administrateurs seront notifiés de ce retrait.
-          </div>
-          <button type="button" className="btn btn-outline" onClick={onClose}>Annuler</button>
-          <button type="submit" className="btn btn-primary" disabled={submitting}>{submitting ? 'Enregistrement…' : 'Enregistrer la sortie'}</button>
-        </div>
-      </form>
-    </ModalShell>
-  );
-}
-
 // ─── Modal annulation ───────────────────────────────────────
 function CancelModal({ expense, onClose, onDone }) {
   const [reason, setReason] = useState('');
@@ -380,7 +268,7 @@ function CancelModal({ expense, onClose, onDone }) {
   return (
     <ModalShell onClose={onClose} narrow>
       <h3 style={{ marginTop: 0, color: '#991b1b', display: 'flex', alignItems: 'center', gap: 8 }}><FiSlash /> Annuler {expense.ref}</h3>
-      <p>Cette annulation est tracée et recrédite le solde de la source. Montant : <strong>{formatPrice(expense.amount)}</strong>.</p>
+      <p>Annulation tracée dans le journal d'audit. La sortie est retirée des totaux et rapports. Montant : <strong>{formatPrice(expense.amount)}</strong>.</p>
       <form onSubmit={submit}>
         <label style={labelStyle}>Motif de l'annulation *</label>
         <textarea rows={3} value={reason} onChange={e => setReason(e.target.value)} style={{ width: '100%' }} autoFocus />
@@ -393,88 +281,6 @@ function CancelModal({ expense, onClose, onDone }) {
   );
 }
 
-// ─── Modal sources & soldes ─────────────────────────────────
-function SourcesModal({ sources, isAdmin, onClose, onChanged }) {
-  const [topupFor, setTopupFor] = useState(null);
-  const [topupAmount, setTopupAmount] = useState('');
-  const [newSource, setNewSource] = useState({ label: '', type: 'caisse', opening_balance: '' });
-  const [busy, setBusy] = useState(false);
-
-  const doTopup = async (sourceId) => {
-    if (!topupAmount || Number(topupAmount) <= 0) return toast.error('Montant invalide');
-    setBusy(true);
-    try {
-      await createTopup({ source_id: sourceId, amount: topupAmount });
-      toast.success('Source approvisionnée');
-      setTopupFor(null); setTopupAmount(''); onChanged();
-    } catch (err) { toast.error(err.response?.data?.error || 'Erreur'); }
-    setBusy(false);
-  };
-
-  const addSource = async (e) => {
-    e.preventDefault();
-    if (!newSource.label.trim()) return toast.error('Libellé requis');
-    setBusy(true);
-    try {
-      await createCashSource(newSource);
-      toast.success('Source créée');
-      setNewSource({ label: '', type: 'caisse', opening_balance: '' }); onChanged();
-    } catch (err) { toast.error(err.response?.data?.error || 'Erreur'); }
-    setBusy(false);
-  };
-
-  return (
-    <ModalShell onClose={onClose}>
-      <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: 8 }}><FiDatabase /> Sources de fonds & soldes</h3>
-      <table className="ac-table">
-        <thead><tr><th>Source</th><th>Type</th><th style={{ textAlign: 'right' }}>Solde</th>{isAdmin && <th></th>}</tr></thead>
-        <tbody>
-          {sources.map(s => (
-            <tr key={s.id}>
-              <td>{s.label}</td>
-              <td>{s.type_label}</td>
-              <td style={{ textAlign: 'right', fontWeight: 600, color: s.balance < 0 ? '#991b1b' : '#166534' }}>{formatPrice(s.balance)}</td>
-              {isAdmin && (
-                <td onClick={e => e.stopPropagation()}>
-                  {topupFor === s.id ? (
-                    <span style={{ display: 'flex', gap: 4 }}>
-                      <input type="number" min="1" value={topupAmount} onChange={e => setTopupAmount(e.target.value)} style={{ width: 100 }} autoFocus />
-                      <button className="btn btn-tiny btn-primary" disabled={busy} onClick={() => doTopup(s.id)}><FiCheck size={12} /></button>
-                      <button className="btn btn-tiny btn-outline" onClick={() => setTopupFor(null)}><FiX size={12} /></button>
-                    </span>
-                  ) : (
-                    <button className="btn btn-tiny btn-outline" onClick={() => { setTopupFor(s.id); setTopupAmount(''); }}><FiPlusCircle size={12} /> Approvisionner</button>
-                  )}
-                </td>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      {isAdmin && (
-        <form onSubmit={addSource} style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <label style={{ flex: '1 1 160px' }}>Nouvelle source
-            <input type="text" value={newSource.label} onChange={e => setNewSource(s => ({ ...s, label: e.target.value }))} placeholder="Libellé" />
-          </label>
-          <label>Type
-            <select value={newSource.type} onChange={e => setNewSource(s => ({ ...s, type: e.target.value }))}>
-              <option value="caisse">Caisse</option>
-              <option value="banque">Banque</option>
-              <option value="mobile">Mobile money</option>
-            </select>
-          </label>
-          <label>Solde d'ouverture
-            <input type="number" min="0" value={newSource.opening_balance} onChange={e => setNewSource(s => ({ ...s, opening_balance: e.target.value }))} />
-          </label>
-          <button type="submit" className="btn btn-primary" disabled={busy}><FiPlus size={14} /> Ajouter</button>
-        </form>
-      )}
-      <div className="ac-modal-footer"><button className="btn btn-outline" onClick={onClose}>Fermer</button></div>
-    </ModalShell>
-  );
-}
-
 // ─── Modal rapport de caisse ────────────────────────────────
 function ReportModal({ kind, onClose }) {
   const [dateIso, setDateIso] = useState(today());
@@ -482,9 +288,7 @@ function ReportModal({ kind, onClose }) {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const period = kind === 'daily'
-    ? { kind, dateIso }
-    : { kind, yearMonth };
+  const period = kind === 'daily' ? { kind, dateIso } : { kind, yearMonth };
   const range = kind === 'daily' ? dailyRange(dateIso) : monthlyRange(yearMonth);
   const periodLabel = formatPeriodLabel(period);
 

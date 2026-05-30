@@ -578,6 +578,86 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // AJUSTEMENT D'INVENTAIRE (déphasage stock physique ↔ système)
+  // L'utilisateur saisit la quantité PHYSIQUE réelle ; le système calcule
+  // l'écart vs le stock du dépôt et applique un mouvement +/- (auto-correcteur,
+  // aucun calcul mental). Accessible à TOUS les profils admin (libraire/vendeur
+  // inclus) : la personne au rayon doit pouvoir corriger un écart immédiatement.
+  // Tracé intégralement dans admin_activity_log.
+  // ═══════════════════════════════════════════════════════════
+
+  router.post('/adjust', auth, csrfProtection, async (req, res) => {
+    try {
+      const { product_id, warehouse_id = 4, counted_qty, reason } = req.body;
+      const counted = parseInt(counted_qty, 10);
+      const wh = parseInt(warehouse_id, 10) || 4;
+      if (!product_id || !Number.isInteger(counted) || counted < 0) {
+        return res.status(400).json({ error: 'product_id et counted_qty (entier ≥ 0) requis' });
+      }
+      if (counted > 100000) return res.status(400).json({ error: 'Quantité trop élevée' });
+
+      const [[product]] = await dolibarrPool.query(
+        `SELECT rowid, ref, label FROM llx_product WHERE rowid = ?`, [product_id]
+      );
+      if (!product) return res.status(404).json({ error: 'Produit introuvable' });
+      const [[whRow]] = await dolibarrPool.query(
+        `SELECT rowid FROM llx_entrepot WHERE rowid = ? AND statut = 1`, [wh]
+      );
+      if (!whRow) return res.status(400).json({ error: 'Entrepôt invalide ou inactif' });
+
+      // Stock système actuel POUR CE DÉPÔT (pas le global) : c'est ce qu'on corrige.
+      const [[stockRow]] = await dolibarrPool.query(
+        `SELECT reel FROM llx_product_stock WHERE fk_product = ? AND fk_entrepot = ?`, [product_id, wh]
+      );
+      const current = Number(stockRow?.reel || 0);
+      const delta = counted - current;
+
+      if (delta === 0) {
+        return res.json({ success: true, product_ref: product.ref, current, counted, delta: 0, message: 'Stock déjà à jour' });
+      }
+
+      const adminApi = (await import('axios')).default.create({
+        baseURL: process.env.DOLIBARR_URL,
+        headers: { DOLAPIKEY: process.env.DOLIBARR_ADMIN_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 30000,
+      });
+      // Mouvement signé : delta > 0 = entrée (ENTREE), delta < 0 = sortie (SORTIE).
+      await adminApi.post('/stockmovements', {
+        product_id: parseInt(product_id, 10),
+        warehouse_id: wh,
+        qty: delta,
+        movementcode: delta > 0 ? 'ENTREE' : 'SORTIE',
+        movementlabel: `Ajustement inventaire (${current}→${counted}) — ${String(reason || '').slice(0, 60) || req.admin.username}`,
+      });
+
+      // Feedback immédiat : si le produit n'est plus en rupture, on solde les
+      // alertes 'rupture'/'couverture_critique' ouvertes (le batch quotidien
+      // recalculera le reste — stock_bas/point de commande selon les seuils).
+      let resolvedAlerts = 0;
+      if (counted > 0) {
+        try {
+          const r = db.prepare(
+            `UPDATE stock_alerts SET status = 'resolved', resolved_at = ?
+             WHERE product_id = ? AND status = 'open'
+               AND alert_type IN ('rupture', 'couverture_critique')`
+          ).run(new Date().toISOString(), product_id);
+          resolvedAlerts = r.changes || 0;
+        } catch { /* table absente : ignorer */ }
+      }
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'stock_adjust',
+          `Ajustement : ${product.ref} ${current}→${counted} (${delta > 0 ? '+' : ''}${delta}, dépôt ${wh})${reason ? ' — ' + reason : ''}`);
+      console.log(`[STOCK] Ajustement: ${product.ref} ${current}→${counted} (${delta > 0 ? '+' : ''}${delta}, dépôt ${wh}) par ${req.admin.username}`);
+
+      res.json({ success: true, product_ref: product.ref, current, counted, delta, resolvedAlerts });
+    } catch (err) {
+      console.error('[STOCK] adjust error:', err.response?.data || err.message);
+      res.status(500).json({ error: "Erreur d'ajustement de stock" });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // SUPPLIER ORDER (titre externe → commande fournisseur Dolibarr)
   // ═══════════════════════════════════════════════════════════
 

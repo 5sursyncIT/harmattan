@@ -140,7 +140,7 @@ export default function ContractCreate() {
 
   // Step 1bis -- Inline author creation
   const [creatingAuthor, setCreatingAuthor] = useState(false);
-  const [newAuthor, setNewAuthor] = useState({ name: '', email: '', phone: '' });
+  const [newAuthor, setNewAuthor] = useState({ name: '', firstname: '', email: '', phone: '' });
   const [newAuthorErrors, setNewAuthorErrors] = useState({});
   const [newAuthorSubmitting, setNewAuthorSubmitting] = useState(false);
 
@@ -211,6 +211,7 @@ export default function ContractCreate() {
   const openCreateAuthor = () => {
     setNewAuthor({
       name: authorQuery.trim(),
+      firstname: '',
       email: '',
       phone: '',
     });
@@ -226,10 +227,14 @@ export default function ContractCreate() {
   const validateNewAuthor = (data) => {
     const errs = {};
     if (!data.name?.trim() || data.name.trim().length < 2) errs.name = 'Nom requis (2 caractères min.)';
-    if (!data.phone?.trim()) errs.phone = 'Téléphone requis';
-    else if (data.phone.trim().replace(/[\s.\-()]/g, '').length < 6) errs.phone = 'Téléphone invalide';
-    if (!data.email?.trim()) errs.email = 'Email requis';
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) errs.email = 'Email invalide';
+    if (!data.firstname?.trim() || data.firstname.trim().length < 2) errs.firstname = 'Prénom requis (2 caractères min.)';
+    // Au moins un identifiant : téléphone OU email.
+    if (!data.phone?.trim() && !data.email?.trim()) {
+      errs.phone = 'Téléphone ou email requis';
+      errs.email = 'Téléphone ou email requis';
+    }
+    if (data.phone?.trim() && data.phone.trim().replace(/[\s.\-()]/g, '').length < 6) errs.phone = 'Téléphone invalide';
+    if (data.email?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) errs.email = 'Email invalide';
     return errs;
   };
 
@@ -243,6 +248,7 @@ export default function ContractCreate() {
     try {
       const res = await createAuthor({
         name: newAuthor.name.trim(),
+        firstname: newAuthor.firstname.trim(),
         email: newAuthor.email.trim(),
         phone: newAuthor.phone.trim(),
       });
@@ -386,20 +392,25 @@ export default function ContractCreate() {
                   <FiX size={18} />
                 </button>
               </div>
-              <div className="ct-form-row cols-2-1">
-                <Field label="Nom complet" required error={newAuthorErrors.name} hint="Tel qu'il apparaîtra dans le contrat">
-                  <input type="text" value={newAuthor.name} autoFocus
-                    onChange={e => setNewAuthor(a => ({ ...a, name: e.target.value }))}
-                    placeholder="Ex : Aminata Sow Fall" maxLength={120} />
+              <div className="ct-form-row cols-2">
+                <Field label="Prénom" required error={newAuthorErrors.firstname}>
+                  <input type="text" value={newAuthor.firstname} autoFocus
+                    onChange={e => setNewAuthor(a => ({ ...a, firstname: e.target.value }))}
+                    placeholder="Ex : Aminata" maxLength={80} />
                 </Field>
-                <Field label="Téléphone" required error={newAuthorErrors.phone}>
+                <Field label="Nom" required error={newAuthorErrors.name} hint="Nom de famille">
+                  <input type="text" value={newAuthor.name}
+                    onChange={e => setNewAuthor(a => ({ ...a, name: e.target.value }))}
+                    placeholder="Ex : Sow Fall" maxLength={120} />
+                </Field>
+              </div>
+              <div className="ct-form-row cols-2">
+                <Field label="Téléphone" error={newAuthorErrors.phone} hint="Téléphone ou email requis">
                   <input type="tel" value={newAuthor.phone}
                     onChange={e => setNewAuthor(a => ({ ...a, phone: e.target.value }))}
                     placeholder="+221 ..." maxLength={30} />
                 </Field>
-              </div>
-              <div className="ct-form-row cols-2">
-                <Field label="Email" required error={newAuthorErrors.email} hint="Pour l'envoi du contrat à signer">
+                <Field label="Email" error={newAuthorErrors.email} hint="Pour l'envoi du contrat à signer">
                   <input type="email" value={newAuthor.email}
                     onChange={e => setNewAuthor(a => ({ ...a, email: e.target.value }))}
                     placeholder="auteur@exemple.com" maxLength={150} />

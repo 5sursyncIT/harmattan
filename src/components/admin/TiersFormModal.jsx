@@ -13,6 +13,8 @@ const TYPES = [
 
 function emptyForm() {
   return {
+    is_company: false,
+    firstname: '',
     name: '',
     name_alias: '',
     email: '',
@@ -63,6 +65,11 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
   const validate = () => {
     const errs = {};
     if (!form.name.trim() || form.name.trim().length < 2) errs.name = 'Nom requis (2 caractères min.)';
+    // À la création : prénom requis pour un particulier, et au moins un identifiant.
+    if (!isEdit) {
+      if (!form.is_company && (!form.firstname.trim() || form.firstname.trim().length < 2)) errs.firstname = 'Prénom requis (2 caractères min.)';
+      if (!form.phone.trim() && !form.email.trim()) { errs.phone = 'Téléphone ou email requis'; errs.email = 'Téléphone ou email requis'; }
+    }
     if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) errs.email = 'Email invalide';
     if (form.client === '0' && !form.fournisseur) errs.client = 'Sélectionnez au moins un type (client/prospect ou fournisseur)';
     setErrors(errs);
@@ -75,6 +82,8 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
     try {
       const payload = {
         name: form.name.trim(),
+        firstname: form.firstname.trim(),
+        is_company: form.is_company,
         name_alias: form.name_alias.trim() || null,
         email: form.email.trim() || null,
         phone: form.phone.trim() || null,
@@ -129,7 +138,21 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
         <div className="tiers-modal-body">
           <h5 className="tiers-section">Identification</h5>
           <div className="tiers-grid">
-            <F label="Nom du tiers" name="name" required full />
+            {!isEdit && (
+              <div className="tiers-field tiers-field-full">
+                <label>Nature</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" className={`btn ${!form.is_company ? 'btn-primary' : 'btn-outline'}`}
+                    onClick={() => set('is_company', false)}>Particulier</button>
+                  <button type="button" className={`btn ${form.is_company ? 'btn-primary' : 'btn-outline'}`}
+                    onClick={() => set('is_company', true)}>Entreprise / organisation</button>
+                </div>
+              </div>
+            )}
+            {!isEdit && !form.is_company && (
+              <F label="Prénom" name="firstname" required />
+            )}
+            <F label={form.is_company ? 'Raison sociale' : 'Nom'} name="name" required full={isEdit || form.is_company} />
             <F label="Nom alternatif" name="name_alias" />
             <div className="tiers-field">
               <label>Type</label>

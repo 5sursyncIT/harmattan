@@ -81,10 +81,31 @@ export default function POSCashReport({ onClose }) {
                   <strong>{f(report.totals.avg_ticket)} F</strong>
                 </div>
                 <div className="pos-cr-kpi">
+                  <span>Encaissé</span>
+                  <strong>{f(report.totals.encaisse)} F</strong>
+                </div>
+                <div className="pos-cr-kpi">
                   <span>Remboursements</span>
                   <strong>{report.refunds.count} · {f(report.refunds.amount)} F</strong>
                 </div>
+                <div className="pos-cr-kpi">
+                  <span>Dépenses</span>
+                  <strong>{report.expenses?.count || 0} · {f(report.expenses?.total)} F</strong>
+                </div>
               </div>
+              {report.totals.net != null && (
+                <div className="pos-cr-net" style={{
+                  marginTop: 10, padding: '10px 14px', borderRadius: 8,
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  background: report.totals.net >= 0 ? '#ecfdf5' : '#fef2f2',
+                  border: `1px solid ${report.totals.net >= 0 ? '#a7f3d0' : '#fecaca'}`,
+                }}>
+                  <span style={{ fontWeight: 600, color: '#475569' }}>Résultat net (encaissé − remb. − dépenses)</span>
+                  <strong style={{ fontSize: '1.1rem', color: report.totals.net >= 0 ? '#166534' : '#991b1b' }}>
+                    {f(report.totals.net)} F
+                  </strong>
+                </div>
+              )}
             </section>
 
             <section className="pos-cr-section">
@@ -162,6 +183,44 @@ export default function POSCashReport({ onClose }) {
                         <td>{m.type === 'in' ? <span className="badge in"><FiTrendingUp size={10} /> Entrée</span> : <span className="badge out"><FiTrendingDown size={10} /> Sortie</span>}</td>
                         <td>{m.reason || '—'}</td>
                         <td className={'num ' + (m.type === 'in' ? 'plus' : 'minus')}>{f(m.amount)} F</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            )}
+
+            {report.expenses?.count > 0 && (
+              <section className="pos-cr-section">
+                <h4><FiTrendingDown size={14} /> Sorties d'argent ({report.expenses.count}) — {f(report.expenses.total)} F</h4>
+                <table className="pos-cr-table">
+                  <thead>
+                    <tr><th>Catégorie</th><th className="num">Montant</th></tr>
+                  </thead>
+                  <tbody>
+                    {report.expenses.by_category.map((c) => (
+                      <tr key={c.category}>
+                        <td>{c.label}</td>
+                        <td className="num minus">{f(c.amount)} F</td>
+                      </tr>
+                    ))}
+                    <tr className="total">
+                      <td>Total dépenses</td>
+                      <td className="num minus">{f(report.expenses.total)} F</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <table className="pos-cr-table" style={{ marginTop: 8 }}>
+                  <thead>
+                    <tr><th>Heure</th><th>Bénéficiaire</th><th>Motif</th><th className="num">Montant</th></tr>
+                  </thead>
+                  <tbody>
+                    {report.expenses.items.map((e) => (
+                      <tr key={e.id}>
+                        <td style={{ whiteSpace: 'nowrap' }}>{fmtDate(e.created_at)}</td>
+                        <td>{e.beneficiary}{e.in_register ? '' : ' (hors-caisse)'}</td>
+                        <td>{e.reason || '—'}</td>
+                        <td className="num minus">{f(e.amount)} F</td>
                       </tr>
                     ))}
                   </tbody>

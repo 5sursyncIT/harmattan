@@ -2,6 +2,7 @@ import { Router } from 'express';
 import 'dotenv/config';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import { findExistingTier } from './tier-dedup.js';
 
 /**
  * Customer authentication routes module
@@ -13,7 +14,7 @@ function hashSessionToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter, requireCustomerAuth, dolibarrApi, transporter, cookieSecure }) {
+export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter, requireCustomerAuth, dolibarrApi, dolibarrPool, transporter, cookieSecure }) {
   const router = Router();
 
   // Login
@@ -69,17 +70,24 @@ export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter
       const existing = db.prepare('SELECT id FROM customers WHERE email = ?').get(email);
       if (existing) return res.status(400).json({ error: 'Un compte existe déjà avec cet email' });
 
-      // Create in Dolibarr
+      // Lien Dolibarr : on réutilise un tier actif existant (même email / téléphone)
+      // pour éviter un doublon (ex. client déjà créé au POS / au checkout invité),
+      // sinon on en crée un.
       let dolibarrId = null;
       try {
-        const doliRes = await dolibarrApi.post('/thirdparties', {
-          name: `${firstname} ${lastname}`,
-          email,
-          phone: phone || '',
-          client: 1,
-          code_client: -1,
-        });
-        dolibarrId = doliRes.data;
+        const existing = await findExistingTier(dolibarrPool, { email, phone });
+        if (existing) {
+          dolibarrId = existing.id;
+        } else {
+          const doliRes = await dolibarrApi.post('/thirdparties', {
+            name: `${firstname} ${lastname}`,
+            email,
+            phone: phone || '',
+            client: 1,
+            code_client: -1,
+          });
+          dolibarrId = doliRes.data;
+        }
       } catch (err) {
         console.error('Dolibarr customer creation error:', err.response?.data || err.message);
       }

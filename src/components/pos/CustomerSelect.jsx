@@ -10,7 +10,9 @@ export default function CustomerSelect({ onClose }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [isCompany, setIsCompany] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newFirstname, setNewFirstname] = useState('');
   const [newPhone, setNewPhone] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [creating, setCreating] = useState(false);
@@ -58,11 +60,19 @@ export default function CustomerSelect({ onClose }) {
 
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (!newName.trim()) return;
+    if (!newName.trim()) return toast.error('Nom requis');
+    if (!isCompany && !newFirstname.trim()) return toast.error('Prénom requis pour un particulier');
+    if (!newPhone.trim() && !newEmail.trim()) return toast.error('Téléphone ou email requis');
     setCreating(true);
     try {
-      const res = await posCreateCustomer({ name: newName.trim(), phone: newPhone, email: newEmail });
-      toast.success(`Client "${res.data.name}" créé`);
+      const res = await posCreateCustomer({
+        name: newName.trim(),
+        firstname: isCompany ? '' : newFirstname.trim(),
+        phone: newPhone,
+        email: newEmail,
+        is_company: isCompany,
+      });
+      toast.success(res.data.existing ? `Client existant réutilisé : "${res.data.name}"` : `Client "${res.data.name}" créé`);
       handleSelect(res.data);
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur création client');
@@ -138,17 +148,31 @@ export default function CustomerSelect({ onClose }) {
         ) : (
           <form className="pos-cust-form" onSubmit={handleCreate}>
             <div className="pos-cust-field">
-              <label>Nom *</label>
-              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Nom complet" autoFocus required />
+              <label>Type</label>
+              <div className="pos-cust-typetoggle" role="group" aria-label="Type de client">
+                <button type="button" className={!isCompany ? 'active' : ''} onClick={() => setIsCompany(false)}>Particulier</button>
+                <button type="button" className={isCompany ? 'active' : ''} onClick={() => setIsCompany(true)}>Entreprise</button>
+              </div>
             </div>
             <div className="pos-cust-field">
-              <label>Téléphone</label>
+              <label>{isCompany ? 'Raison sociale *' : 'Nom *'}</label>
+              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={isCompany ? "Nom de l'entreprise" : 'Nom de famille'} autoFocus required />
+            </div>
+            {!isCompany && (
+              <div className="pos-cust-field">
+                <label>Prénom *</label>
+                <input type="text" value={newFirstname} onChange={(e) => setNewFirstname(e.target.value)} placeholder="Prénom" required />
+              </div>
+            )}
+            <div className="pos-cust-field">
+              <label>Téléphone {!newEmail.trim() ? '*' : ''}</label>
               <input type="tel" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} placeholder="77 000 00 00" />
             </div>
             <div className="pos-cust-field">
-              <label>Email</label>
+              <label>Email {!newPhone.trim() ? '*' : ''}</label>
               <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} placeholder="email@exemple.com" />
             </div>
+            <p className="pos-cust-hint">Téléphone ou email obligatoire.</p>
             <div className="pos-cust-form-actions">
               <button type="button" className="pos-cust-cancel" onClick={() => setShowCreate(false)}>Retour</button>
               <button type="submit" className="pos-cust-submit" disabled={creating}>

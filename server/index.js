@@ -18,6 +18,7 @@ import mysql from 'mysql2/promise';
 import sharp from 'sharp';
 import axios from 'axios';
 import { dolibarrApi } from './dolibarr-client.js';
+import { findExistingTier } from './tier-dedup.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
 import { EXCLUDED_CATEGORIES_SET, excludedCategorySqlList } from '../src/utils/excludedCategories.js';
 import {
@@ -793,11 +794,11 @@ app.get('/api/webhooks/logs', (req, res) => {
 
 // ─── POS MODULE ─────────────────────────────────────────────
 import { createPosRouter } from './pos-routes.js';
-app.use('/api/pos', createPosRouter({ db, dolibarrPool, csrfProtection, sanitizeBody, safeSqlFilter }));
+app.use('/api/pos', createPosRouter({ db, dolibarrPool, csrfProtection, sanitizeBody, safeSqlFilter, transporter }));
 
 // ─── AUTH MODULE ────────────────────────────────────────────
 import { createAuthRouter } from './auth-routes.js';
-app.use('/api/auth', createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter, requireCustomerAuth, dolibarrApi, transporter, cookieSecure: COOKIE_SECURE }));
+app.use('/api/auth', createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter, requireCustomerAuth, dolibarrApi, dolibarrPool, transporter, cookieSecure: COOKIE_SECURE }));
 
 // ─── CONTRACTS MODULE ───────────────────────────────────
 import { createContractRouter } from './contract-routes.js';
@@ -996,14 +997,21 @@ async function createContractDraft(manuscript) {
   let thirdpartyId = author.dolibarr_thirdparty_id;
   if (!thirdpartyId) {
     try {
-      const doliRes = await dolibarrApi.post('/thirdparties', {
-        name: `${author.firstname} ${author.lastname}`,
-        email: author.email,
-        phone: author.phone || '',
-        client: 1,
-        code_client: -1,
-      });
-      thirdpartyId = doliRes.data;
+      // Dédup : réutiliser un tier actif existant (même email / téléphone) plutôt
+      // que d'en créer un doublon, puis lier l'auteur.
+      const existing = await findExistingTier(dolibarrPool, { email: author.email, phone: author.phone });
+      if (existing) {
+        thirdpartyId = existing.id;
+      } else {
+        const doliRes = await dolibarrApi.post('/thirdparties', {
+          name: `${author.firstname} ${author.lastname}`,
+          email: author.email,
+          phone: author.phone || '',
+          client: 1,
+          code_client: -1,
+        });
+        thirdpartyId = doliRes.data;
+      }
       db.prepare('UPDATE authors SET dolibarr_thirdparty_id = ? WHERE id = ?').run(thirdpartyId, author.id);
     } catch (err) {
       console.error('[WORKFLOW] Thirdparty create error:', err.response?.data || err.message);

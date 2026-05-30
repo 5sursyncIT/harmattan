@@ -4,7 +4,12 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import 'dotenv/config';
 import { dolibarrApi } from './dolibarr-client.js';
+import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { EXCLUDED_CATEGORIES_SET } from '../src/utils/excludedCategories.js';
+import {
+  ensureExpenseTables, createExpenseRecord, notifyAdminsExpense,
+  CATEGORY_LABELS as EXPENSE_CATEGORY_LABELS,
+} from './expenses-routes.js';
 
 // Dolibarr admin API key (for invoice/payment operations)
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -123,7 +128,10 @@ function createMutex() {
   };
 }
 
-export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilter }) {
+export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilter, transporter }) {
+  // Tables des sorties d'argent (partagées avec l'écran admin de consultation).
+  ensureExpenseTables(db);
+  const expenseSiteUrl = process.env.SITE_URL || process.env.PUBLIC_URL || '';
   const router = Router();
 
   // Sérialise la section critique des ventes (vérif stock → création →
@@ -829,15 +837,34 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   // Create a new customer in Dolibarr
   router.post('/customers', requirePosAuth, csrfProtection, async (req, res) => {
     try {
-      const { name, phone, email } = req.body;
-      if (!name || name.trim().length < 2) return res.status(400).json({ error: 'Nom requis (2 caractères min.)' });
+      const { name, firstname, phone, email, is_company } = req.body;
+      const isCompany = !!is_company;
+
+      // Validation : nom + (prénom si particulier) + (téléphone OU email).
+      const vErr = validateTierIdentity({ name, firstname, email, phone, isCompany });
+      if (vErr) return res.status(400).json({ error: vErr });
+
+      // Dédup à la création : si un tier actif a déjà cet email / téléphone,
+      // on le réutilise au lieu d'en créer un doublon (prévention repollution).
+      const existing = await findExistingTier(dolibarrPool, { email, phone });
+      if (existing) {
+        return res.json({
+          id: existing.id,
+          name: existing.name,
+          email: existing.email,
+          phone: existing.phone,
+          existing: true,
+          matchedBy: existing.matchedBy,
+        });
+      }
 
       const customerRes = await adminApi.post('/thirdparties', {
-        name: name.trim(),
+        name: buildTierName({ name, firstname, isCompany }),
         phone: phone || '',
         email: email || '',
         client: 1,   // Mark as customer
         code_client: -1, // Auto-generate
+        ...(isCompany ? {} : { typent_id: TYPENT_PARTICULIER }),
       });
 
       const newId = customerRes.data;
@@ -848,6 +875,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         name: detail.data.name || detail.data.nom,
         email: detail.data.email,
         phone: detail.data.phone,
+        existing: false,
       });
     } catch (err) {
       console.error('POS create customer error:', err.response?.data || err.message);
@@ -1791,7 +1819,29 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           ORDER BY id DESC LIMIT 20`,
       ).all(`T${terminal} |%`, periodStartIso);
 
-      // 8) Mapping codes → labels (cohérent avec PAYMENT_MAP).
+      // 8) Sorties d'argent (dépenses) de la période — total, par catégorie, détail.
+      //    Les dépenses « en caisse » génèrent déjà un mouvement `out` (donc comptées
+      //    dans cashOut / l'encaisse attendue) ; on les RESTITUE ici pour le détail.
+      let expenseRows = [];
+      try {
+        expenseRows = db.prepare(
+          `SELECT id, ref, category, beneficiary, amount, reason, in_register, created_at
+             FROM expenses
+            WHERE terminal = ? AND status = 'recorded' AND created_at >= ?
+            ORDER BY created_at ASC`,
+        ).all(terminal, periodStartIso);
+      } catch { expenseRows = []; }
+      const expensesTotal = expenseRows.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+      const expByCat = {};
+      for (const e of expenseRows) {
+        const k = e.category || 'autre';
+        expByCat[k] = (expByCat[k] || 0) + (parseFloat(e.amount) || 0);
+      }
+      const expensesByCategory = Object.entries(expByCat)
+        .map(([category, amount]) => ({ category, label: EXPENSE_CATEGORY_LABELS[category] || category, amount }))
+        .sort((a, b) => b.amount - a.amount);
+
+      // 9) Mapping codes → labels (cohérent avec PAYMENT_MAP).
       const methods = {};
       for (const code of Object.keys(PAYMENT_MAP)) {
         methods[code] = { label: PAYMENT_MAP[code].label, invoices: 0, amount: 0 };
@@ -1805,8 +1855,10 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
       const totalInvoices = parseInt(totals.invoices) || 0;
       const totalTtc = parseFloat(totals.total_ttc) || 0;
+      const totalEncaisse = Object.values(methods).reduce((s, m) => s + m.amount, 0);
+      const refundsAmount = parseFloat(refundsTotals?.amount) || 0;
       const cashSales = methods.LIQ?.amount || 0;
-      const expectedCash = (session ? parseFloat(session.opening_cash) || 0 : 0) + cashSales + cashIn - cashOut - (parseFloat(refundsTotals?.amount) || 0);
+      const expectedCash = (session ? parseFloat(session.opening_cash) || 0 : 0) + cashSales + cashIn - cashOut - refundsAmount;
 
       res.json({
         terminal,
@@ -1821,8 +1873,12 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         totals: {
           invoices: totalInvoices,
           total_ttc: totalTtc,
-          total_ht: parseFloat(totals.total_ht) || 0,
           avg_ticket: totalInvoices > 0 ? totalTtc / totalInvoices : 0,
+          encaisse: totalEncaisse,
+          refunds: refundsAmount,
+          expenses: expensesTotal,
+          // Résultat net de la période : encaissements − remboursements − dépenses.
+          net: totalEncaisse - refundsAmount - expensesTotal,
         },
         methods,
         cash: {
@@ -1830,11 +1886,22 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           sales: cashSales,
           in: cashIn,
           out: cashOut,
-          refunds: parseFloat(refundsTotals?.amount) || 0,
+          refunds: refundsAmount,
           expected: expectedCash,
         },
         cash_movements: cashMovements,
-        refunds: { count: parseInt(refundsTotals?.n) || 0, amount: parseFloat(refundsTotals?.amount) || 0 },
+        refunds: { count: parseInt(refundsTotals?.n) || 0, amount: refundsAmount },
+        expenses: {
+          total: expensesTotal,
+          count: expenseRows.length,
+          by_category: expensesByCategory,
+          items: expenseRows.map((e) => ({
+            id: e.id, ref: e.ref, category: e.category,
+            label: EXPENSE_CATEGORY_LABELS[e.category] || e.category,
+            beneficiary: e.beneficiary, amount: parseFloat(e.amount) || 0,
+            reason: e.reason, in_register: !!e.in_register, created_at: e.created_at,
+          })),
+        },
         top_items: topItems.map((i) => ({ ref: i.ref, label: i.label, qty: parseFloat(i.qty), total_ttc: parseFloat(i.total_ttc) })),
         price_overrides: priceOverrides,
       });
@@ -2227,6 +2294,87 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     } catch (err) {
       console.error('POS cash movement error:', err);
       res.status(500).json({ error: 'Erreur mouvement caisse' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // SORTIES D'ARGENT / DÉPENSES (prises dans la caisse POS)
+  // ═══════════════════════════════════════════════════════
+
+  // Catégories pour le formulaire POS.
+  router.get('/expenses/categories', requirePosAuth, (req, res) => {
+    res.json({ categories: Object.entries(EXPENSE_CATEGORY_LABELS).map(([value, label]) => ({ value, label })) });
+  });
+
+  // Enregistre une dépense = retrait de caisse catégorisé + justifié + notifié.
+  // Réservé aux managers (cohérent avec les sorties d'espèces). Si une session de
+  // caisse est ouverte sur le terminal, la dépense crée AUSSI un mouvement `out`
+  // (pos_cash_movements) → déduite par le rapport et la clôture. Sinon, elle est
+  // enregistrée hors-caisse (traçabilité + notif) sans mouvement.
+  router.post('/expenses', requirePosAuth, csrfProtection, async (req, res) => {
+    try {
+      if (req.posStaff.role !== 'manager') {
+        return res.status(403).json({ error: 'Sortie d\'argent réservée aux managers' });
+      }
+      const { category, beneficiary, amount, reason, note } = req.body || {};
+      const terminal = getTerminal(req);
+
+      // Session de caisse ouverte sur ce terminal (facultative — hors-caisse autorisé).
+      const [openSessions] = await dolibarrPool.query(
+        `SELECT rowid AS id FROM llx_pos_cash_fence
+          WHERE posnumber = ? AND posmodule = 'takepos' AND status = 0
+          ORDER BY rowid DESC LIMIT 1`,
+        [String(terminal)],
+      );
+      const session = openSessions[0] || null;
+      const inRegister = !!session;
+
+      // 1) Si caisse ouverte : poser le mouvement de caisse `out` (réconciliation).
+      let cashMovementId = null;
+      if (session) {
+        const amt = Math.round(Number(amount));
+        if (!Number.isFinite(amt) || amt <= 0) {
+          return res.status(400).json({ error: 'Montant invalide' });
+        }
+        const mv = db.prepare(
+          'INSERT INTO pos_cash_movements (session_id, type, amount, reason, staff_id) VALUES (?, ?, ?, ?, ?)'
+        ).run(session.id, 'out', amt, `Dépense — ${beneficiary || ''}`.slice(0, 200), req.posStaff.id);
+        cashMovementId = mv.lastInsertRowid;
+        // Ligne de banque caisse Dolibarr (comme un retrait de caisse classique).
+        try {
+          const cashBankId = PAYMENT_MAP.LIQ.bankAccount;
+          await adminApi.post(`/bankaccounts/${cashBankId}/lines`, {
+            date: new Date().toISOString().split('T')[0],
+            amount_capital: -amt,
+            label: `POS Dépense — ${beneficiary || 'Sans bénéficiaire'} (${req.posStaff.name})`,
+            type: 'PRE',
+          });
+        } catch (bankErr) {
+          console.error('[POS] Dolibarr bank line (dépense) failed (local saved):', bankErr.message);
+        }
+      }
+
+      // 2) Enregistrer la dépense (validation centralisée + audit).
+      const result = createExpenseRecord(db, {
+        category, beneficiary, amount, reason, note,
+        terminal, session_id: session?.id || null, cash_movement_id: cashMovementId, in_register: inRegister,
+        actor: { id: req.posStaff.id, name: req.posStaff.name, role: req.posStaff.role },
+      });
+      if (!result.ok) {
+        // Rollback du mouvement de caisse si la dépense est invalide.
+        if (cashMovementId) {
+          try { db.prepare('DELETE FROM pos_cash_movements WHERE id = ?').run(cashMovementId); } catch { /* noop */ }
+        }
+        return res.status(400).json({ error: result.error });
+      }
+
+      // 3) Notifier les admins (best-effort).
+      notifyAdminsExpense(transporter, db, result.dto, expenseSiteUrl);
+
+      res.status(201).json({ id: result.id, ref: result.ref, in_register: inRegister });
+    } catch (err) {
+      console.error('POS expense error:', err);
+      res.status(500).json({ error: 'Erreur enregistrement de la dépense' });
     }
   });
 
