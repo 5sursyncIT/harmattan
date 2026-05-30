@@ -26,16 +26,37 @@ export default function ContractsPanel() {
   const [stats, setStats] = useState(null);
   const [expiring, setExpiring] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
     Promise.all([
-      getContractStats().then(r => setStats(r.data)),
-      getExpiringContracts(30).then(r => setExpiring(r.data)),
-    ]).catch(() => {}).finally(() => setLoading(false));
-  }, []);
+      getContractStats().then(r => r.data),
+      getExpiringContracts(30).then(r => r.data).catch(() => []),
+    ])
+      .then(([statsData, expiringData]) => {
+        if (cancelled) return;
+        setStats(statsData);
+        setExpiring(expiringData || []);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [reloadKey]);
 
   if (loading) return <div style={{ height: 300, position: 'relative' }}><Loader /></div>;
-  if (!stats) return <p>Erreur chargement</p>;
+  if (!stats) return (
+    <div className="ct-empty">
+      <FiAlertTriangle size={48} className="ct-empty-icon" style={{ color: '#ef4444' }} />
+      <h3>Erreur de chargement</h3>
+      <p>Impossible de récupérer le tableau de bord des contrats.</p>
+      <button onClick={() => setReloadKey(k => k + 1)} className="ct-new-btn" style={{ marginTop: 8 }}>Réessayer</button>
+    </div>
+  );
+
+  const byType = stats.byType || [];
+  const recent = stats.recent || [];
 
   const formatDate = (d) => d ? new Date(d).toLocaleDateString('fr-FR') : '';
 
@@ -56,11 +77,11 @@ export default function ContractsPanel() {
         <StatCard icon={<FiAlertTriangle size={20} />} label="Expirent sous 90j" value={stats.expiringSoon} color="#ef4444" />
       </div>
 
-      {stats.byType.length > 0 && (
+      {byType.length > 0 && (
         <div className="admin-card">
           <h4 style={{ margin: '0 0 12px' }}>Par type de contrat</h4>
           <div className="ct-type-row">
-            {stats.byType.map(t => (
+            {byType.map(t => (
               <div key={t.type} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span className="ct-type-dot" style={{ background: TYPE_COLORS[t.type] || '#888' }} />
                 <strong>{t.label}</strong>
@@ -93,7 +114,7 @@ export default function ContractsPanel() {
 
         <div className="admin-card">
           <h4 style={{ margin: '0 0 12px' }}>Derniers contrats</h4>
-          {stats.recent.map(c => (
+          {recent.map(c => (
             <Link key={c.id} to={`/admin/contracts/${c.id}`} className="ct-recent-item">
               <div>
                 <strong>{c.ref}</strong> — {c.title || 'Sans titre'}

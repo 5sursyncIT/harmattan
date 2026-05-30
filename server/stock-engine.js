@@ -22,7 +22,7 @@ export async function calculateDemandAvg(dolibarrPool, productId, days = 30) {
     `SELECT COALESCE(SUM(fd.qty), 0) AS total_sold
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
-     WHERE fd.fk_product = ? AND f.fk_statut > 0 AND fd.qty > 0
+     WHERE fd.fk_product = ? AND f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0
        AND f.datef >= DATE_SUB(NOW(), INTERVAL ? DAY)`,
     [productId, days]
   );
@@ -37,7 +37,7 @@ export async function calculateDemandBatch(dolibarrPool, days = 30) {
     `SELECT fd.fk_product AS product_id, SUM(fd.qty) AS total_sold
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
-     WHERE f.fk_statut > 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
+     WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
        AND f.datef >= DATE_SUB(NOW(), INTERVAL ? DAY)
      GROUP BY fd.fk_product`,
     [days]
@@ -55,7 +55,7 @@ export async function calculateDemandStdDev(dolibarrPool, productId, days = 90) 
     `SELECT DATE(f.datef) AS sale_date, SUM(fd.qty) AS daily_qty
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
-     WHERE fd.fk_product = ? AND f.fk_statut > 0 AND fd.qty > 0
+     WHERE fd.fk_product = ? AND f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0
        AND f.datef >= DATE_SUB(NOW(), INTERVAL ? DAY)
      GROUP BY DATE(f.datef)`,
     [productId, days]
@@ -207,85 +207,38 @@ export function generateAlerts(products) {
   const now = new Date().toISOString();
 
   for (const p of products) {
-    const { product_id, warehouse_id, stock, demandAvgDaily, safetyStock: ss, reorderPt, coverage, maxStockTarget } = p;
+    const {
+      product_id, warehouse_id, stock, demandAvgDaily, safetyStock: ss, reorderPt, coverage,
+      maxStockTarget, minOrderQty = 1, orderMultiple = 1,
+    } = p;
     const base = { product_id, warehouse_id: warehouse_id || null, created_at: now };
+    const hasDemand = demandAvgDaily > 0;
+    // Quantité de réappro bornée (≥ 0) + conditionnement/min/max éventuels.
+    const qty = recommendedQty(reorderPt, stock, maxStockTarget, minOrderQty, orderMultiple);
 
-    // Rupture
-    if (stock <= 0 && demandAvgDaily > 0) {
-      alerts.push({
-        ...base,
-        alert_type: 'rupture',
-        severity: 'critique',
-        current_stock: stock,
-        coverage_days: 0,
-        reorder_point_snapshot: reorderPt,
-        recommended_qty: Math.max(reorderPt, 1),
-      });
-      continue; // pas besoin d'alertes supplémentaires si rupture
+    // UNE SEULE alerte par produit, par priorité décroissante (évite le bruit :
+    // un produit sous le seuil était auparavant signalé 2-3 fois simultanément).
+    let alert = null;
+    if (stock <= 0 && hasDemand) {
+      alert = { alert_type: 'rupture', severity: 'critique', coverage_days: 0, recommended_qty: Math.max(qty, minOrderQty, 1) };
+    } else if (hasDemand && coverage > 0 && coverage <= 7) {
+      alert = { alert_type: 'couverture_critique', severity: coverage <= 3 ? 'critique' : 'haute', coverage_days: coverage, recommended_qty: Math.max(qty, 1) };
+    } else if (hasDemand && stock <= ss) {
+      alert = { alert_type: 'stock_bas', severity: 'haute', coverage_days: coverage, recommended_qty: Math.max(qty, 1) };
+    } else if (hasDemand && stock <= reorderPt) {
+      alert = { alert_type: 'sous_point_de_commande', severity: 'moyenne', coverage_days: coverage, recommended_qty: Math.max(qty, 1) };
+    } else if ((maxStockTarget > 0 && stock > maxStockTarget * 2) || (hasDemand && coverage > 365)) {
+      alert = { alert_type: 'surstock', severity: 'moyenne', coverage_days: coverage, recommended_qty: 0 };
+    } else if (stock > 0 && !hasDemand) {
+      alert = { alert_type: 'stock_dormant', severity: 'information', coverage_days: 999, recommended_qty: 0 };
     }
 
-    // Sous point de commande
-    if (stock > 0 && stock <= reorderPt && demandAvgDaily > 0) {
+    if (alert) {
       alerts.push({
         ...base,
-        alert_type: 'sous_point_de_commande',
-        severity: stock <= ss ? 'haute' : 'moyenne',
+        ...alert,
         current_stock: stock,
-        coverage_days: coverage,
-        reorder_point_snapshot: reorderPt,
-        recommended_qty: Math.max(reorderPt - stock, 1),
-      });
-    }
-
-    // Stock bas (< sécurité)
-    if (stock > 0 && stock <= ss && demandAvgDaily > 0) {
-      alerts.push({
-        ...base,
-        alert_type: 'stock_bas',
-        severity: 'haute',
-        current_stock: stock,
-        coverage_days: coverage,
-        reorder_point_snapshot: reorderPt,
-        recommended_qty: Math.max(reorderPt - stock, 1),
-      });
-    }
-
-    // Couverture critique (< 7 jours)
-    if (coverage > 0 && coverage <= 7 && demandAvgDaily > 0.1) {
-      alerts.push({
-        ...base,
-        alert_type: 'couverture_critique',
-        severity: coverage <= 3 ? 'critique' : 'haute',
-        current_stock: stock,
-        coverage_days: coverage,
-        reorder_point_snapshot: reorderPt,
-        recommended_qty: Math.ceil(demandAvgDaily * 30) - stock,
-      });
-    }
-
-    // Surstock (> 2× max target ou > 365 jours de couverture)
-    if (maxStockTarget > 0 && stock > maxStockTarget * 2) {
-      alerts.push({
-        ...base,
-        alert_type: 'surstock',
-        severity: 'moyenne',
-        current_stock: stock,
-        coverage_days: coverage,
-        reorder_point_snapshot: reorderPt,
-        recommended_qty: 0,
-      });
-    }
-
-    // Stock dormant (stock > 0 mais aucune vente sur 180 jours)
-    if (stock > 0 && demandAvgDaily === 0) {
-      alerts.push({
-        ...base,
-        alert_type: 'stock_dormant',
-        severity: 'information',
-        current_stock: stock,
-        coverage_days: 999,
-        reorder_point_snapshot: 0,
-        recommended_qty: 0,
+        reorder_point_snapshot: alert.alert_type === 'stock_dormant' ? 0 : reorderPt,
       });
     }
   }
@@ -364,8 +317,22 @@ export async function calculateStockKPIs(dolibarrPool) {
 /**
  * Calcule la couverture et rotation pour les top produits vendus.
  */
-export async function calculateCoverageAndRotation(dolibarrPool, limit = 100) {
-  // Top produits par ventes 90j avec stock actuel
+export async function calculateCoverageAndRotation(dolibarrPool, limit = 100, opts = {}) {
+  // Si `search` est fourni, on cherche dans TOUT le catalogue (ref/titre/ISBN) et on
+  // trie par pertinence (titre) plutôt que par ventes — sinon un titre hors top-ventes
+  // était introuvable. Sans search : top produits par ventes 30j (comportement initial).
+  const search = String(opts.search || '').trim();
+  const params = [];
+  let whereExtra = '';
+  let orderBy = 'COALESCE(sales.total_30, 0) DESC';
+  if (search) {
+    const pat = `%${search.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
+    whereExtra = ' AND (p.ref LIKE ? OR p.label LIKE ? OR p.barcode LIKE ?)';
+    params.push(pat, pat, pat);
+    orderBy = 'p.label ASC';
+  }
+  params.push(limit);
+
   const [rows] = await dolibarrPool.query(
     `SELECT p.rowid AS product_id, p.ref, p.label, p.price_ttc, p.stock AS stock_reel,
             COALESCE(sales.total_30, 0) AS sold_30d,
@@ -384,14 +351,14 @@ export async function calculateCoverageAndRotation(dolibarrPool, limit = 100) {
               SUM(fd.qty) AS total_90
        FROM llx_facturedet fd
        JOIN llx_facture f ON f.rowid = fd.fk_facture
-       WHERE f.fk_statut > 0 AND fd.qty > 0
+       WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0
          AND f.datef >= DATE_SUB(NOW(), INTERVAL 90 DAY)
        GROUP BY fd.fk_product
      ) sales ON sales.fk_product = p.rowid
-     WHERE p.tosell = 1
-     ORDER BY COALESCE(sales.total_30, 0) DESC
+     WHERE p.tosell = 1${whereExtra}
+     ORDER BY ${orderBy}
      LIMIT ?`,
-    [limit]
+    params
   );
 
   return rows.map(r => {
@@ -470,50 +437,109 @@ export async function runDailyBatch(dolibarrPool, db) {
       editeur,
       supply_type: getSupplyType(editeur),
       demandAvgDaily: demandAvg,
+      leadTimeDays: leadTime,
       safetyStock: ss,
       reorderPt: rop,
       coverage: cov,
       maxStockTarget: maxStock,
+      minOrderQty: policy?.min_order_qty || 1,
+      orderMultiple: policy?.order_multiple || 1,
       abc_class: policy?.abc_class || null,
       warehouse_id: null,
     });
   }
 
-  // Générer les alertes
+  // Générer les alertes (une par produit)
   const alerts = generateAlerts(enriched);
 
-  // Persister les nouvelles alertes (ne pas dupliquer les ouvertes existantes)
+  const nowIso = new Date().toISOString();
+  const today = nowIso.slice(0, 10);
+
+  // Quantités déjà commandées et non encore reçues (anti double-commande) :
+  // on additionne stock physique + stock en commande avant de décider d'un réappro.
+  let onOrderMap = new Map();
+  try {
+    const rows = db.prepare(
+      `SELECT l.product_id AS pid, SUM(l.ordered_qty - l.received_qty) AS qty
+       FROM purchase_order_lines l
+       JOIN purchase_orders_local po ON po.id = l.purchase_order_id
+       WHERE po.status IN ('ordered','partial')
+       GROUP BY l.product_id`
+    ).all();
+    onOrderMap = new Map(rows.map(r => [r.pid, Math.max(0, r.qty || 0)]));
+  } catch { /* tables d'appro pas encore créées */ }
+
+  // Recommandations d'achat : produits dont (stock + en commande) est sous le point de
+  // commande, avec une demande réelle et une quantité de réappro > 0. status='draft'.
+  const recommendations = enriched
+    .map(p => {
+      const onOrder = onOrderMap.get(p.product_id) || 0;
+      const effective = p.stock + onOrder; // déjà couvert par le stock + les commandes en cours
+      if (!(p.demandAvgDaily > 0) || effective > p.reorderPt) return null;
+      const qty = recommendedQty(p.reorderPt, effective, p.maxStockTarget, p.minOrderQty, p.orderMultiple);
+      if (qty <= 0) return null;
+      const expected = new Date(Date.now() + (p.leadTimeDays || 14) * 86400000).toISOString().slice(0, 10);
+      return {
+        product_id: p.product_id,
+        recommended_qty: qty,
+        recommended_order_date: today,
+        expected_receipt_date: expected,
+        reason_code: p.stock <= 0 ? 'rupture' : (p.stock <= p.safetyStock ? 'stock_bas' : 'sous_point_de_commande'),
+        demand_avg_daily: p.demandAvgDaily,
+        coverage_days: p.coverage,
+        stock_on_hand: p.stock,
+        stock_on_order: onOrder,
+      };
+    })
+    .filter(Boolean);
+
+  // Statements
   const insertAlert = db.prepare(
     `INSERT INTO stock_alerts (product_id, warehouse_id, alert_type, severity, current_stock, coverage_days, reorder_point_snapshot, recommended_qty, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`
   );
+  // Ne pas recréer un doublon si une alerte 'open' OU 'acknowledged' existe déjà
+  // pour ce produit (sinon une alerte acquittée par l'utilisateur réapparaissait).
   const checkExisting = db.prepare(
-    `SELECT id FROM stock_alerts WHERE product_id = ? AND alert_type = ? AND status = 'open' LIMIT 1`
+    `SELECT id FROM stock_alerts WHERE product_id = ? AND alert_type = ? AND status IN ('open','acknowledged') LIMIT 1`
+  );
+  const resolveStmt = db.prepare(`UPDATE stock_alerts SET status = 'resolved', resolved_at = ? WHERE id = ?`);
+  const insertReco = db.prepare(
+    `INSERT INTO purchase_recommendations (product_id, recommended_qty, recommended_order_date, expected_receipt_date, reason_code, demand_avg_daily, coverage_days, stock_on_hand, stock_on_order, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`
   );
 
-  let newAlertCount = 0;
-  for (const a of alerts) {
-    const existing = checkExisting.get(a.product_id, a.alert_type);
-    if (!existing) {
-      insertAlert.run(a.product_id, a.warehouse_id, a.alert_type, a.severity, a.current_stock, a.coverage_days, a.reorder_point_snapshot, a.recommended_qty, a.created_at);
-      newAlertCount++;
-    }
-  }
-
-  // Auto-résoudre les alertes ouvertes dont la condition n'est plus vraie
-  const openAlerts = db.prepare(`SELECT id, product_id, alert_type FROM stock_alerts WHERE status = 'open'`).all();
   const activeAlertKeys = new Set(alerts.map(a => `${a.product_id}:${a.alert_type}`));
-  const resolveStmt = db.prepare(`UPDATE stock_alerts SET status = 'resolved', resolved_at = ? WHERE id = ?`);
-  let resolvedCount = 0;
-  for (const oa of openAlerts) {
-    if (!activeAlertKeys.has(`${oa.product_id}:${oa.alert_type}`)) {
-      resolveStmt.run(new Date().toISOString(), oa.id);
-      resolvedCount++;
-    }
-  }
+  const openAlerts = db.prepare(`SELECT id, product_id, alert_type FROM stock_alerts WHERE status = 'open'`).all();
 
-  console.log(`[STOCK] Batch: ${enriched.length} produits, ${newAlertCount} nouvelles alertes, ${resolvedCount} résolues`);
-  return { products: enriched.length, newAlerts: newAlertCount, resolved: resolvedCount };
+  let newAlertCount = 0, resolvedCount = 0;
+  // Tout en une transaction (atomicité + performance).
+  const persist = db.transaction(() => {
+    for (const a of alerts) {
+      if (!checkExisting.get(a.product_id, a.alert_type)) {
+        insertAlert.run(a.product_id, a.warehouse_id, a.alert_type, a.severity, a.current_stock, a.coverage_days, a.reorder_point_snapshot, a.recommended_qty, a.created_at);
+        newAlertCount++;
+      }
+    }
+    // Auto-résoudre les alertes 'open' dont la condition n'est plus active.
+    // (On ne touche pas aux 'acknowledged'/'ignored' : gérées par l'utilisateur.)
+    for (const oa of openAlerts) {
+      if (!activeAlertKeys.has(`${oa.product_id}:${oa.alert_type}`)) {
+        resolveStmt.run(nowIso, oa.id);
+        resolvedCount++;
+      }
+    }
+    // Recommandations : on régénère les brouillons à chaque batch (les approuvées/
+    // annulées sont conservées telles quelles).
+    db.prepare(`DELETE FROM purchase_recommendations WHERE status = 'draft'`).run();
+    for (const r of recommendations) {
+      insertReco.run(r.product_id, r.recommended_qty, r.recommended_order_date, r.expected_receipt_date, r.reason_code, r.demand_avg_daily, r.coverage_days, r.stock_on_hand, r.stock_on_order, nowIso);
+    }
+  });
+  persist();
+
+  console.log(`[STOCK] Batch: ${enriched.length} produits, ${newAlertCount} nouvelles alertes, ${resolvedCount} résolues, ${recommendations.length} recommandations`);
+  return { products: enriched.length, newAlerts: newAlertCount, resolved: resolvedCount, recommendations: recommendations.length };
 }
 
 /**
@@ -525,7 +551,7 @@ export async function runClassificationBatch(dolibarrPool, db) {
     `SELECT fd.fk_product AS product_id, SUM(fd.total_ttc) AS revenue, SUM(fd.qty) AS qty
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
-     WHERE f.fk_statut > 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
+     WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
        AND f.datef >= DATE_SUB(NOW(), INTERVAL 90 DAY)
      GROUP BY fd.fk_product`
   );
@@ -539,7 +565,7 @@ export async function runClassificationBatch(dolibarrPool, db) {
     `SELECT fd.fk_product AS product_id, DATE(f.datef) AS d, SUM(fd.qty) AS daily_qty
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
-     WHERE f.fk_statut > 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
+     WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
        AND f.datef >= DATE_SUB(NOW(), INTERVAL 90 DAY)
      GROUP BY fd.fk_product, DATE(f.datef)`
   );
@@ -550,10 +576,19 @@ export async function runClassificationBatch(dolibarrPool, db) {
     dailyMap.get(r.product_id).push(r.daily_qty);
   }
 
+  // CV calculé sur la fenêtre COMPLÈTE de 90 jours (les jours sans vente comptent
+  // comme 0). Sans ça, ne considérer que les jours de vente sous-estime fortement la
+  // variabilité et classe à tort des titres erratiques en « X » (régulier).
+  const WINDOW_DAYS = 90;
   const xyzData = abcClassified.map(p => {
-    const values = dailyMap.get(p.product_id) || [];
-    const mean = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-    const variance = values.length > 1 ? values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1) : 0;
+    const values = dailyMap.get(p.product_id) || []; // quantités des jours AVEC vente
+    const sum = values.reduce((a, b) => a + b, 0);
+    const mean = sum / WINDOW_DAYS;
+    // Somme des carrés des écarts sur les 90 jours : jours de vente + jours à 0.
+    const ssqSaleDays = values.reduce((s, v) => s + (v - mean) ** 2, 0);
+    const zeroDays = Math.max(0, WINDOW_DAYS - values.length);
+    const ssq = ssqSaleDays + zeroDays * (mean ** 2);
+    const variance = WINDOW_DAYS > 1 ? ssq / (WINDOW_DAYS - 1) : 0;
     return { ...p, demandAvg: mean, demandStdDev: Math.sqrt(variance) };
   });
   const fullClassified = classifyXYZ(xyzData);

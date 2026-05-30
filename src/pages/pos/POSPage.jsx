@@ -20,6 +20,7 @@ import POSCashReport from '../../components/pos/POSCashReport';
 import POSOpenSessionScreen from '../../components/pos/POSOpenSessionScreen';
 import POSChangePin from '../../components/pos/POSChangePin';
 import POSReturn from '../../components/pos/POSReturn';
+import POSSettleUnpaid from '../../components/pos/POSSettleUnpaid';
 import POSHistory from '../../components/pos/POSHistory';
 import POSFreeProduct from '../../components/pos/POSFreeProduct';
 import DeviceManager from '../../components/pos/DeviceManager';
@@ -36,6 +37,7 @@ export default function POSPage() {
   const [showPayment, setShowPayment] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
   const [showReturn, setShowReturn] = useState(false);
+  const [showUnpaid, setShowUnpaid] = useState(false);
   const [returnInitialRef, setReturnInitialRef] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [showFreeProduct, setShowFreeProduct] = useState(false);
@@ -189,10 +191,6 @@ export default function POSPage() {
     setShowPayment(true);
   };
 
-  const handleSoon = (label) => () => {
-    toast(`${label} — bientôt disponible`, { icon: '🚧' });
-  };
-
   // Évite le flash de l'UI POS pendant le chargement initial de la session :
   // tant qu'on ne sait pas s'il y a une session ouverte, on n'instancie aucun
   // sous-composant (sinon header/catalogue se montent et déclenchent leurs
@@ -276,6 +274,7 @@ export default function POSPage() {
             onSplit={() => { setPaymentSplitMode(true); setActivePanel('ticket'); setShowPayment(true); }}
             onPay={() => { setPaymentSplitMode(false); setActivePanel('ticket'); setShowPayment(true); }}
             onPayCash={handlePayCash}
+            onUnpaid={() => setShowUnpaid(true)}
             onCashReport={handleCashReport}
             onCloseRegister={() => setShowCashRegister(true)}
           />
@@ -341,6 +340,10 @@ export default function POSPage() {
           onClose={() => setShowHistory(false)}
           onReturn={(ref) => { setReturnInitialRef(ref); setShowReturn(true); }}
         />
+      )}
+
+      {showUnpaid && (
+        <POSSettleUnpaid onClose={() => setShowUnpaid(false)} onSettled={loadSession} />
       )}
 
       {showFreeProduct && (

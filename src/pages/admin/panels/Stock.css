@@ -83,3 +83,109 @@
   .sk-alert-actions { width: 100%; justify-content: flex-end; }
   .sk-wh-row { flex-direction: column; }
 }
+
+/* ─── Sous-navigation stock ────────────────────────────── */
+.sk-subnav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; }
+.sk-subnav-link {
+  display: inline-flex; align-items: center; gap: 6px; padding: 10px 14px;
+  font-size: 0.88rem; font-weight: 600; color: #64748b; text-decoration: none;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; border-radius: 8px 8px 0 0; transition: all 0.15s;
+}
+.sk-subnav-link:hover { color: #10531a; background: #f0fdf4; }
+.sk-subnav-link.active { color: #10531a; border-bottom-color: #10531a; }
+.sk-subnav-badge { background: #dc2626; color: #fff; font-size: 0.68rem; font-weight: 800; padding: 1px 7px; border-radius: 999px; }
+
+/* ─── KPI cliquables + détails ─────────────────────────── */
+.sk-kpi { position: relative; }
+.sk-kpi-link { display: block; text-decoration: none; color: inherit; cursor: pointer; }
+.sk-kpi-link:hover { box-shadow: 0 4px 16px rgba(16,83,26,.12); transform: translateY(-2px); }
+.sk-kpi-link { transition: all 0.18s ease; }
+.sk-kpi-sub { font-size: 0.72rem; font-weight: 700; margin-top: 4px; }
+.sk-kpi-arrow { position: absolute; top: 18px; right: 16px; color: #cbd5e1; }
+.sk-kpi-link:hover .sk-kpi-arrow { color: #10531a; }
+
+/* ─── Jauge taux de rupture ────────────────────────────── */
+.sk-rate-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px 20px; }
+.sk-rate-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.9rem; color: #475569; font-weight: 600; margin-bottom: 8px; }
+.sk-rate-head strong { font-size: 1.3rem; }
+.sk-rate-track { height: 10px; background: #f1f5f9; border-radius: 999px; overflow: hidden; }
+.sk-rate-fill { display: block; height: 100%; border-radius: 999px; transition: width 0.4s ease; }
+.sk-rate-foot { font-size: 0.78rem; color: #94a3b8; margin-top: 6px; }
+
+/* ─── En-tête de section + lien ────────────────────────── */
+.sk-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.sk-section-link { display: inline-flex; align-items: center; gap: 2px; font-size: 0.84rem; color: #10531a; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.sk-section-link:hover { text-decoration: underline; }
+
+/* ─── Badges réappro / titres ──────────────────────────── */
+.sk-supply-badge { padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; }
+.sk-supply-badge.reimpression { background: #dbeafe; color: #1e40af; }
+.sk-supply-badge.commande { background: #fef3c7; color: #92400e; }
+.sk-td-title { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-filter-count { margin-left: 6px; background: rgba(0,0,0,.08); padding: 0 6px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; }
+.sk-filter-btn.active .sk-filter-count { background: rgba(255,255,255,.25); }
+
+/* ─── Recommandations ──────────────────────────────────── */
+.sk-reco-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+.sk-reco-summary > div { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; }
+.sk-reco-sum-val { display: block; font-size: 1.5rem; font-weight: 800; color: #0f172a; }
+.sk-reco-sum-lbl { font-size: 0.78rem; color: #64748b; }
+
+.sk-reco-list { display: flex; flex-direction: column; gap: 10px; }
+.sk-reco-card { display: flex; align-items: center; gap: 16px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; transition: all 0.15s; }
+.sk-reco-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+.sk-reco-card-mini { text-decoration: none; color: inherit; }
+.sk-reco-main { flex: 1; min-width: 0; }
+.sk-reco-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.sk-reco-reason { padding: 2px 9px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; }
+.sk-reco-supply { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; }
+.sk-reco-supply.reimpression { background: #dbeafe; color: #1e40af; }
+.sk-reco-supply.commande { background: #fef3c7; color: #92400e; }
+.sk-reco-title { font-weight: 700; color: #0f172a; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-reco-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: #64748b; margin-top: 3px; align-items: center; }
+.sk-reco-meta span { display: inline-flex; align-items: center; gap: 3px; }
+.sk-reco-qty { text-align: center; flex-shrink: 0; }
+.sk-reco-qty-val { font-size: 1.4rem; font-weight: 800; color: #10531a; }
+.sk-reco-qty-lbl { font-size: 0.7rem; color: #94a3b8; }
+.sk-reco-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.sk-btn-order { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; border: none; border-radius: 8px; background: #10531a; color: #fff; font-weight: 700; font-size: 0.85rem; cursor: pointer; transition: background 0.15s; }
+.sk-btn-order:hover:not(:disabled) { background: #0b3d13; }
+.sk-btn-order:disabled { opacity: 0.6; cursor: default; }
+.sk-btn-ghost { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; color: #475569; cursor: pointer; transition: all 0.15s; }
+.sk-btn-ghost:hover:not(:disabled) { border-color: #10531a; color: #10531a; }
+.sk-btn-ghost.danger:hover:not(:disabled) { border-color: #fecaca; color: #dc2626; background: #fef2f2; }
+
+/* ─── Commandes d'appro ────────────────────────────────── */
+.sk-po-list { display: flex; flex-direction: column; gap: 10px; }
+.sk-po-card { display: flex; align-items: center; gap: 16px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; transition: all 0.15s; }
+.sk-po-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+.sk-po-main { flex: 1; min-width: 0; }
+.sk-po-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.sk-po-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: #64748b; }
+.sk-po-progress { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.sk-po-progress-track { flex: 1; max-width: 220px; height: 7px; background: #f1f5f9; border-radius: 999px; overflow: hidden; }
+.sk-po-progress-fill { display: block; height: 100%; background: #16a34a; border-radius: 999px; transition: width 0.4s ease; }
+.sk-po-progress span { font-size: 0.76rem; color: #64748b; font-weight: 600; }
+.sk-po-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* ─── États vides / erreur ─────────────────────────────── */
+.sk-empty { text-align: center; padding: 48px 16px; color: #94a3b8; }
+.sk-empty p { margin: 4px 0; }
+
+/* ─── Lien produit dans alerte ─────────────────────────── */
+.sk-alert-product-link { text-decoration: none; color: #64748b; display: block; }
+.sk-alert-product-link:hover { color: #10531a; text-decoration: underline; }
+
+/* Responsive recommandations / sous-nav */
+@media (max-width: 768px) {
+  .sk-reco-summary { grid-template-columns: 1fr 1fr; }
+  .sk-reco-card, .sk-po-card { flex-wrap: wrap; }
+  .sk-reco-actions, .sk-po-actions { width: 100%; justify-content: flex-end; }
+  .sk-subnav { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+  .sk-subnav-link { white-space: nowrap; }
+}
+
+/* Cibles tactiles (>=44px) sur appareils tactiles */
+@media (pointer: coarse) {
+  .btn-icon, .sk-alert-btn, .sk-filter-btn, .sk-btn-ghost, .sk-btn-order, .sk-subnav-link { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+}

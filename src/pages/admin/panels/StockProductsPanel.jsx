@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { getStockProducts, updateStockPolicy, requestReprint, requestSupplierOrder } from '../../../api/admin';
-import { FiArrowLeft, FiSearch, FiEdit2, FiSave, FiX, FiChevronLeft, FiChevronRight, FiPrinter, FiShoppingCart } from 'react-icons/fi';
+import { getStockProducts, updateStockPolicy, requestReprint, requestSupplierOrder, stockEntry } from '../../../api/admin';
+import { FiArrowLeft, FiSearch, FiEdit2, FiSave, FiX, FiChevronLeft, FiChevronRight, FiPrinter, FiShoppingCart, FiPlusCircle, FiAlertCircle, FiPackage } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
+import StockNav from './StockNav';
 import './Stock.css';
 
 function CoverageBar({ days }) {
@@ -20,7 +21,11 @@ function CoverageBar({ days }) {
 export default function StockProductsPanel() {
   const [data, setData] = useState({ products: [], total: 0, pages: 1 });
   const [loading, setLoading] = useState(true);
-  const [q, setQ] = useState('');
+  const [loadError, setLoadError] = useState(false);
+  const [entry, setEntry] = useState(null); // { product, qty }
+  const [entrying, setEntrying] = useState(false);
+  // Pré-remplit la recherche depuis ?q= (liens depuis les alertes).
+  const [q, setQ] = useState(() => new URLSearchParams(window.location.search).get('q') || '');
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState('coverage');
   const [order, setOrder] = useState('ASC');
@@ -34,12 +39,29 @@ export default function StockProductsPanel() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(false);
     getStockProducts({ q, page, sort, order, limit: 30 })
       .then(r => { if (!cancelled) setData(r.data); })
-      .catch(() => {})
+      .catch(() => { if (!cancelled) setLoadError(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [q, page, sort, order]);
+
+  const handleStockEntry = async () => {
+    if (!entry) return;
+    setEntrying(true);
+    try {
+      await stockEntry(entry.product.product_id, entry.qty, entry.reason || 'Réception / correction');
+      toast.success(`Entrée de stock : ${entry.product.ref} +${entry.qty}`);
+      setEntry(null);
+      const r = await getStockProducts({ q, page, sort, order, limit: 30 });
+      setData(r.data);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur entrée de stock');
+    } finally {
+      setEntrying(false);
+    }
+  };
 
   const toggleSort = (col) => {
     if (sort === col) setOrder(o => o === 'ASC' ? 'DESC' : 'ASC');
@@ -114,6 +136,8 @@ export default function StockProductsPanel() {
         </div>
       </div>
 
+      <StockNav />
+
       {/* Recherche */}
       <div style={{ position: 'relative', marginBottom: 16 }}>
         <FiSearch size={16} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
@@ -122,7 +146,18 @@ export default function StockProductsPanel() {
           style={{ width: '100%', padding: '10px 14px 10px 42px', borderRadius: 10, border: '2px solid #e2e8f0', fontSize: '0.9rem' }} />
       </div>
 
-      {loading ? <Loader /> : (
+      {loading ? <Loader /> : loadError ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+          <FiAlertCircle size={40} style={{ color: '#ef4444', marginBottom: 8 }} />
+          <p style={{ fontWeight: 600 }}>Erreur de chargement des produits</p>
+          <button className="btn btn-primary" onClick={() => setPage(p => p)} style={{ marginTop: 8 }}>Réessayer</button>
+        </div>
+      ) : data.products.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+          <FiPackage size={40} style={{ opacity: 0.3, marginBottom: 8 }} />
+          <p style={{ fontWeight: 600 }}>{q ? `Aucun produit pour « ${q} »` : 'Aucun produit'}</p>
+        </div>
+      ) : (
         <>
           <div className="sk-table-wrap">
             <table className="sk-table">
@@ -187,7 +222,10 @@ export default function StockProductsPanel() {
                         )}
                       </td>
                       <td>
-                        <button className="btn-icon" onClick={() => startEdit(p)} title="Modifier les seuils"><FiEdit2 size={14} /></button>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button className="btn-icon" onClick={() => setEntry({ product: p, qty: 1, reason: '' })} title="Entrée de stock (réception)" style={{ color: '#10531a' }}><FiPlusCircle size={15} /></button>
+                          <button className="btn-icon" onClick={() => startEdit(p)} title="Modifier les seuils"><FiEdit2 size={14} /></button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -269,6 +307,35 @@ export default function StockProductsPanel() {
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal entrée de stock (réception / correction +) */}
+      {entry && (
+        <div className="ct-modal-overlay" onClick={() => !entrying && setEntry(null)}>
+          <div className="ct-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+            <h3 style={{ margin: '0 0 4px', display: 'flex', alignItems: 'center', gap: 8 }}><FiPlusCircle size={18} style={{ color: '#10531a' }} /> Entrée de stock</h3>
+            <p style={{ color: '#64748b', fontSize: '0.85rem', marginTop: 0 }}>Réception fournisseur, fin de réimpression ou correction. Le stock du Rayon est crédité dans Dolibarr.</p>
+            <div style={{ background: '#f8fafc', borderRadius: 10, padding: 12, marginBottom: 14, border: '1px solid #e2e8f0' }}>
+              <div style={{ fontWeight: 700 }}>{entry.product.label}</div>
+              <div style={{ fontSize: '0.82rem', color: '#64748b' }}>Réf. {entry.product.ref} · stock actuel <strong>{entry.product.stock}</strong></div>
+            </div>
+            <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>Quantité reçue</label>
+            <input type="number" min={1} value={entry.qty} autoFocus
+              onChange={e => setEntry({ ...entry, qty: Math.max(1, parseInt(e.target.value) || 1) })}
+              style={{ width: '100%', padding: '12px 14px', borderRadius: 10, border: '2px solid #10531a', fontSize: '1.1rem', fontWeight: 700, textAlign: 'center', marginBottom: 12 }} />
+            <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>Motif (facultatif)</label>
+            <input type="text" value={entry.reason} maxLength={80}
+              onChange={e => setEntry({ ...entry, reason: e.target.value })}
+              placeholder="Ex : réception cmd FA2505-0012, réimpression terminée…"
+              style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: '0.88rem' }} />
+            <div className="ct-modal-actions">
+              <button className="ct-btn ct-btn-outline" onClick={() => setEntry(null)} disabled={entrying}>Annuler</button>
+              <button className="ct-btn ct-btn-primary" onClick={handleStockEntry} disabled={entrying}>
+                {entrying ? 'Enregistrement…' : `Ajouter +${entry.qty} au stock`}
+              </button>
             </div>
           </div>
         </div>

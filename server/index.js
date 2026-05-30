@@ -805,7 +805,7 @@ app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtectio
 
 // ─── CONTRACT QUOTES (devis de contribution auteur) ─────
 import { createContractQuoteRouter } from './contract-quote-routes.js';
-app.use('/api', createContractQuoteRouter({ db, csrfProtection }));
+app.use('/api', createContractQuoteRouter({ db, dolibarrPool, csrfProtection }));
 
 // ─── AUTHOR PORTAL (workflow éditorial) ────────────────────
 import { createAuthorRouter } from './author-routes.js';
@@ -1217,8 +1217,16 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
       const productIds = productLines.map((l) => parseInt(l.fk_product));
       if (productIds.length > 0) {
         const placeholders = productIds.map(() => '?').join(',');
+        // On vérifie le stock de l'entrepôt RAYON (4) — c'est lui que la facture
+        // décrémente (idwarehouse:4). Vérifier le stock global laisserait confirmer
+        // une commande que Dolibarr refusera de facturer faute de stock au Rayon
+        // (STOCK_MUST_BE_ENOUGH_FOR_INVOICE=1, négatif interdit).
         const [stockRows] = await dolibarrPool.query(
-          `SELECT rowid AS id, label, stock, fk_product_type FROM llx_product WHERE rowid IN (${placeholders})`,
+          `SELECT p.rowid AS id, p.label, p.fk_product_type,
+                  COALESCE(ps.reel, 0) AS wh_stock
+           FROM llx_product p
+           LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = 4
+           WHERE p.rowid IN (${placeholders})`,
           productIds,
         );
         const stockMap = new Map(stockRows.map((r) => [r.id, r]));
@@ -1226,7 +1234,7 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
           const pid = parseInt(line.fk_product);
           const row = stockMap.get(pid);
           if (!row || row.fk_product_type !== 0) continue;
-          const available = Number(row.stock) || 0;
+          const available = Number(row.wh_stock) || 0;
           const qty = parseFloat(line.qty) || 0;
           if (available < qty) {
             return res.status(409).json({
@@ -1348,6 +1356,71 @@ app.post('/api/admin/payments/:id/reject', paymentMgmtAuth, csrfProtection, (req
     .run(req.admin.username, 'reject_payment', `Paiement rejeté : ${payment.order_ref} — ${req.body.reason || 'sans motif'}`);
 
   res.json({ success: true });
+});
+
+// Détail complet d'une commande web (pour la fiche depuis l'écran Paiements).
+// Sous /payments/* pour hériter de la whitelist RBAC (super_admin, admin, comptable).
+const ORDER_STATUS_LABELS = { '-1': 'Annulée', 0: 'Brouillon', 1: 'Validée', 2: 'En cours', 3: 'Livrée' };
+app.get('/api/admin/payments/order/:orderId', paymentMgmtAuth, async (req, res) => {
+  const id = parseInt(req.params.orderId, 10);
+  if (!id) return res.status(400).json({ error: 'Identifiant de commande invalide' });
+  try {
+    const [[order]] = await dolibarrPool.query(
+      `SELECT c.rowid AS id, c.ref, c.fk_statut, c.facture AS billed,
+              DATE_FORMAT(c.date_commande, '%Y-%m-%d') AS date_commande,
+              c.total_ht, c.total_tva, c.total_ttc, c.note_public, c.note_private,
+              c.fk_soc, s.nom AS customer_name, s.email AS customer_email,
+              s.phone AS customer_phone, s.address, s.zip, s.town
+       FROM llx_commande c
+       LEFT JOIN llx_societe s ON s.rowid = c.fk_soc
+       WHERE c.rowid = ?`, [id]
+    );
+    if (!order) return res.status(404).json({ error: 'Commande introuvable' });
+
+    const [lines] = await dolibarrPool.query(
+      `SELECT cd.rowid AS id, cd.fk_product, p.ref AS product_ref, p.label AS product_label,
+              cd.description, cd.qty, cd.subprice, cd.remise_percent, cd.total_ht, cd.total_ttc
+       FROM llx_commandedet cd
+       LEFT JOIN llx_product p ON p.rowid = cd.fk_product
+       WHERE cd.fk_commande = ? AND cd.product_type = 0
+       ORDER BY cd.rang ASC, cd.rowid ASC`, [id]
+    );
+
+    // Enregistrement de paiement local lié (méthode, réf transaction client, statut).
+    const payment = db.prepare(
+      'SELECT * FROM order_payments WHERE dolibarr_order_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(String(id)) || null;
+
+    res.json({
+      order: {
+        id: order.id, ref: order.ref,
+        status: order.fk_statut, statusLabel: ORDER_STATUS_LABELS[String(order.fk_statut)] || '?',
+        billed: !!order.billed,
+        date: order.date_commande,
+        total_ht: Number(order.total_ht), total_tva: Number(order.total_tva), total_ttc: Number(order.total_ttc),
+        note_public: order.note_public, note_private: order.note_private,
+        customer: {
+          id: order.fk_soc, name: order.customer_name, email: order.customer_email,
+          phone: order.customer_phone, address: order.address, zip: order.zip, town: order.town,
+        },
+      },
+      lines: lines.map(l => ({
+        id: l.id, product_id: l.fk_product, ref: l.product_ref,
+        label: l.product_label || l.description, qty: Number(l.qty),
+        subprice: Number(l.subprice), remise_percent: Number(l.remise_percent),
+        total_ht: Number(l.total_ht), total_ttc: Number(l.total_ttc),
+      })),
+      payment: payment ? {
+        method: payment.payment_method, status: payment.payment_status,
+        amount_expected: Number(payment.amount_expected), amount_received: payment.amount_received,
+        transaction_ref: payment.transaction_ref, payer_phone: payment.payer_phone,
+        invoice_ref: payment.invoice_ref, created_at: payment.created_at,
+      } : null,
+    });
+  } catch (err) {
+    console.error('GET /api/admin/payments/order/:orderId error:', err.message);
+    res.status(500).json({ error: 'Erreur chargement de la commande' });
+  }
 });
 
 // Client envoie sa référence de paiement (après commande)
@@ -1489,6 +1562,25 @@ try {
   console.log('[INVOICES] Invoice management routes mounted');
 } catch (err) {
   console.error('[INVOICES] Failed to mount invoice routes:', err);
+}
+
+// ─── BONS DE LIVRAISON MODULE ───────────────────────────────
+import { createDeliveryRouter } from './delivery-routes.js';
+try {
+  const deliveryAuth = adminAuth(db);
+  app.use('/api/admin/deliveries', createDeliveryRouter({ db, dolibarrPool, auth: deliveryAuth, csrfProtection }));
+  console.log('[DELIVERIES] Delivery notes routes mounted');
+} catch (err) {
+  console.error('[DELIVERIES] Failed to mount delivery routes:', err);
+}
+
+// ─── COMMANDES WEB MODULE ───────────────────────────────────
+import { createOrdersRouter } from './orders-routes.js';
+try {
+  app.use('/api/admin/orders', adminAuth(db), createOrdersRouter({ db, dolibarrPool }));
+  console.log('[ORDERS] Web orders routes mounted');
+} catch (err) {
+  console.error('[ORDERS] Failed to mount orders routes:', err);
 }
 
 // ─── STOCK & REAPPROVISIONNEMENT MODULE ─────────────────────

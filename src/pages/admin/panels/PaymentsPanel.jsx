@@ -1,9 +1,114 @@
 import { useState, useEffect } from 'react';
-import { getAdminPayments, getPaymentOrphans, confirmOrderPayment, rejectPayment } from '../../../api/admin';
-import { FiDollarSign, FiCheck, FiX, FiClock, FiPhone, FiMail, FiHash, FiAlertCircle } from 'react-icons/fi';
+import { getAdminPayments, getPaymentOrphans, confirmOrderPayment, rejectPayment, getAdminOrderDetail } from '../../../api/admin';
+import { FiDollarSign, FiCheck, FiX, FiClock, FiPhone, FiMail, FiHash, FiAlertCircle, FiMapPin, FiPackage, FiFileText } from 'react-icons/fi';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
+import './Contracts.css';
+
+// Fiche détaillée d'une commande web (ouverte au clic sur le n° de commande).
+function OrderDetailModal({ orderId, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getAdminOrderDetail(orderId)
+      .then(r => { if (!cancelled) setData(r.data); })
+      .catch(() => { if (!cancelled) toast.error('Commande introuvable'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [orderId]);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const fmtDate = (d) => d ? new Date(d.replace(' ', 'T')).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' }) : '—';
+
+  return (
+    <div className="ct-modal-overlay" onClick={onClose}>
+      <div className="ct-modal" style={{ maxWidth: 640, width: '100%' }} role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+        {loading || !data ? <Loader /> : (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <FiPackage size={18} /> Commande {data.order.ref}
+                <span style={{ padding: '2px 10px', borderRadius: 8, fontSize: '0.75rem', fontWeight: 700, background: '#f1f5f9', color: '#475569' }}>{data.order.statusLabel}</span>
+              </h3>
+              <button onClick={onClose} className="ct-btn-ghost" aria-label="Fermer"><FiX size={20} /></button>
+            </div>
+
+            {/* Client */}
+            <div style={{ background: '#f8fafc', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontWeight: 700, color: '#0f172a' }}>{data.order.customer.name || '—'}</div>
+              <div style={{ fontSize: '0.85rem', color: '#475569', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: '2px 16px' }}>
+                {data.order.customer.email && <span><FiMail size={12} style={{ verticalAlign: -1, marginRight: 4 }} />{data.order.customer.email}</span>}
+                {data.order.customer.phone && <span><FiPhone size={12} style={{ verticalAlign: -1, marginRight: 4 }} />{data.order.customer.phone}</span>}
+              </div>
+              {(data.order.customer.address || data.order.customer.town) && (
+                <div style={{ fontSize: '0.85rem', color: '#475569', marginTop: 4 }}>
+                  <FiMapPin size={12} style={{ verticalAlign: -1, marginRight: 4 }} />
+                  {[data.order.customer.address, [data.order.customer.zip, data.order.customer.town].filter(Boolean).join(' ')].filter(Boolean).join(', ')}
+                </div>
+              )}
+              <div style={{ fontSize: '0.82rem', color: '#94a3b8', marginTop: 4 }}>Commande du {fmtDate(data.order.date)}</div>
+            </div>
+
+            {/* Lignes */}
+            <div className="admin-table-container" style={{ marginBottom: 12 }}>
+              <table className="admin-table" style={{ fontSize: '0.85rem' }}>
+                <thead><tr><th>Article</th><th style={{ textAlign: 'center' }}>Qté</th><th style={{ textAlign: 'right' }}>P.U.</th><th style={{ textAlign: 'right' }}>Total</th></tr></thead>
+                <tbody>
+                  {data.lines.map(l => (
+                    <tr key={l.id}>
+                      <td>{l.label}{l.ref ? <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}> · {l.ref}</span> : ''}</td>
+                      <td style={{ textAlign: 'center' }}>{l.qty}</td>
+                      <td style={{ textAlign: 'right' }}>{formatPrice(l.subprice)}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatPrice(l.total_ttc)}</td>
+                    </tr>
+                  ))}
+                  {data.lines.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: '#94a3b8' }}>Aucune ligne</td></tr>}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Totaux */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 24, fontSize: '0.88rem', marginBottom: 12 }}>
+              <div style={{ textAlign: 'right', color: '#64748b' }}>
+                <div>Total HT</div><div>TVA</div><div style={{ fontWeight: 800, color: '#0f172a', fontSize: '1rem' }}>Total TTC</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div>{formatPrice(data.order.total_ht)}</div>
+                <div>{formatPrice(data.order.total_tva)}</div>
+                <div style={{ fontWeight: 800, color: '#10531a', fontSize: '1rem' }}>{formatPrice(data.order.total_ttc)}</div>
+              </div>
+            </div>
+
+            {/* Paiement */}
+            {data.payment && (
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: 12, fontSize: '0.85rem', color: '#1e40af' }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}><FiDollarSign size={13} style={{ verticalAlign: -2 }} /> Paiement</div>
+                <div>Méthode : <strong>{data.payment.method || '—'}</strong> · Attendu : <strong>{formatPrice(data.payment.amount_expected)}</strong></div>
+                {data.payment.transaction_ref && <div>Réf. transaction client : <strong>{data.payment.transaction_ref}</strong>{data.payment.payer_phone ? ` · ${data.payment.payer_phone}` : ''}</div>}
+                {data.payment.invoice_ref && <div><FiFileText size={12} style={{ verticalAlign: -1 }} /> Facture : <strong>{data.payment.invoice_ref}</strong></div>}
+              </div>
+            )}
+
+            {data.order.note_public && (
+              <div style={{ marginTop: 10, fontSize: '0.85rem', color: '#475569' }}>
+                <strong>Note :</strong> {data.order.note_public}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 const METHOD_LABELS = { wave: 'Wave', orange_money: 'Orange Money', virement: 'Virement', cb: 'Carte bancaire' };
 const METHOD_COLORS = { wave: '#1e40af', orange_money: '#ea580c', virement: '#0891b2', cb: '#7c3aed' };
@@ -23,6 +128,7 @@ export default function PaymentsPanel() {
   const [showReject, setShowReject] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [orphans, setOrphans] = useState(0);
+  const [detailOrderId, setDetailOrderId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,7 +226,12 @@ export default function PaymentsPanel() {
                   {/* Infos principales */}
                   <div style={{ flex: 1, minWidth: 200 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                      <span style={{ fontWeight: 800, fontSize: '1rem' }}>{p.order_ref}</span>
+                      <button
+                        onClick={() => p.dolibarr_order_id && setDetailOrderId(p.dolibarr_order_id)}
+                        title="Voir le détail de la commande"
+                        style={{ fontWeight: 800, fontSize: '1rem', background: 'none', border: 'none', padding: 0, cursor: p.dolibarr_order_id ? 'pointer' : 'default', color: '#10531a', textDecoration: 'underline', textUnderlineOffset: 3 }}>
+                        {p.order_ref}
+                      </button>
                       <span style={{ padding: '2px 8px', borderRadius: 6, fontSize: '0.75rem', fontWeight: 700, background: `${methodColor}15`, color: methodColor }}>
                         {METHOD_LABELS[p.payment_method] || p.payment_method}
                       </span>
@@ -213,6 +324,11 @@ export default function PaymentsPanel() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal détail commande */}
+      {detailOrderId && (
+        <OrderDetailModal orderId={detailOrderId} onClose={() => setDetailOrderId(null)} />
       )}
     </div>
   );

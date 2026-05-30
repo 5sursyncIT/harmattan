@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { getStockAlerts, acknowledgeStockAlert, resolveStockAlert, ignoreStockAlert } from '../../../api/admin';
-import { FiAlertTriangle, FiArrowLeft, FiCheck, FiEye, FiXCircle } from 'react-icons/fi';
+import { FiAlertTriangle, FiArrowLeft, FiCheck, FiEye, FiXCircle, FiAlertCircle } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
+import StockNav from './StockNav';
 import './Stock.css';
 
 const TYPE_LABELS = {
@@ -25,16 +26,25 @@ export default function StockAlertsPanel() {
   const [status, setStatus] = useState('open');
   const [typeFilter, setTypeFilter] = useState('');
   const [page, setPage] = useState(1);
+  const [error, setError] = useState(false);
+  const [openCount, setOpenCount] = useState(0);
 
   const [fetchKey, setFetchKey] = useState(0);
 
+  // Lit ?type= de l'URL pour pré-filtrer (liens depuis le dashboard).
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('type');
+    if (t) setTypeFilter(t);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    const controller = new AbortController();
+    setLoading(true); setError(false);
     getStockAlerts({ status, type: typeFilter, page })
-      .then(r => { if (!cancelled) { setAlerts(r.data.alerts); setTotal(r.data.total); setLoading(false); } })
-      .catch(() => { if (!cancelled) { toast.error('Erreur chargement alertes'); setLoading(false); } });
-    return () => { cancelled = true; controller.abort(); };
+      .then(r => { if (!cancelled) { setAlerts(r.data.alerts); setTotal(r.data.total); if (status === 'open' && !typeFilter) setOpenCount(r.data.total); } })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [status, typeFilter, page, fetchKey]);
 
   const reload = () => { setLoading(true); setFetchKey(k => k + 1); };
@@ -60,6 +70,8 @@ export default function StockAlertsPanel() {
         </div>
       </div>
 
+      <StockNav badges={{ alerts: openCount }} />
+
       {/* Status tabs */}
       <div className="sk-filters">
         {STATUS_TABS.map(t => (
@@ -77,10 +89,16 @@ export default function StockAlertsPanel() {
         ))}
       </div>
 
-      {loading ? <Loader /> : alerts.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
-          <FiCheck size={40} style={{ marginBottom: 8, opacity: 0.4 }} />
-          <p>Aucune alerte {status === 'open' ? 'ouverte' : status}</p>
+      {loading ? <Loader /> : error ? (
+        <div className="sk-empty">
+          <FiAlertCircle size={42} style={{ color: '#ef4444', marginBottom: 8 }} />
+          <p style={{ fontWeight: 600 }}>Erreur de chargement des alertes</p>
+          <button className="btn btn-primary" onClick={reload} style={{ marginTop: 8 }}>Réessayer</button>
+        </div>
+      ) : alerts.length === 0 ? (
+        <div className="sk-empty">
+          <FiCheck size={42} style={{ marginBottom: 8, color: '#10b981' }} />
+          <p style={{ fontWeight: 600 }}>Aucune alerte {status === 'open' ? 'ouverte' : status}</p>
         </div>
       ) : (
         <>
@@ -90,10 +108,11 @@ export default function StockAlertsPanel() {
                 <div className={`sk-alert-severity ${a.severity}`} />
                 <div className="sk-alert-info">
                   <div className="sk-alert-type">{TYPE_LABELS[a.alert_type] || a.alert_type}</div>
-                  <div className="sk-alert-product">
+                  <Link to={`/admin/stock/products?q=${encodeURIComponent(a.product_ref || a.product_label || '')}`}
+                    className="sk-alert-product sk-alert-product-link" title="Voir le produit">
                     {a.product_ref && <span className="mono" style={{ marginRight: 6 }}>{a.product_ref}</span>}
                     {a.product_label || `Produit #${a.product_id}`}
-                  </div>
+                  </Link>
                 </div>
                 <div className="sk-alert-meta">
                   <span>Stock: <strong>{a.current_stock_live ?? a.current_stock}</strong></span>

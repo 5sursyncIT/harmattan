@@ -102,6 +102,21 @@ function DevicesTab() {
     }
   };
 
+  const handleRename = async (d) => {
+    const name = window.prompt(`Renommer l'appareil`, d.device_name || '');
+    if (name === null) return; // annulé
+    const trimmed = name.trim();
+    if (!trimmed) return toast.error('Nom requis');
+    if (trimmed === d.device_name) return;
+    try {
+      await updatePosDevice(d.id, { device_name: trimmed });
+      load();
+      toast.success('Appareil renommé');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
   return (
     <div className="pos-tab-content">
       {/* Generate code */}
@@ -180,6 +195,7 @@ function DevicesTab() {
                   )}
                 </td>
                 <td>
+                  <button className="btn-icon" onClick={() => handleRename(d)} title="Renommer"><FiEdit2 size={14} /></button>
                   {d.active ? (
                     <button className="btn-icon danger" onClick={() => handleRevoke(d)} title="Révoquer"><FiTrash2 size={14} /></button>
                   ) : (

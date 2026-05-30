@@ -72,8 +72,11 @@ export const ROLE_ALLOWED_PATHS = {
     ...COMMON_PATHS,
     /^\/api\/admin\/books(\/.*)?$/,
     /^\/api\/admin\/tags(\/.*)?$/,
-    /^\/api\/admin\/stock(\/.*)?$/,
+    // Stock : lecture seule pour le libraire (méthodes d'écriture refusées par la
+    // RBAC elle-même, en plus du garde-fou applicatif blockLibrarianWrite).
+    { re: /^\/api\/admin\/stock(\/.*)?$/, methods: ['GET'] },
     /^\/api\/admin\/invoices(\/.*)?$/,
+    /^\/api\/admin\/deliveries(\/.*)?$/,
     /^\/api\/admin\/societes(\/.*)?$/,
     /^\/api\/admin\/propals(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
@@ -84,9 +87,10 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/stats(\/.*)?$/,
     /^\/api\/admin\/payments(\/.*)?$/,
     /^\/api\/admin\/invoices(\/.*)?$/,
+    /^\/api\/admin\/deliveries(\/.*)?$/,
+    /^\/api\/admin\/orders(\/.*)?$/,
     /^\/api\/admin\/societes(\/.*)?$/,
     /^\/api\/admin\/propals(\/.*)?$/,
-    /^\/api\/admin\/orders\/[^/]+\/confirm-payment$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
   vendeur: [
@@ -123,7 +127,7 @@ const M = (modules) => {
     dashboard: '-', books: '-', tags: '-', authors: '-', stock: '-', suppliers: '-',
     manuscripts: '-', evaluations: '-', corrections: '-', editorial: '-', covers: '-',
     printing: '-', contracts: '-', pos: '-', payments: '-', accounting: '-',
-    invoices: '-',
+    invoices: '-', deliveries: '-', orders: '-',
     config: '-', slides: '-', news: '-', faq: '-', contacts: '-', newsletter: '-',
     customers: '-', users: '-', activity: '-', profile: 'rw',
   };
@@ -135,7 +139,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud',
+    invoices: 'crud', deliveries: 'crud', orders: 'r',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: 'crud', activity: 'r', profile: 'rw',
   }),
@@ -143,7 +147,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud',
+    invoices: 'crud', deliveries: 'crud', orders: 'r',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: '-', activity: 'r', profile: 'rw',
   }),
@@ -157,10 +161,10 @@ export const MODULE_PERMISSIONS = {
     customers: 'rw', news: 'crud', profile: 'rw',
   }),
   librarian: M({
-    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', profile: 'rw',
+    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', deliveries: 'crud', profile: 'rw',
   }),
   comptable: M({
-    dashboard: 'r', payments: 'crud', accounting: 'crud', invoices: 'crud', profile: 'rw',
+    dashboard: 'r', payments: 'crud', accounting: 'crud', invoices: 'crud', deliveries: 'crud', orders: 'r', profile: 'rw',
   }),
   vendeur: M({
     pos: 'crud', profile: 'rw',
@@ -197,6 +201,8 @@ export const MODULE_LABELS = {
   payments: 'Paiements',
   accounting: 'Comptabilité',
   invoices: 'Factures',
+  deliveries: 'Bons de livraison',
+  orders: 'Commandes web',
   config: 'Configuration',
   slides: 'Bannières',
   news: 'Actualités',

@@ -67,6 +67,13 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
 
   const [submitting, setSubmitting] = useState(false);
 
+  // Accessibilité : fermeture au clavier (Échap) tant qu'aucune soumission en cours.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !submitting) onClose?.(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [submitting, onClose]);
+
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const total = items.reduce((s, i) => s + (parseInt(i.price) || 0), 0);
 
@@ -129,8 +136,8 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
   };
 
   return (
-    <div className="ct-modal-overlay" onClick={onClose}>
-      <div className="ct-modal ct-modal-large" onClick={e => e.stopPropagation()}>
+    <div className="ct-modal-overlay" onClick={() => !submitting && onClose?.()}>
+      <div className="ct-modal ct-modal-large" role="dialog" aria-modal="true" aria-label="Générer un devis" onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
             <FiFileText size={18} /> Générer un devis

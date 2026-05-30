@@ -118,17 +118,26 @@ export default function POSReceipt({ sale, onClose }) {
 
           {/* Payments */}
           <div className="pos-receipt-payments-section">
-            {sale.payments?.map((p, i) => (
-              <div key={i} className="pos-receipt-payment-line">
-                <span>{PAYMENT_LABELS[p.code] || p.code}</span>
-                <span>{parseInt(p.amount).toLocaleString('fr-FR')} F</span>
+            {sale.unpaid ? (
+              <div className="pos-receipt-payment-line pos-receipt-unpaid">
+                <span>À RÉGLER (facture impayée)</span>
+                <span>{sale.total_ttc?.toLocaleString('fr-FR')} F</span>
               </div>
-            ))}
-            {change > 0 && (
-              <div className="pos-receipt-payment-line pos-receipt-change">
-                <span>Rendu monnaie</span>
-                <span>{parseInt(change).toLocaleString('fr-FR')} F</span>
-              </div>
+            ) : (
+              <>
+                {sale.payments?.map((p, i) => (
+                  <div key={i} className="pos-receipt-payment-line">
+                    <span>{PAYMENT_LABELS[p.code] || p.code}</span>
+                    <span>{parseInt(p.amount).toLocaleString('fr-FR')} F</span>
+                  </div>
+                ))}
+                {change > 0 && (
+                  <div className="pos-receipt-payment-line pos-receipt-change">
+                    <span>Rendu monnaie</span>
+                    <span>{parseInt(change).toLocaleString('fr-FR')} F</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
 

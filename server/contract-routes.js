@@ -162,6 +162,40 @@ function validateISBN(isbn) {
   return /^(97[89]\d{10}|\d{10})$/.test(clean);
 }
 
+// Numeric coercion qui PRÉSERVE les zéros volontaires (un taux 0 % ne doit pas
+// être écrasé par le défaut). `x || default` traiterait 0 comme falsy — bug.
+function numOr(value, fallback) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+function intOr(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Convertit une date (ISO "YYYY-MM-DD", Date, timestamp…) en epoch secondes.
+// L'API Dolibarr v21 exige un epoch entier pour les extrafields de type `date` ;
+// envoyer une chaîne ISO provoque un rejet/une perte silencieuse (régression v13→v21).
+function toEpochDate(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const t = new Date(value).getTime();
+  return Number.isNaN(t) ? null : Math.floor(t / 1000);
+}
+
+// Normalise une erreur Dolibarr : propage le code HTTP réel pour les erreurs
+// métier (4xx) au lieu de tout écraser en 500, et expose le message Dolibarr
+// uniquement pour les 4xx (validation métier — sûr à montrer à un admin),
+// jamais pour les 5xx (risque de fuite de détails internes).
+function dolibarrError(err, genericMessage) {
+  const upstream = err.response?.status;
+  const isClientError = Number.isInteger(upstream) && upstream >= 400 && upstream < 500;
+  const dolMsg = err.response?.data?.error?.message || err.response?.data?.message;
+  return {
+    status: isClientError ? upstream : 500,
+    body: { error: isClientError && dolMsg ? `${genericMessage} : ${dolMsg}` : genericMessage },
+  };
+}
+
 function validateContractData(data) {
   const errors = [];
   if (!data.thirdparty_id || isNaN(parseInt(data.thirdparty_id))) errors.push('Auteur invalide');
@@ -453,7 +487,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
   router.get('/:id', auth, async (req, res) => {
     try {
-      const id = req.params.id;
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
       const contractRes = await adminApi.get(`/contracts/${id}`);
       const contract = contractRes.data;
 
@@ -548,33 +583,36 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         options_book_title: data.book_title.trim(),
         options_book_subtitle: (data.book_subtitle || '').trim(),
         options_book_isbn: (data.book_isbn || '').replace(/[-\s]/g, ''),
-        options_royalty_rate_print: parseFloat(data.royalty_rate_print) || defaults.royalty_rate_print,
-        options_royalty_rate_digital: parseFloat(data.royalty_rate_digital) || defaults.royalty_rate_digital,
-        options_royalty_threshold: parseInt(data.royalty_threshold) || defaults.royalty_threshold,
-        options_royalty_digital_threshold_fcfa: parseInt(data.royalty_digital_threshold_fcfa) || 20000,
-        options_free_author_copies: parseInt(data.free_author_copies) || defaults.free_author_copies,
+        options_royalty_rate_print: numOr(data.royalty_rate_print, defaults.royalty_rate_print),
+        options_royalty_rate_digital: numOr(data.royalty_rate_digital, defaults.royalty_rate_digital),
+        options_royalty_threshold: intOr(data.royalty_threshold, defaults.royalty_threshold),
+        options_royalty_digital_threshold_fcfa: intOr(data.royalty_digital_threshold_fcfa, 20000),
+        options_free_author_copies: intOr(data.free_author_copies, defaults.free_author_copies),
         options_author_purchase_enabled: data.author_purchase_enabled ? 1 : 0,
-        options_author_purchase_qty: data.author_purchase_enabled ? (parseInt(data.author_purchase_qty) || 0) : 0,
-        options_author_purchase_discount: data.author_purchase_enabled ? (parseFloat(data.author_purchase_discount) || 0) : 0,
+        options_author_purchase_qty: data.author_purchase_enabled ? intOr(data.author_purchase_qty, 0) : 0,
+        options_author_purchase_discount: data.author_purchase_enabled ? numOr(data.author_purchase_discount, 0) : 0,
       };
 
       // Nouvelles variables v2 (templates edition_*)
       if (ACTIVE_CONTRACT_TYPES.includes(data.contract_type)) {
-        arrayOptions.options_tirage_initial = parseInt(data.tirage_initial) || defaults.tirage_initial;
+        arrayOptions.options_tirage_initial = intOr(data.tirage_initial, defaults.tirage_initial);
         arrayOptions.options_format_ouvrage = (data.format_ouvrage || defaults.format_ouvrage).trim();
-        arrayOptions.options_prix_public_previsionnel = parseFloat(data.prix_public_previsionnel) || defaults.prix_public_previsionnel;
-        arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime) || defaults.nombre_pages_estime;
-        arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp) || defaults.exemplaires_sp;
-        if (data.date_signature) arrayOptions.options_date_signature = data.date_signature;
+        arrayOptions.options_prix_public_previsionnel = numOr(data.prix_public_previsionnel, defaults.prix_public_previsionnel);
+        arrayOptions.options_nombre_pages_estime = intOr(data.nombre_pages_estime, defaults.nombre_pages_estime);
+        arrayOptions.options_exemplaires_sp = intOr(data.exemplaires_sp, defaults.exemplaires_sp);
+        // v21 : extrafield de type `date` → epoch entier obligatoire (cf. toEpochDate)
+        const sigEpoch = toEpochDate(data.date_signature);
+        if (sigEpoch !== null) arrayOptions.options_date_signature = sigEpoch;
         arrayOptions.options_editeur_signataire_nom = (data.editeur_signataire_nom || DEFAULT_EDITOR_NAME).trim();
         arrayOptions.options_editeur_signataire_qualite = (data.editeur_signataire_qualite || DEFAULT_EDITOR_TITLE).trim();
       }
 
       const contractRes = await adminApi.post('/contracts', {
-        socid: parseInt(data.thirdparty_id),
+        socid: parseInt(data.thirdparty_id, 10),
         date_contrat: Math.floor(Date.now() / 1000),
-        commercial_signature_id: COMMERCIAL_SIGNATURE_ID,
-        commercial_suivi_id: COMMERCIAL_SUIVI_ID,
+        // v21 : ids commerciaux attendus en entier (sinon FK ignorée silencieusement)
+        commercial_signature_id: parseInt(COMMERCIAL_SIGNATURE_ID, 10) || 1,
+        commercial_suivi_id: parseInt(COMMERCIAL_SUIVI_ID, 10) || 1,
         model_pdf: modelPdf,
         note_private: data.note_private || '',
         array_options: arrayOptions,
@@ -597,19 +635,20 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
             contract_id INTEGER, manuscript_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (contract_id, manuscript_id)
           )`);
-          db.prepare('INSERT OR IGNORE INTO contract_manuscript_links (contract_id, manuscript_id) VALUES (?, ?)').run(contractId, data.manuscript_id);
-
-          // Lie le contract_id sur le manuscrit (idempotent), même si la transition
-          // ci-dessous échoue (stage incompatible) on garde au moins la trace.
-          db.prepare('UPDATE manuscripts SET contract_id = ? WHERE id = ?')
-            .run(contractId, data.manuscript_id);
+          // Atomicité : le lien + le contract_id sur le manuscrit doivent être
+          // écrits ensemble (tout ou rien) pour ne pas laisser d'état incohérent
+          // si l'un des deux échoue.
+          db.transaction(() => {
+            db.prepare('INSERT OR IGNORE INTO contract_manuscript_links (contract_id, manuscript_id) VALUES (?, ?)').run(contractId, data.manuscript_id);
+            db.prepare('UPDATE manuscripts SET contract_id = ? WHERE id = ?').run(contractId, data.manuscript_id);
+          })();
 
           // Avance vers contract_pending si la transition est autorisée depuis le
           // stage courant. La fonction est idempotente (no-op si déjà au stage cible)
           // et lève si la transition n'est pas légale — dans ce cas on log et on
           // continue : le contrat a bien été créé, c'est juste l'avancement qui n'est pas applicable.
           try {
-            wfTransition(db, parseInt(data.manuscript_id), 'contract_pending',
+            wfTransition(db, parseInt(data.manuscript_id, 10), 'contract_pending',
               { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
               { note: `Contrat manuel #${contractId} créé (${TYPE_LABELS[data.contract_type] || data.contract_type})` }
             );
@@ -624,7 +663,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       res.json({ id: contractId });
     } catch (err) {
       console.error('Create contract error:', err.response?.data || err.message);
-      res.status(500).json({ error: 'Erreur création contrat' });
+      const { status, body } = dolibarrError(err, 'Erreur création contrat');
+      res.status(status).json(body);
     }
   });
 
@@ -634,7 +674,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
   router.put('/:id', auth, csrfProtection, async (req, res) => {
     try {
-      const id = req.params.id;
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
 
       // Check contract is still a draft
       const existing = await adminApi.get(`/contracts/${id}`);
@@ -683,7 +724,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = parseFloat(data.prix_public_previsionnel);
       if (data.nombre_pages_estime !== undefined) arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime);
       if (data.exemplaires_sp !== undefined) arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp);
-      if (data.date_signature !== undefined) arrayOptions.options_date_signature = data.date_signature || null;
+      if (data.date_signature !== undefined) arrayOptions.options_date_signature = toEpochDate(data.date_signature);
       if (data.editeur_signataire_nom !== undefined) arrayOptions.options_editeur_signataire_nom = (data.editeur_signataire_nom || '').trim();
       if (data.editeur_signataire_qualite !== undefined) arrayOptions.options_editeur_signataire_qualite = (data.editeur_signataire_qualite || '').trim();
 
@@ -697,7 +738,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       res.json({ success: true });
     } catch (err) {
       console.error('Update contract error:', err.response?.data || err.message);
-      res.status(500).json({ error: 'Erreur modification contrat' });
+      const { status, body } = dolibarrError(err, 'Erreur modification contrat');
+      res.status(status).json(body);
     }
   });
 
@@ -707,8 +749,18 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
   router.post('/:id/validate', auth, csrfProtection, async (req, res) => {
     try {
-      await adminApi.post(`/contracts/${req.params.id}/validate`);
-      const detail = await adminApi.get(`/contracts/${req.params.id}`);
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+
+      // Garde de transition : seul un brouillon (statut 0) peut être validé.
+      // Évite un appel Dolibarr inutile et clarifie l'erreur en cas de double-clic.
+      const existing = await adminApi.get(`/contracts/${id}`);
+      if (parseInt(existing.data.statut) !== 0) {
+        return res.status(409).json({ error: 'Ce contrat n\'est pas un brouillon (déjà validé ou clôturé)' });
+      }
+
+      await adminApi.post(`/contracts/${id}/validate`);
+      const detail = await adminApi.get(`/contracts/${id}`);
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'validate_contract', `Contrat ${detail.data.ref} validé`);
@@ -716,7 +768,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       res.json({ success: true, ref: detail.data.ref });
     } catch (err) {
       console.error('Validate contract error:', err.response?.data || err.message);
-      res.status(500).json({ error: 'Erreur validation contrat' });
+      const { status, body } = dolibarrError(err, 'Erreur validation contrat');
+      res.status(status).json(body);
     }
   });
 
@@ -726,7 +779,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
   router.delete('/:id', auth, csrfProtection, async (req, res) => {
     try {
-      const id = req.params.id;
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
       const existing = await adminApi.get(`/contracts/${id}`);
       if (parseInt(existing.data.statut) !== 0) {
         return res.status(400).json({ error: 'Seuls les brouillons peuvent être supprimés' });
@@ -740,7 +794,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       res.json({ success: true });
     } catch (err) {
       console.error('Delete contract error:', err.response?.data || err.message);
-      res.status(500).json({ error: 'Erreur suppression contrat' });
+      const { status, body } = dolibarrError(err, 'Erreur suppression contrat');
+      res.status(status).json(body);
     }
   });
 
@@ -749,15 +804,25 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
   router.post('/:id/close', auth, csrfProtection, async (req, res) => {
     try {
-      await adminApi.post(`/contracts/${req.params.id}/close`);
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+
+      // Garde de transition : seul un contrat actif (statut 1) peut être clôturé.
+      const existing = await adminApi.get(`/contracts/${id}`);
+      if (parseInt(existing.data.statut) !== 1) {
+        return res.status(409).json({ error: 'Seul un contrat actif peut être clôturé' });
+      }
+
+      await adminApi.post(`/contracts/${id}/close`);
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-        .run(req.admin.username, 'close_contract', `Contrat ${req.params.id} clôturé`);
+        .run(req.admin.username, 'close_contract', `Contrat ${id} clôturé`);
 
       res.json({ success: true });
     } catch (err) {
       console.error('Close contract error:', err.response?.data || err.message);
-      res.status(500).json({ error: 'Erreur clôture contrat' });
+      const { status, body } = dolibarrError(err, 'Erreur clôture contrat');
+      res.status(status).json(body);
     }
   });
 
@@ -872,9 +937,10 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
       res.json({ success: true, ...result });
     } catch (err) {
-      const dolErr = err.response?.data;
-      console.error('Regenerate signed contract error:', dolErr || err.message);
-      res.status(500).json({ error: 'Erreur régénération document', details: dolErr || err.message });
+      // On loggue le détail Dolibarr côté serveur uniquement — jamais renvoyé au
+      // client (évite la fuite de chemins/structure du module custom).
+      console.error('Regenerate signed contract error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur régénération document' });
     }
   });
 
@@ -883,7 +949,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
   router.get('/:id/document', auth, async (req, res) => {
     try {
-      const id = req.params.id;
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
 
       // Auto-régénération : si le contrat est signé mais que les extrafields signature
       // ne sont pas encore remplis, on régénère le PDF avant de le servir.
@@ -896,7 +963,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         );
         const sig = sigRows[0];
         if (sig && sig.signed_status > 0 && sig.online_sign_name && !sig.signature_auteur_nom) {
-          await rebuildContractDocument(parseInt(id));
+          await rebuildContractDocument(id);
         }
       } catch (autoErr) {
         console.warn('Auto-regenerate warning:', autoErr.response?.data || autoErr.message);
@@ -914,8 +981,14 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       });
 
       const buffer = Buffer.from(dlRes.data.content, 'base64');
-      const ext = doc.name.split('.').pop();
-      const mime = ext === 'pdf' ? 'application/pdf' : 'application/vnd.oasis.opendocument.text';
+      const ext = (doc.name.split('.').pop() || '').toLowerCase();
+      const MIME_BY_EXT = {
+        pdf: 'application/pdf',
+        odt: 'application/vnd.oasis.opendocument.text',
+        doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      };
+      const mime = MIME_BY_EXT[ext] || 'application/octet-stream';
 
       res.setHeader('Content-Type', mime);
       res.setHeader('Content-Disposition', `attachment; filename="${doc.name}"`);

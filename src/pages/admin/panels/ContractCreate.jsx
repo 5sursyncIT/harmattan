@@ -133,6 +133,10 @@ export default function ContractCreate() {
   const [authorLoading, setAuthorLoading] = useState(false);
   const [selectedAuthor, setSelectedAuthor] = useState(null);
   const searchTimer = useRef(null);
+  const searchSeq = useRef(0);
+
+  // Nettoyage du timer de debounce au démontage (évite fuite + setState post-unmount).
+  useEffect(() => () => clearTimeout(searchTimer.current), []);
 
   // Step 1bis -- Inline author creation
   const [creatingAuthor, setCreatingAuthor] = useState(false);
@@ -191,13 +195,16 @@ export default function ContractCreate() {
     setAuthorQuery(q);
     setAuthorResults([]);
     clearTimeout(searchTimer.current);
-    if (q.length < 2) return;
+    if (q.length < 2) { setAuthorLoading(false); return; }
     setAuthorLoading(true);
+    // Garde anti-course : on ignore les réponses obsolètes (une réponse lente
+    // ancienne ne doit pas écraser les résultats d'une frappe plus récente).
+    const seq = ++searchSeq.current;
     searchTimer.current = setTimeout(() => {
       searchAuthors(q)
-        .then(r => setAuthorResults(r.data || []))
+        .then(r => { if (seq === searchSeq.current) setAuthorResults(r.data || []); })
         .catch(() => {})
-        .finally(() => setAuthorLoading(false));
+        .finally(() => { if (seq === searchSeq.current) setAuthorLoading(false); });
     }, 300);
   };
 
@@ -318,6 +325,13 @@ export default function ContractCreate() {
   };
 
   const handleSubmit = async () => {
+    if (submitting) return;
+    // Garde : l'auteur peut avoir été désélectionné en revenant à l'étape 1.
+    if (!selectedAuthor?.id) {
+      toast.error('Veuillez sélectionner un auteur');
+      setStep(1);
+      return;
+    }
     setSubmitting(true);
     try {
       const payload = { ...form, contract_type: buildContractType(form.contract_model, form.rights_scope) };

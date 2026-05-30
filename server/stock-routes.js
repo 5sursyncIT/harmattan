@@ -13,6 +13,7 @@ import {
   reorderPoint,
   getDefaultLeadTime,
   getDefaultSafetyDays,
+  getSupplyType,
 } from './stock-engine.js';
 
 export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
@@ -140,6 +141,33 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
     status TEXT DEFAULT 'pending',
     FOREIGN KEY (purchase_order_id) REFERENCES purchase_orders_local(id)
   )`);
+
+  // Migration : traçabilité (id/ref Dolibarr, type commande/réimpression, libellé produit).
+  for (const c of ['dolibarr_order_id TEXT', "order_type TEXT DEFAULT 'supplier'", 'warehouse_id INTEGER DEFAULT 4']) {
+    try { db.exec(`ALTER TABLE purchase_orders_local ADD COLUMN ${c}`); } catch { /* déjà présent */ }
+  }
+  try { db.exec(`ALTER TABLE purchase_order_lines ADD COLUMN product_label TEXT`); } catch { /* déjà présent */ }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_po_lines_product ON purchase_order_lines(product_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_po_status ON purchase_orders_local(status)');
+
+  // Enregistre une commande d'appro locale (fournisseur OU réimpression) + ses lignes.
+  function recordPurchaseOrder({ supplier_id, dolibarr_order_id, order_type, reference, expected_at, amount, warehouse_id, created_by, lines }) {
+    const tx = db.transaction(() => {
+      const po = db.prepare(
+        `INSERT INTO purchase_orders_local (supplier_id, reference, status, ordered_at, expected_at, amount_estimated, dolibarr_order_id, order_type, warehouse_id, created_by)
+         VALUES (?, ?, 'ordered', ?, ?, ?, ?, ?, ?, ?)`
+      ).run(supplier_id || 0, reference, new Date().toISOString(), expected_at || null, amount || 0,
+        dolibarr_order_id != null ? String(dolibarr_order_id) : null, order_type, warehouse_id || 4, created_by);
+      for (const l of lines) {
+        db.prepare(
+          `INSERT INTO purchase_order_lines (purchase_order_id, product_id, ordered_qty, received_qty, unit_cost, line_total, product_label, status)
+           VALUES (?, ?, ?, 0, ?, ?, ?, 'pending')`
+        ).run(po.lastInsertRowid, l.product_id, l.ordered_qty, l.unit_cost || 0, l.line_total || 0, l.product_label || null);
+      }
+      return po.lastInsertRowid;
+    });
+    return tx();
+  }
 
   // ═══════════════════════════════════════════════════════════
   // DASHBOARD KPIs
@@ -283,12 +311,13 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   router.get('/products', auth, async (req, res) => {
     try {
       const { q, abc, coverage_max, sort = 'coverage', order = 'ASC', page = 1, limit = 50, scan_limit } = req.query;
-      // scan_limit borne le top-N produits chargés depuis Dolibarr (triés par ventes 30j).
-      // Default 2000 couvre la plupart des catalogues actifs ; max 10000 pour éviter
-      // de saturer Dolibarr sur un fond très large. Le filtrage q/abc se fait ensuite
-      // en JS sur les résultats. Pour chercher un produit hors top-ventes, augmenter scan_limit.
-      const scanN = Math.min(10000, Math.max(100, parseInt(scan_limit) || 2000));
-      const products = await calculateCoverageAndRotation(dolibarrPool, scanN);
+      const search = String(q || '').trim();
+      // Avec recherche : on interroge TOUT le catalogue (ref/titre/ISBN), borné à 500
+      // résultats. Sans recherche : top-N par ventes 30j (scan_limit, défaut 2000).
+      const scanN = search
+        ? 500
+        : Math.min(10000, Math.max(100, parseInt(scan_limit) || 2000));
+      const products = await calculateCoverageAndRotation(dolibarrPool, scanN, search ? { search } : {});
 
       // Enrichir avec politiques locales
       const policies = db.prepare('SELECT * FROM stock_policies').all();
@@ -309,11 +338,7 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         };
       });
 
-      // Filtres
-      if (q) {
-        const ql = q.toLowerCase();
-        enriched = enriched.filter(p => p.label.toLowerCase().includes(ql) || p.ref.toLowerCase().includes(ql));
-      }
+      // Filtres (la recherche q est déjà appliquée en SQL plein catalogue ci-dessus)
       if (abc) enriched = enriched.filter(p => p.abc_class === abc);
       if (coverage_max) enriched = enriched.filter(p => p.coverage_days <= parseInt(coverage_max));
 
@@ -367,14 +392,46 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   // RECOMMENDATIONS
   // ═══════════════════════════════════════════════════════════
 
-  router.get('/recommendations', auth, (req, res) => {
-    const { status = 'draft' } = req.query;
-    const recs = db.prepare(
-      `SELECT r.*, sp.abc_class, sp.xyz_class FROM purchase_recommendations r
-       LEFT JOIN stock_policies sp ON sp.product_id = r.product_id
-       WHERE r.status = ? ORDER BY r.coverage_days ASC, r.demand_avg_daily DESC`
-    ).all(status);
-    res.json(recs);
+  router.get('/recommendations', auth, async (req, res) => {
+    try {
+      const { status = 'draft' } = req.query;
+      const recs = db.prepare(
+        `SELECT r.*, sp.abc_class, sp.xyz_class FROM purchase_recommendations r
+         LEFT JOIN stock_policies sp ON sp.product_id = r.product_id
+         WHERE r.status = ? ORDER BY r.coverage_days ASC, r.demand_avg_daily DESC`
+      ).all(status);
+
+      // Enrichir avec les infos produit + éditeur (titre, stock live, type de réappro)
+      // — sinon l'écran n'afficherait qu'un product_id.
+      if (recs.length > 0) {
+        const ids = [...new Set(recs.map(r => r.product_id))];
+        const placeholders = ids.map(() => '?').join(',');
+        const [products] = await dolibarrPool.query(
+          `SELECT p.rowid AS id, p.ref, p.label, p.stock, pe.editeur
+           FROM llx_product p LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
+           WHERE p.rowid IN (${placeholders})`, ids
+        );
+        const pMap = new Map(products.map(p => [p.id, p]));
+        for (const r of recs) {
+          const p = pMap.get(r.product_id);
+          r.product_ref = p?.ref || null;
+          r.product_label = p?.label || `Produit #${r.product_id}`;
+          r.current_stock_live = p?.stock ?? r.stock_on_hand;
+          r.editeur = p?.editeur || 'Autre';
+          r.supply_type = getSupplyType(p?.editeur);
+        }
+      }
+
+      // Compteurs par statut (pour les onglets/badges)
+      const counts = db.prepare(
+        `SELECT status, COUNT(*) AS n FROM purchase_recommendations GROUP BY status`
+      ).all().reduce((acc, r) => { acc[r.status] = r.n; return acc; }, {});
+
+      res.json({ recommendations: recs, counts });
+    } catch (err) {
+      console.error('[STOCK] recommendations error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement recommandations' });
+    }
   });
 
   router.post('/recommendations/:id/approve', auth, blockLibrarianWrite, csrfProtection, (req, res) => {
@@ -445,16 +502,78 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         [moRef, `Réimpression ${product.label}`, qty, warehouse_id, product_id, now, endDate, now]
       );
 
+      // Suivi local (apparaît dans « Commandes d'appro », réceptionnable, compté en on-order)
+      const poId = recordPurchaseOrder({
+        supplier_id: 0, // interne (réimpression)
+        dolibarr_order_id: result.insertId,
+        order_type: 'reprint',
+        reference: moRef,
+        expected_at: new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
+        amount: 0,
+        warehouse_id: parseInt(warehouse_id, 10) || 4,
+        created_by: req.admin.username,
+        lines: [{ product_id, ordered_qty: qty, unit_cost: 0, line_total: 0, product_label: product.label }],
+      });
+
       // Tracer dans le journal d'activité
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'reprint_request', `Réimpression demandée : ${product.ref} "${product.label}" × ${qty} → ${moRef}`);
 
       console.log(`[STOCK] Réimpression: ${moRef} — ${product.ref} × ${qty} par ${req.admin.username}`);
 
-      res.json({ success: true, mo_ref: moRef, mo_id: result.insertId, product_ref: product.ref, qty });
+      res.json({ success: true, mo_ref: moRef, mo_id: result.insertId, po_id: poId, product_ref: product.ref, qty });
     } catch (err) {
       console.error('[STOCK] Reprint error:', err.message);
       res.status(500).json({ error: 'Erreur création ordre de réimpression' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // ENTRÉE DE STOCK (réception fournisseur, fin de réimpression, correction +)
+  // C'est le SEUL point d'INCRÉMENT de stock natif de l'app. Sans lui, le stock ne
+  // pouvait que décroître (ventes/BL) — les réceptions devaient être saisies dans Dolibarr.
+  // ═══════════════════════════════════════════════════════════
+
+  router.post('/entry', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+    try {
+      const { product_id, qty, warehouse_id = 4, reason } = req.body;
+      const q = parseInt(qty, 10);
+      const wh = parseInt(warehouse_id, 10) || 4;
+      if (!product_id || !q || q < 1) return res.status(400).json({ error: 'product_id et qty (> 0) requis' });
+      if (q > 100000) return res.status(400).json({ error: 'Quantité trop élevée' });
+
+      // Produit + entrepôt valides
+      const [[product]] = await dolibarrPool.query(
+        `SELECT rowid, ref, label FROM llx_product WHERE rowid = ?`, [product_id]
+      );
+      if (!product) return res.status(404).json({ error: 'Produit introuvable' });
+      const [[whRow]] = await dolibarrPool.query(
+        `SELECT rowid FROM llx_entrepot WHERE rowid = ? AND statut = 1`, [wh]
+      );
+      if (!whRow) return res.status(400).json({ error: 'Entrepôt invalide ou inactif' });
+
+      const adminApi = (await import('axios')).default.create({
+        baseURL: process.env.DOLIBARR_URL,
+        headers: { DOLAPIKEY: process.env.DOLIBARR_ADMIN_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 30000,
+      });
+      // qty POSITIVE = entrée de stock (Dolibarr remappe le type interne).
+      await adminApi.post('/stockmovements', {
+        product_id: parseInt(product_id, 10),
+        warehouse_id: wh,
+        qty: Math.abs(q),
+        movementcode: 'ENTREE',
+        movementlabel: `Entrée stock — ${String(reason || '').slice(0, 80) || req.admin.username}`,
+      });
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'stock_entry', `Entrée stock : ${product.ref} +${q} (dépôt ${wh})${reason ? ' — ' + reason : ''}`);
+      console.log(`[STOCK] Entrée: ${product.ref} +${q} (dépôt ${wh}) par ${req.admin.username}`);
+
+      res.json({ success: true, product_ref: product.ref, qty: q, warehouse_id: wh });
+    } catch (err) {
+      console.error('[STOCK] entry error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur entrée de stock' });
     }
   });
 
@@ -469,21 +588,32 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
       const { product_id, qty, supplier_id } = req.body;
       if (!product_id || !qty || qty < 1) return res.status(400).json({ error: 'product_id et qty requis' });
 
-      // Charger le produit + éditeur
+      // Charger le produit + éditeur + coûts Dolibarr (cost_price, pmp)
       const [[product]] = await dolibarrPool.query(
-        `SELECT p.rowid, p.ref, p.label, p.price_ttc, pe.editeur
+        `SELECT p.rowid, p.ref, p.label, p.price_ttc, p.cost_price, p.pmp, pe.editeur
          FROM llx_product p LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
          WHERE p.rowid = ?`, [product_id]
       );
       if (!product) return res.status(404).json({ error: 'Produit introuvable' });
 
-      // Déterminer le fournisseur automatiquement si non spécifié
-      let socid = supplier_id;
+      // Déterminer le fournisseur automatiquement si non spécifié :
+      //   1) éditeur L'Harmattan Paris → socid connu
+      //   2) sinon, fournisseur principal du titre (supplier_products → suppliers)
+      //   3) sinon erreur explicite (à renseigner dans l'écran Fournisseurs)
+      let socid = supplier_id ? parseInt(supplier_id, 10) : null;
       if (!socid) {
         if (product.editeur === "L'Harmattan Paris" || product.editeur === "L'Harmattan") {
           socid = HARMATTAN_PARIS_ID;
         } else {
-          return res.status(400).json({ error: 'supplier_id requis pour les éditeurs tiers' });
+          const primary = db.prepare(
+            `SELECT s.dolibarr_supplier_id FROM supplier_products sp
+             JOIN suppliers s ON s.id = sp.supplier_id
+             WHERE sp.product_id = ? AND s.active = 1
+               AND s.dolibarr_supplier_id IS NOT NULL AND s.dolibarr_supplier_id != ''
+             ORDER BY sp.is_primary DESC, s.priority_rank ASC LIMIT 1`
+          ).get(product_id);
+          if (primary?.dolibarr_supplier_id) socid = parseInt(primary.dolibarr_supplier_id, 10);
+          else return res.status(400).json({ error: 'Aucun fournisseur défini pour ce titre. Renseignez un fournisseur principal (écran Fournisseurs) puis réessayez.' });
         }
       }
 
@@ -501,33 +631,199 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
       });
       const orderId = orderRes.data;
 
-      // Ajouter la ligne produit (via SQL car l'API REST ne supporte pas les lignes)
-      const unitPrice = parseFloat(product.price_ttc) * 0.6; // estimation prix d'achat = 60% du prix public
+      // Prix d'achat réel, par ordre de préférence :
+      //   1) tarif fournisseur négocié (supplier_products.purchase_price)
+      //   2) coût Dolibarr (cost_price) puis PMP (prix moyen pondéré)
+      //   3) à défaut seulement, estimation à 60% du prix public (signalée)
+      const spRow = db.prepare(
+        `SELECT sp.purchase_price FROM supplier_products sp
+         JOIN suppliers s ON s.id = sp.supplier_id
+         WHERE sp.product_id = ? AND s.dolibarr_supplier_id = ? AND sp.purchase_price > 0
+         ORDER BY sp.is_primary DESC LIMIT 1`
+      ).get(product_id, String(socid));
+      let unitPrice, priceSource;
+      if (spRow?.purchase_price > 0) { unitPrice = parseFloat(spRow.purchase_price); priceSource = 'tarif fournisseur'; }
+      else if (parseFloat(product.cost_price) > 0) { unitPrice = parseFloat(product.cost_price); priceSource = 'coût Dolibarr'; }
+      else if (parseFloat(product.pmp) > 0) { unitPrice = parseFloat(product.pmp); priceSource = 'PMP'; }
+      else { unitPrice = Math.round(parseFloat(product.price_ttc) * 0.6); priceSource = 'estimation 60% PP'; }
+      unitPrice = Math.max(0, unitPrice);
+      const lineTotal = Math.round(unitPrice * qty);
+
+      // Ajouter la ligne produit (via SQL car l'API REST ne supporte pas les lignes).
+      // TVA 0 : les livres sont exonérés au Sénégal et les imports L'Harmattan Paris
+      // sont en autoliquidation → total_ttc = total_ht.
       await dolibarrPool.query(
-        `INSERT INTO llx_commande_fournisseurdet (fk_commande, fk_product, qty, subprice, total_ht, total_ttc, tva_tx, product_type, description)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
-        [orderId, product_id, qty, unitPrice, unitPrice * qty, unitPrice * qty, `Réappro: ${product.ref} ${product.label}`]
+        `INSERT INTO llx_commande_fournisseurdet (fk_commande, fk_product, label, qty, subprice, total_ht, total_ttc, tva_tx, product_type, description)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+        [orderId, product_id, String(product.label || '').slice(0, 255), qty, unitPrice, lineTotal, lineTotal, `Réappro: ${product.ref} ${product.label} (prix: ${priceSource})`]
       );
 
       // Mettre à jour les totaux de la commande
       await dolibarrPool.query(
         `UPDATE llx_commande_fournisseur SET total_ht = ?, total_ttc = ? WHERE rowid = ?`,
-        [unitPrice * qty, unitPrice * qty, orderId]
+        [lineTotal, lineTotal, orderId]
       );
 
-      // Récupérer la ref de la commande
-      const detail = await adminApi.get(`/supplierorders/${orderId}`);
+      // Valider la commande → réf définitive (pas de mouvement stock :
+      // STOCK_CALCULATE_ON_SUPPLIER_VALIDATE_ORDER off). Si échec, on garde le brouillon.
+      let finalRef = null;
+      try {
+        await adminApi.post(`/supplierorders/${orderId}/validate`);
+      } catch (vErr) {
+        console.warn('[STOCK] Validation commande fournisseur échouée (reste brouillon):', vErr.response?.data?.error?.message || vErr.message);
+      }
+      try {
+        const detail = await adminApi.get(`/supplierorders/${orderId}`);
+        finalRef = detail.data.ref;
+      } catch { /* ref indisponible */ }
+      finalRef = finalRef || `CF-${orderId}`;
+
+      // Suivi local de la commande d'appro (liste « commandes en cours » + réception + stock_on_order)
+      const localSupplier = db.prepare("SELECT id FROM suppliers WHERE dolibarr_supplier_id = ? AND active = 1").get(String(socid));
+      const poId = recordPurchaseOrder({
+        supplier_id: localSupplier?.id || 0,
+        dolibarr_order_id: orderId,
+        order_type: 'supplier',
+        reference: finalRef,
+        expected_at: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+        amount: lineTotal,
+        warehouse_id: 4,
+        created_by: req.admin.username,
+        lines: [{ product_id, ordered_qty: qty, unit_cost: unitPrice, line_total: lineTotal, product_label: product.label }],
+      });
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-        .run(req.admin.username, 'supplier_order', `Commande fournisseur : ${product.ref} × ${qty} → ${detail.data.ref}`);
+        .run(req.admin.username, 'supplier_order', `Commande fournisseur : ${product.ref} × ${qty} → ${finalRef}`);
 
-      console.log(`[STOCK] Commande fournisseur: ${detail.data.ref} — ${product.ref} × ${qty} par ${req.admin.username}`);
+      console.log(`[STOCK] Commande fournisseur: ${finalRef} — ${product.ref} × ${qty} par ${req.admin.username}`);
 
-      res.json({ success: true, order_ref: detail.data.ref, order_id: orderId, product_ref: product.ref, qty });
+      res.json({ success: true, order_ref: finalRef, order_id: orderId, po_id: poId, product_ref: product.ref, qty });
     } catch (err) {
       console.error('[STOCK] Supplier order error:', err.response?.data || err.message);
       res.status(500).json({ error: 'Erreur création commande fournisseur' });
     }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // COMMANDES D'APPRO — suivi local (liste, détail, réception)
+  // ═══════════════════════════════════════════════════════════
+
+  const PO_STATUS_LABELS = { ordered: 'En cours', partial: 'Reçue partiellement', received: 'Reçue', cancelled: 'Annulée' };
+
+  function poLinesOf(poId) { return db.prepare('SELECT * FROM purchase_order_lines WHERE purchase_order_id = ?').all(poId); }
+  function poToDto(o) {
+    const lines = poLinesOf(o.id);
+    const ordered = lines.reduce((s, l) => s + l.ordered_qty, 0);
+    const received = lines.reduce((s, l) => s + l.received_qty, 0);
+    return {
+      ...o,
+      status_label: PO_STATUS_LABELS[o.status] || o.status,
+      supplier_label: o.order_type === 'reprint' ? 'Réimpression interne' : (o.supplier_name || 'Fournisseur'),
+      lines, total_ordered: ordered, total_received: received,
+      progress: ordered > 0 ? Math.round((received / ordered) * 100) : 0,
+    };
+  }
+
+  router.get('/purchase-orders', auth, (req, res) => {
+    try {
+      const { status } = req.query;
+      let where = '';
+      const params = [];
+      if (status === 'open') where = "WHERE po.status IN ('ordered','partial')";
+      else if (status && PO_STATUS_LABELS[status]) { where = 'WHERE po.status = ?'; params.push(status); }
+      const orders = db.prepare(
+        `SELECT po.*, s.supplier_name FROM purchase_orders_local po
+         LEFT JOIN suppliers s ON s.id = po.supplier_id
+         ${where} ORDER BY po.created_at DESC LIMIT 300`
+      ).all(...params);
+      const counts = db.prepare('SELECT status, COUNT(*) n FROM purchase_orders_local GROUP BY status')
+        .all().reduce((a, r) => { a[r.status] = r.n; return a; }, {});
+      res.json({ orders: orders.map(poToDto), counts });
+    } catch (err) {
+      console.error('[STOCK] purchase-orders list error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement commandes d\'appro' });
+    }
+  });
+
+  router.get('/purchase-orders/:id', auth, (req, res) => {
+    const o = db.prepare(
+      `SELECT po.*, s.supplier_name FROM purchase_orders_local po
+       LEFT JOIN suppliers s ON s.id = po.supplier_id WHERE po.id = ?`
+    ).get(req.params.id);
+    if (!o) return res.status(404).json({ error: 'Commande introuvable' });
+    res.json(poToDto(o));
+  });
+
+  // Réception : crédite le stock Dolibarr (entrée) et met à jour received_qty + statut.
+  router.post('/purchase-orders/:id/receive', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+    try {
+      const po = db.prepare('SELECT * FROM purchase_orders_local WHERE id = ?').get(req.params.id);
+      if (!po) return res.status(404).json({ error: 'Commande introuvable' });
+      if (po.status === 'received') return res.status(409).json({ error: 'Commande déjà entièrement reçue' });
+      if (po.status === 'cancelled') return res.status(409).json({ error: 'Commande annulée' });
+
+      const lines = poLinesOf(po.id);
+      const body = req.body || {};
+      // Map ligne→qty à recevoir : soit "full", soit lines[] explicite.
+      const recvById = {};
+      if (body.full) { for (const l of lines) recvById[l.id] = Math.max(0, l.ordered_qty - l.received_qty); }
+      else { for (const r of (body.lines || [])) recvById[parseInt(r.line_id, 10)] = Math.max(0, parseInt(r.qty, 10) || 0); }
+
+      const wh = po.warehouse_id || 4;
+      const adminApi = (await import('axios')).default.create({
+        baseURL: process.env.DOLIBARR_URL,
+        headers: { DOLAPIKEY: process.env.DOLIBARR_ADMIN_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 30000,
+      });
+
+      const moved = [], failed = [];
+      for (const l of lines) {
+        const recv = Math.min(recvById[l.id] || 0, l.ordered_qty - l.received_qty);
+        if (recv <= 0) continue;
+        try {
+          await adminApi.post('/stockmovements', {
+            product_id: l.product_id, warehouse_id: wh, qty: Math.abs(recv),
+            movementcode: po.reference, movementlabel: `Réception ${po.reference}`,
+          });
+          const newRecv = l.received_qty + recv;
+          db.prepare('UPDATE purchase_order_lines SET received_qty = ?, status = ? WHERE id = ?')
+            .run(newRecv, newRecv >= l.ordered_qty ? 'received' : 'partial', l.id);
+          moved.push({ product_id: l.product_id, qty: recv });
+        } catch (e) {
+          failed.push({ product_id: l.product_id, label: l.product_label, error: e.response?.data?.error?.message || e.message });
+        }
+      }
+
+      if (moved.length === 0 && failed.length === 0) {
+        return res.status(400).json({ error: 'Aucune quantité à réceptionner' });
+      }
+
+      const fresh = poLinesOf(po.id);
+      const allRecv = fresh.every(l => l.received_qty >= l.ordered_qty);
+      const someRecv = fresh.some(l => l.received_qty > 0);
+      const newStatus = allRecv ? 'received' : someRecv ? 'partial' : 'ordered';
+      db.prepare('UPDATE purchase_orders_local SET status = ?, received_at = ? WHERE id = ?')
+        .run(newStatus, allRecv ? new Date().toISOString() : po.received_at, po.id);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'po_receive', `Réception ${po.reference} : ${moved.reduce((s, m) => s + m.qty, 0)} ex. (dépôt ${wh})`);
+
+      res.json({ success: true, status: newStatus, moved: moved.length, failed });
+    } catch (err) {
+      console.error('[STOCK] receive error:', err.message);
+      res.status(500).json({ error: 'Erreur réception' });
+    }
+  });
+
+  // Annuler une commande d'appro (non encore reçue) — suivi local uniquement.
+  router.post('/purchase-orders/:id/cancel', auth, blockLibrarianWrite, csrfProtection, (req, res) => {
+    const po = db.prepare('SELECT * FROM purchase_orders_local WHERE id = ?').get(req.params.id);
+    if (!po) return res.status(404).json({ error: 'Commande introuvable' });
+    if (po.status === 'received') return res.status(409).json({ error: 'Commande déjà reçue' });
+    db.prepare("UPDATE purchase_orders_local SET status = 'cancelled' WHERE id = ?").run(po.id);
+    db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+      .run(req.admin.username, 'po_cancel', `Commande d'appro annulée : ${po.reference}`);
+    res.json({ success: true });
   });
 
   return router;

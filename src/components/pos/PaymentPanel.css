@@ -260,3 +260,14 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* Facturer à crédit (impayé) */
+.pos-payment-credit {
+  width: 100%; margin-top: 10px; padding: 14px; border-radius: 12px;
+  border: 2px solid #f59e0b; background: #fffbeb; color: #92400e;
+  font-size: 1rem; font-weight: 700; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.pos-payment-credit:hover:not(:disabled) { background: #fef3c7; }
+.pos-payment-credit:disabled { opacity: 0.5; cursor: not-allowed; }
+.pos-payment-credit-hint { text-align: center; font-size: 0.78rem; color: #94a3b8; margin: 6px 0 0; }

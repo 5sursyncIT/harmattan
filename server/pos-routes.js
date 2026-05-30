@@ -11,7 +11,11 @@ const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
 if (!ADMIN_API_KEY) console.warn('[SECURITY] DOLIBARR_ADMIN_API_KEY non définie — le POS ne pourra pas facturer');
 const adminApi = (await import('axios')).default.create({
   baseURL: process.env.DOLIBARR_URL || 'http://localhost/dolibarr/htdocs/api/index.php',
-  headers: { 'DOLAPIKEY': ADMIN_API_KEY, 'Content-Type': 'application/json' },
+  // Accept-Encoding: identity → Dolibarr/Apache renvoie des réponses NON compressées.
+  // Sans ça, les grosses réponses (ex. détail d'une facture à 29 lignes) étaient
+  // gzippées par Apache et axios échouait à les décompresser → « incorrect header
+  // check » (zlib) → rollback de la vente. Réseau localhost : coût négligeable.
+  headers: { 'DOLAPIKEY': ADMIN_API_KEY, 'Content-Type': 'application/json', 'Accept-Encoding': 'identity' },
   timeout: 30000,
 });
 
@@ -49,6 +53,10 @@ function getTerminal(req) {
 }
 
 // Payment method → Dolibarr payment ID + bank account ID
+// bankAccount = id du compte bancaire Dolibarr (config instance, non résoluble par code).
+// paymentId = repli ; en pratique l'id réel est RÉSOLU dynamiquement par le code
+// Dolibarr (llx_c_paiement.code) via resolvePaymentId — les ids codés en dur dérivent
+// d'une instance à l'autre (ex. le chèque n'était pas l'id 7 ici → échec).
 const PAYMENT_MAP = {
   LIQ:  { paymentId: 4,  bankAccount: 3,  label: 'Espèces' },
   CB:   { paymentId: 6,  bankAccount: 1,  label: 'Carte bancaire' },
@@ -56,6 +64,24 @@ const PAYMENT_MAP = {
   WAVE: { paymentId: 54, bankAccount: 6,  label: 'Wave' },
   OM:   { paymentId: 55, bankAccount: 4,  label: 'Orange Money' },
 };
+
+// Résout l'id Dolibarr du moyen de paiement à partir de son CODE (llx_c_paiement),
+// avec cache mémoire et repli sur l'id codé en dur. Évite les échecs dus à des ids
+// qui diffèrent entre instances Dolibarr (le code, lui, est stable : LIQ/CB/CHQ/WAVE/OM).
+const _paymentIdCache = new Map();
+async function resolvePaymentId(pool, code, fallback) {
+  if (_paymentIdCache.has(code)) return _paymentIdCache.get(code);
+  try {
+    const [rows] = await pool.query(
+      'SELECT id FROM llx_c_paiement WHERE code = ? AND active = 1 ORDER BY id LIMIT 1', [code]
+    );
+    const id = rows[0]?.id ? Number(rows[0].id) : null;
+    if (id) { _paymentIdCache.set(code, id); return id; }
+  } catch (e) {
+    console.warn(`[POS] resolvePaymentId(${code}) échec, repli sur ${fallback}:`, e.message);
+  }
+  return fallback;
+}
 
 function normalizePaymentCode(code) {
   const raw = String(code || '').trim();
@@ -536,7 +562,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         if (bootstrapUsed && bootstrapUsed.value === '1') {
           return res.status(403).json({ error: "Code bootstrap déjà utilisé et définitivement désactivé. Demandez un code d'enrôlement à un manager." });
         }
-        deviceName = req.body.device_name || 'Terminal principal';
+        deviceName = String(req.body.device_name || '').trim().slice(0, 60) || 'Terminal principal';
         usedBootstrap = true;
       }
 
@@ -549,7 +575,12 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
         if (!enrollment) return res.status(400).json({ error: 'Code invalide ou expiré' });
 
-        deviceName = enrollment.device_name;
+        // Le nom saisi sur l'appareil au moment de l'enrôlement PRIME (personnalisation
+        // par l'opérateur) ; à défaut on retombe sur le nom porté par le code, puis
+        // sur un libellé générique. Sans ça, le nom tapé sur l'appareil était ignoré
+        // et tous les appareils héritaient du défaut « Nouveau POS » du code.
+        const providedName = String(req.body.device_name || '').trim().slice(0, 60);
+        deviceName = providedName || enrollment.device_name || 'Nouveau POS';
         presetTerminal = enrollment.terminal || null;
         db.prepare('UPDATE pos_enrollment_codes SET used = 1 WHERE code = ?').run(upperCode);
       }
@@ -831,11 +862,16 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     // État de la vente — suivi pour permettre un rollback ciblé en cas d'échec.
     const sale = { invoiceId: null, invoiceRef: null, validated: false, paymentsRecorded: 0, lines: null, socid: null, terminal: null };
     try {
-      const { items, customer_id, payments, note, client_sale_id } = req.body;
+      const { items, customer_id, payments, note, client_sale_id, unpaid } = req.body;
       const terminal = getTerminal(req);
 
       if (!items?.length) return res.status(400).json({ error: 'Aucun article' });
-      if (!payments?.length) return res.status(400).json({ error: 'Aucun paiement' });
+      // Facture à crédit (impayée) : aucun paiement requis, MAIS un client identifié
+      // est obligatoire pour attribuer la créance (pas le client comptoir par défaut).
+      if (!unpaid && !payments?.length) return res.status(400).json({ error: 'Aucun paiement' });
+      if (unpaid && (!customer_id || parseInt(customer_id) === POS_CONFIG.defaultCustomer)) {
+        return res.status(400).json({ error: 'Sélectionnez un client identifié pour émettre une facture à crédit (impayée).' });
+      }
       if (client_sale_id && (typeof client_sale_id !== 'string' || client_sale_id.length > 64)) {
         return res.status(400).json({ error: 'client_sale_id invalide' });
       }
@@ -918,7 +954,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       // 0b. Normalize + validate payment methods before any Dolibarr write.
       // An unknown code used to be counted in paidSum but skipped during payment
       // creation, leaving a validated invoice with no linked payment.
-      const normalizedPayments = payments.map((p) => ({
+      const normalizedPayments = (payments || []).map((p) => ({
         ...p,
         code: normalizePaymentCode(p.code),
       }));
@@ -947,7 +983,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         return sum + Math.round(price * item.qty * (1 - disc / 100));
       }, 0);
       const paidSum = normalizedPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
-      if (paidSum + 1 < expectedTotal) {
+      // Contrôle de couverture ignoré pour une facture à crédit (paidSum = 0 attendu).
+      if (!unpaid && paidSum + 1 < expectedTotal) {
         return res.status(400).json({
           error: `Paiement insuffisant : ${Math.round(paidSum)} FCFA reçus pour ${expectedTotal} FCFA dûs`,
         });
@@ -1011,14 +1048,25 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         //    produit référencé dans le ticket.
         if (productIds.length > 0) {
           const placeholders = productIds.map(() => '?').join(',');
+          // On contrôle DEUX stocks :
+          //  - le stock RÉEL de l'entrepôt Rayon (ce qu'on peut physiquement vendre)
+          //  - le cache GLOBAL llx_product.stock, car c'est CE champ que Dolibarr
+          //    vérifie à la création de facture (STOCK_MUST_BE_ENOUGH_FOR_INVOICE=1).
+          //    Sans ce 2e contrôle, un cache désynchronisé (stock réel OK mais cache 0)
+          //    laissait passer la vente puis Dolibarr la rejetait avec un 500 opaque.
           const [stockRows] = await dolibarrPool.query(
-            `SELECT ps.fk_product, ps.reel, p.label, p.price_ttc
-             FROM llx_product_stock ps
-             JOIN llx_product p ON p.rowid = ps.fk_product
-             WHERE ps.fk_product IN (${placeholders}) AND ps.fk_entrepot = ${POS_CONFIG.warehouse}`,
+            `SELECT p.rowid AS fk_product, p.label, p.stock AS global_stock,
+                    COALESCE(ps.reel, 0) AS wh_stock
+             FROM llx_product p
+             LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = ${POS_CONFIG.warehouse}
+             WHERE p.rowid IN (${placeholders})`,
             productIds
           );
-          const stockMap = Object.fromEntries(stockRows.map(r => [r.fk_product, { stock: r.reel, label: r.label }]));
+          const stockMap = Object.fromEntries(stockRows.map(r => [r.fk_product, {
+            // disponible = le plus contraignant des deux (rayon réel vs cache global)
+            stock: Math.min(Number(r.wh_stock), Number(r.global_stock)),
+            label: r.label,
+          }]));
           const outOfStock = productItems.filter(i => {
             const s = stockMap[parseInt(i.product_id)];
             return !s || s.stock < i.qty;
@@ -1026,7 +1074,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           if (outOfStock.length > 0) {
             const names = outOfStock.map(i => {
               const s = stockMap[parseInt(i.product_id)];
-              return `${i.label} (demandé: ${i.qty}, dispo: ${s?.stock || 0})`;
+              return `${i.label} (demandé: ${i.qty}, dispo: ${Math.max(0, s?.stock ?? 0)})`;
             });
             stockError = `Stock insuffisant: ${names.join(', ')}`;
             return;
@@ -1092,49 +1140,78 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const totalTtc = parseFloat(invoiceDetail.data.total_ttc);
       sale.invoiceRef = invoiceRef;
 
-      // 4. Record each payment, capped at the invoice total.
-      //    Cash tendered above the total is change — it must not be recorded
-      //    as a Dolibarr payment (that would overpay the invoice).
-      let toRecord = totalTtc;
-      const cappedPayments = [];
-      for (const p of normalizedPayments) {
-        const mapping = PAYMENT_MAP[p.code];
-        const amount = Math.min(parseFloat(p.amount) || 0, toRecord);
-        if (amount <= 0) continue;
-        toRecord -= amount;
-        cappedPayments.push({ code: p.code, mapping, amount });
-      }
-
-      // 4b. Record payments. A failure here propagates to the outer catch,
-      //     which rolls the sale back cleanly via rollbackSale().
+      // 4-5. Encaissement — INTÉGRALEMENT SAUTÉ pour une facture à crédit (impayée) :
+      //      la facture reste validée avec paye=0 (créance), réglable plus tard.
       const paymentResults = [];
-      for (let i = 0; i < cappedPayments.length; i++) {
-        const { code, mapping, amount } = cappedPayments[i];
-        const isLast = i === cappedPayments.length - 1;
-        const payRes = await adminApi.post(`/invoices/${invoiceId}/payments`, {
-          datepaye: Math.floor(Date.now() / 1000),
-          paymentid: mapping.paymentId,
-          closepaidinvoices: isLast ? 'yes' : 'no',
-          accountid: mapping.bankAccount,
-          num_payment: invoiceRef,
-          comment: `POS T${terminal} - ${mapping.label}`,
-          amount,
-        });
-        paymentResults.push({ code, amount, payment_id: payRes.data });
-        sale.paymentsRecorded++;
-      }
+      if (!unpaid) {
+        // 4. Record each payment, capped at the invoice total.
+        //    Cash tendered above the total is change — it must not be recorded
+        //    as a Dolibarr payment (that would overpay the invoice).
+        let toRecord = totalTtc;
+        const cappedPayments = [];
+        for (const p of normalizedPayments) {
+          const mapping = PAYMENT_MAP[p.code];
+          const amount = Math.min(parseFloat(p.amount) || 0, toRecord);
+          if (amount <= 0) continue;
+          toRecord -= amount;
+          cappedPayments.push({ code: p.code, mapping, amount, cheque_issuer: p.cheque_issuer });
+        }
 
-      // 5. Mark invoice as paid — only if the recorded payments fully cover it.
-      //    Never force-close an under-paid invoice (that would hide a shortfall).
-      const recordedSum = paymentResults.reduce((s, p) => s + p.amount, 0);
-      if (recordedSum + 1 >= totalTtc) {
-        try {
-          await adminApi.post(`/invoices/${invoiceId}/settopaid`);
-        } catch (paidErr) {
-          console.error(`[POS] Paiement enregistré mais facture ${invoiceRef} non marquée payée:`, paidErr.response?.data || paidErr.message);
+        // 4a-bis. Émetteur du chèque : Dolibarr exige chqemetteur dès que le
+        //         code de paiement est CHQ (sinon 400 « Emetteur is mandatory »).
+        //         On le déduit du nom du client de la facture (le tireur du
+        //         chèque), avec repli sur l'override éventuel envoyé par le POS.
+        let chequeIssuerDefault = '';
+        if (cappedPayments.some((p) => p.code === 'CHQ')) {
+          try {
+            const [sRows] = await dolibarrPool.query(
+              'SELECT nom FROM llx_societe WHERE rowid = ?', [parseInt(socid)],
+            );
+            chequeIssuerDefault = String(sRows[0]?.nom || '').trim();
+          } catch { /* repli ci-dessous */ }
+          if (!chequeIssuerDefault) chequeIssuerDefault = `Client POS T${terminal}`;
+        }
+
+        // 4b. Record payments. A failure here propagates to the outer catch,
+        //     which rolls the sale back cleanly via rollbackSale().
+        for (let i = 0; i < cappedPayments.length; i++) {
+          const { code, mapping, amount, cheque_issuer } = cappedPayments[i];
+          const isLast = i === cappedPayments.length - 1;
+          const paymentId = await resolvePaymentId(dolibarrPool, code, mapping.paymentId);
+          const payRes = await adminApi.post(`/invoices/${invoiceId}/payments`, {
+            datepaye: Math.floor(Date.now() / 1000),
+            paymentid: paymentId,
+            closepaidinvoices: isLast ? 'yes' : 'no',
+            accountid: mapping.bankAccount,
+            num_payment: invoiceRef,
+            comment: `POS T${terminal} - ${mapping.label}`,
+            amount,
+            ...(code === 'CHQ'
+              ? { chqemetteur: String(cheque_issuer || '').trim() || chequeIssuerDefault }
+              : {}),
+          });
+          paymentResults.push({ code, amount, payment_id: payRes.data });
+          sale.paymentsRecorded++;
+        }
+
+        // 5. Mark invoice as paid — only if the recorded payments fully cover it.
+        //    Never force-close an under-paid invoice (that would hide a shortfall).
+        const recordedSum = paymentResults.reduce((s, p) => s + p.amount, 0);
+        if (recordedSum + 1 >= totalTtc) {
+          try {
+            await adminApi.post(`/invoices/${invoiceId}/settopaid`);
+          } catch (paidErr) {
+            console.error(`[POS] Paiement enregistré mais facture ${invoiceRef} non marquée payée:`, paidErr.response?.data || paidErr.message);
+          }
+        } else {
+          throw new Error(`Paiement POS non enregistré intégralement (${recordedSum}/${totalTtc})`);
         }
       } else {
-        throw new Error(`Paiement POS non enregistré intégralement (${recordedSum}/${totalTtc})`);
+        // Trace de la vente à crédit (audit).
+        try {
+          db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+            .run(req.posStaff.name || 'pos', 'pos_credit_sale', `T${terminal} | Facture à crédit ${invoiceRef} (${Math.round(totalTtc)} F) — client #${socid}`);
+        } catch { /* ignore */ }
       }
 
       const responsePayload = {
@@ -1142,6 +1219,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         invoice_ref: invoiceRef,
         total_ttc: totalTtc,
         payments: paymentResults,
+        unpaid: !!unpaid,
         staff: req.posStaff.name,
         terminal,
       };
@@ -1164,6 +1242,125 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         ? 'Échec de la vente après encaissement partiel. Un avoir a été créé — vérifiez le remboursement du client.'
         : 'Échec de la vente — aucun montant débité, vous pouvez réessayer.';
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // IMPAYÉS — liste des factures à régler + règlement ultérieur
+  // ═══════════════════════════════════════════════════════
+
+  // Liste des factures validées non soldées (créances) — recherche par réf/client.
+  router.get('/invoices/unpaid', requirePosAuth, async (req, res) => {
+    try {
+      const q = String(req.query.q || '').trim();
+      const where = ["f.fk_statut = 1", "f.paye = 0", "f.type = 0"];
+      const params = [];
+      if (q) {
+        where.push('(f.ref LIKE ? OR s.nom LIKE ?)');
+        params.push(`%${q}%`, `%${q}%`);
+      }
+      const [rows] = await dolibarrPool.query(
+        `SELECT f.rowid AS id, f.ref, DATE_FORMAT(f.datef, '%Y-%m-%d') AS date,
+                f.total_ttc, s.nom AS customer_name, s.rowid AS customer_id,
+                COALESCE(pf.paid, 0) AS paid
+         FROM llx_facture f
+         LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
+         LEFT JOIN (SELECT fk_facture, SUM(amount) AS paid FROM llx_paiement_facture GROUP BY fk_facture) pf
+           ON pf.fk_facture = f.rowid
+         WHERE ${where.join(' AND ')}
+           AND (f.total_ttc - COALESCE(pf.paid, 0)) > 0.5
+         ORDER BY f.datef DESC, f.rowid DESC LIMIT 50`, params
+      );
+      res.json({
+        invoices: rows.map(r => ({
+          id: r.id, ref: r.ref, date: r.date,
+          customer_id: r.customer_id, customer_name: r.customer_name || 'Comptoir',
+          total_ttc: Number(r.total_ttc), paid: Number(r.paid),
+          remaining: Number(r.total_ttc) - Number(r.paid),
+        })),
+      });
+    } catch (err) {
+      console.error('[POS] unpaid list error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement des impayés' });
+    }
+  });
+
+  // Règlement (total ou partiel) d'une facture impayée existante.
+  router.post('/invoices/:id/settle', requirePosAuth, saleLimiter, csrfProtection, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { payments } = req.body;
+      if (!id) return res.status(400).json({ error: 'Facture invalide' });
+      if (!payments?.length) return res.status(400).json({ error: 'Aucun paiement' });
+
+      const norm = payments.map(p => ({ ...p, code: normalizePaymentCode(p.code) }));
+      const unknown = norm.filter(p => !PAYMENT_MAP[p.code]);
+      if (unknown.length) return res.status(400).json({ error: `Moyen de paiement inconnu : ${unknown.map(p => p.code || '?').join(', ')}` });
+
+      const [[inv]] = await dolibarrPool.query(
+        `SELECT f.rowid, f.ref, f.fk_statut, f.paye, f.total_ttc, COALESCE(pf.paid, 0) AS paid,
+                s.nom AS customer_name
+         FROM llx_facture f
+         LEFT JOIN (SELECT fk_facture, SUM(amount) AS paid FROM llx_paiement_facture GROUP BY fk_facture) pf
+           ON pf.fk_facture = f.rowid
+         LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
+         WHERE f.rowid = ?`, [id]
+      );
+      if (!inv) return res.status(404).json({ error: 'Facture introuvable' });
+      if (parseInt(inv.fk_statut) !== 1) return res.status(409).json({ error: 'La facture doit être validée' });
+      if (parseInt(inv.paye) === 1) return res.status(409).json({ error: 'Facture déjà soldée' });
+      const remaining = Number(inv.total_ttc) - Number(inv.paid);
+      if (remaining <= 0.5) return res.status(409).json({ error: 'Rien à régler sur cette facture' });
+
+      // Plafonne les paiements au reste dû.
+      let toRecord = remaining;
+      const capped = [];
+      for (const p of norm) {
+        const amt = Math.min(parseFloat(p.amount) || 0, toRecord);
+        if (amt <= 0) continue;
+        toRecord -= amt;
+        capped.push({ mapping: PAYMENT_MAP[p.code], code: p.code, amount: amt, cheque_issuer: p.cheque_issuer });
+      }
+      if (capped.length === 0) return res.status(400).json({ error: 'Montant invalide' });
+
+      // Émetteur du chèque exigé par Dolibarr dès que le code = CHQ (cf. vente).
+      const chequeIssuerDefault = String(inv.customer_name || '').trim() || `Client POS T${getTerminal(req)}`;
+
+      const results = [];
+      for (let i = 0; i < capped.length; i++) {
+        const { mapping, code, amount, cheque_issuer } = capped[i];
+        const isLast = i === capped.length - 1;
+        const paymentId = await resolvePaymentId(dolibarrPool, code, mapping.paymentId);
+        const r = await adminApi.post(`/invoices/${id}/payments`, {
+          datepaye: Math.floor(Date.now() / 1000),
+          paymentid: paymentId,
+          closepaidinvoices: isLast ? 'yes' : 'no',
+          accountid: mapping.bankAccount,
+          num_payment: inv.ref,
+          comment: `POS règlement T${getTerminal(req)} - ${mapping.label}`,
+          amount,
+          ...(code === 'CHQ'
+            ? { chqemetteur: String(cheque_issuer || '').trim() || chequeIssuerDefault }
+            : {}),
+        });
+        results.push({ code, amount, payment_id: r.data });
+      }
+      const recorded = results.reduce((s, p) => s + p.amount, 0);
+      const fullyPaid = recorded + 1 >= remaining;
+      if (fullyPaid) {
+        try { await adminApi.post(`/invoices/${id}/settopaid`); }
+        catch (e) { console.error(`[POS] règlement ${inv.ref} : settopaid échoué`, e.response?.data || e.message); }
+      }
+
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.posStaff.name || 'pos', 'pos_settle', `Règlement ${inv.ref} : ${Math.round(recorded)} F${fullyPaid ? ' (soldée)' : ' (partiel)'}`);
+      } catch { /* ignore */ }
+
+      res.json({ success: true, invoice_ref: inv.ref, paid: recorded, remaining: Math.max(0, remaining - recorded), fully_paid: fullyPaid, payments: results });
+    } catch (err) {
+      console.error('[POS] settle error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur lors du règlement' });
     }
   });
 

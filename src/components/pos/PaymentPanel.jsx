@@ -3,7 +3,7 @@ import { posCreateSale, posGetConfig } from '../../api/pos';
 import usePosCartStore from '../../store/posCartStore';
 import usePosAuthStore from '../../store/posAuthStore';
 import { enqueueSale } from '../../utils/offlineQueue';
-import { FiX, FiCheck, FiDelete, FiWifiOff } from 'react-icons/fi';
+import { FiX, FiCheck, FiClock } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import './PaymentPanel.css';
 
@@ -83,6 +83,42 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
   const handleQuickPay = (code) => {
     // Quick pay: full remaining amount with selected method
     setPayments([...payments, { code, amount: remaining, label: methods.find((m) => m.code === code)?.label }]);
+  };
+
+  // Mapping commun ticket → lignes serveur (réutilisé encaissement / crédit / offline).
+  const buildItems = () => items.map((i) => i.is_free ? ({
+    is_free: true, label: i.label, subprice: i.price_ttc, qty: i.qty, discount: i.discount || 0,
+  }) : ({
+    product_id: i.product_id, qty: i.qty, price_ttc: i.price_ttc, label: i.label, discount: i.discount || 0,
+    price_override_reason: i.price_override_reason || undefined,
+    price_original: i.price_original || undefined,
+  }));
+
+  // Émet une facture IMPAYÉE (à crédit) — aucun encaissement, réglable plus tard.
+  // Exige un client identifié (la créance doit être attribuable).
+  const handleCredit = async () => {
+    if (submittingRef.current) return;
+    if (!customer?.id) { setError('Sélectionnez un client pour une facture à crédit.'); return; }
+    if (!window.confirm(`Émettre une facture IMPAYÉE de ${total.toLocaleString('fr-FR')} F au nom de ${customer.name} ?\nLe client réglera plus tard.`)) return;
+    submittingRef.current = true;
+    setProcessing(true);
+    setError('');
+    const saleId = ensureSaleId();
+    try {
+      const result = await posCreateSale({
+        client_sale_id: saleId,
+        items: buildItems(),
+        customer_id: customer.id,
+        payments: [],
+        unpaid: true,
+      });
+      onComplete(result.data);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Erreur lors de la facturation à crédit');
+    } finally {
+      submittingRef.current = false;
+      setProcessing(false);
+    }
   };
 
   const handleValidate = async () => {
@@ -259,6 +295,19 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
             <><FiCheck /> VALIDER LA VENTE</>
           )}
         </button>
+
+        {/* Facturer à crédit (impayé) — réglable plus tard */}
+        <button
+          className="pos-payment-credit"
+          onClick={handleCredit}
+          disabled={processing || !customer?.id}
+          title={!customer?.id ? 'Sélectionnez un client pour facturer à crédit' : ''}
+        >
+          <FiClock /> Facturer à crédit (impayé)
+        </button>
+        {!customer?.id && (
+          <p className="pos-payment-credit-hint">Un client doit être sélectionné pour une facture à crédit.</p>
+        )}
       </div>
     </div>
   );

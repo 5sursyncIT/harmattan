@@ -627,7 +627,10 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         note_private: `AVOIR régularisation libraire — facture ${before.ref} — ${reason}`,
       });
       const creditId = creditRes.data;
-      await adminApi.post(`/invoices/${creditId}/validate`);
+      // idwarehouse:4 (Rayon) → avec STOCK_CALCULATE_ON_BILL=1, valider un avoir
+      // (type 2) RÉ-INCRÉMENTE le stock. Sans idwarehouse, Dolibarr ne bouge pas le
+      // stock et la vente initiale (qui l'avait décrémenté) n'était jamais restituée.
+      await adminApi.post(`/invoices/${creditId}/validate`, { idwarehouse: 4 });
 
       const creditDetail = await adminApi.get(`/invoices/${creditId}`);
       writeAudit(db, {

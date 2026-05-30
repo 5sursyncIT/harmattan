@@ -426,5 +426,27 @@
   .ct-card-badges { gap: 4px; }
   .ct-badge { font-size: 0.65rem; padding: 2px 6px; }
   .ct-pagination { gap: 2px; }
-  .ct-page-btn { width: 32px; height: 32px; font-size: 0.8rem; }
+  .ct-page-btn { width: 36px; height: 36px; font-size: 0.8rem; }
+}
+
+/* ── Cibles tactiles (≥ 44px) sur appareils tactiles ──────
+   Appliqué uniquement aux pointeurs grossiers (doigt) pour respecter la
+   checklist UI/UX mobile sans densifier l'UI desktop. Placé en fin de fichier
+   pour primer sur les règles compactes ci-dessus. */
+@media (pointer: coarse) {
+  .ct-btn-ghost,
+  .ct-doc-btn,
+  .ct-sort-btn,
+  .ct-page-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .ct-btn-ghost,
+  .ct-doc-btn,
+  .ct-sort-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .ct-btn-link { min-height: 44px; display: inline-flex; align-items: center; }
 }

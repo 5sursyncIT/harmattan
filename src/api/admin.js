@@ -129,6 +129,7 @@ export const exportSubscribers = () => '/api/admin/newsletter/export';
 export const confirmOrderPayment = (orderId) => api.post(`/admin/orders/${orderId}/confirm-payment`);
 export const getAdminPayments = (params = {}) => api.get('/admin/payments', { params });
 export const getPaymentOrphans = () => api.get('/admin/payments/orphans');
+export const getAdminOrderDetail = (orderId) => api.get(`/admin/payments/order/${orderId}`);
 export const rejectPayment = (id, reason = '') => api.post(`/admin/payments/${id}/reject`, { reason });
 
 // Stock & Réapprovisionnement
@@ -147,6 +148,12 @@ export const runStockBatch = () => api.post('/admin/stock/batch/daily');
 export const runStockClassify = () => api.post('/admin/stock/batch/classify');
 export const requestReprint = (product_id, qty) => api.post('/admin/stock/reprint', { product_id, qty });
 export const requestSupplierOrder = (product_id, qty, supplier_id) => api.post('/admin/stock/order-supplier', { product_id, qty, supplier_id });
+export const stockEntry = (product_id, qty, reason, warehouse_id) => api.post('/admin/stock/entry', { product_id, qty, reason, warehouse_id });
+// Commandes d'approvisionnement (suivi local + réception)
+export const getPurchaseOrders = (params = {}) => api.get('/admin/stock/purchase-orders', { params });
+export const getPurchaseOrder = (id) => api.get(`/admin/stock/purchase-orders/${id}`);
+export const receivePurchaseOrder = (id, payload) => api.post(`/admin/stock/purchase-orders/${id}/receive`, payload);
+export const cancelPurchaseOrder = (id) => api.post(`/admin/stock/purchase-orders/${id}/cancel`);
 
 // Suppliers
 export const getSuppliers = () => api.get('/admin/suppliers');

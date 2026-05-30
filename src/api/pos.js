@@ -55,6 +55,10 @@ export const posChangePin = (currentPin, newPin) => api.put('/pos/auth/change-pi
 
 export const posLookupInvoice = (ref) => api.get(`/pos/invoices/lookup/${ref}`);
 
+// Impayés (factures à crédit) : liste + règlement ultérieur
+export const posGetUnpaidInvoices = (q) => api.get('/pos/invoices/unpaid', { params: { q } });
+export const posSettleInvoice = (id, payments) => api.post(`/pos/invoices/${id}/settle`, { payments });
+
 export const posCreateReturn = (data) => api.post('/pos/returns', { ...data, terminal: getTerminal() });
 
 // Device management

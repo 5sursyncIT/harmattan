@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
@@ -31,13 +31,32 @@ function numberToWordsFR(n) {
     if (num < 1000) return units[Math.floor(num / 100)] + ' cent' + (num % 100 === 0 ? 's' : ' ' + chunk(num % 100));
     if (num < 2000) return 'mille' + (num % 1000 === 0 ? '' : ' ' + chunk(num % 1000));
     if (num < 1000000) return chunk(Math.floor(num / 1000)) + ' mille' + (num % 1000 === 0 ? '' : ' ' + chunk(num % 1000));
-    return String(num);
+    // Millions / milliards : indispensable car les devis dépassent fréquemment 1 M FCFA
+    // (sans ça, le PDF affichait le total « en lettres » sous forme de chiffres bruts).
+    if (num < 1000000000) {
+      const m = Math.floor(num / 1000000);
+      const rest = num % 1000000;
+      const millionWord = m === 1 ? 'un million' : chunk(m) + ' millions';
+      return millionWord + (rest === 0 ? '' : ' ' + chunk(rest));
+    }
+    const b = Math.floor(num / 1000000000);
+    const rest = num % 1000000000;
+    const billionWord = b === 1 ? 'un milliard' : chunk(b) + ' milliards';
+    return billionWord + (rest === 0 ? '' : ' ' + chunk(rest));
   }
   return chunk(n);
 }
 
-export function createContractQuoteRouter({ db, csrfProtection }) {
+export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) {
   const router = Router();
+
+  // Vérifie qu'un contrat parent existe réellement dans Dolibarr avant d'y
+  // rattacher un devis. Évite la création de devis orphelins (contract_id fantôme).
+  async function contractExists(contractId) {
+    if (!dolibarrPool) return true; // pas de pool injecté → on ne bloque pas (dégradé)
+    const [rows] = await dolibarrPool.query('SELECT rowid FROM llx_contrat WHERE rowid = ? LIMIT 1', [contractId]);
+    return rows.length > 0;
+  }
 
   // Ensure table exists
   db.exec(`CREATE TABLE IF NOT EXISTS contract_quotes (
@@ -92,10 +111,14 @@ export function createContractQuoteRouter({ db, csrfProtection }) {
   }
 
   // POST /api/contracts/:contractId/quotes — create a quote
-  router.post('/contracts/:contractId/quotes', auth, csrfProtection, (req, res) => {
+  router.post('/contracts/:contractId/quotes', auth, csrfProtection, async (req, res) => {
     try {
       const contractId = parseInt(req.params.contractId);
       if (!contractId) return res.status(400).json({ error: 'Contrat invalide' });
+
+      if (!(await contractExists(contractId))) {
+        return res.status(404).json({ error: 'Contrat parent introuvable' });
+      }
 
       const {
         recipient_title, recipient_name, book_title, book_pages, book_format,
@@ -112,33 +135,40 @@ export function createContractQuoteRouter({ db, csrfProtection }) {
       if (sanitizedItems.length === 0) return res.status(400).json({ error: 'Items invalides' });
 
       const total = sanitizedItems.reduce((s, i) => s + i.price, 0);
-      const ref = generateRef();
 
-      const r = db.prepare(`INSERT INTO contract_quotes (
-        contract_id, ref, recipient_title, recipient_name, book_title, book_pages,
-        book_format, book_interior, book_paper, book_cover, book_price_eur, diffusion,
-        items_json, total, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        contractId, ref,
-        String(recipient_title || 'Monsieur').slice(0, 20),
-        recipient_name.trim().slice(0, 120),
-        book_title.trim().slice(0, 300),
-        Math.max(0, parseInt(book_pages) || 0),
-        String(book_format || '13.5 cm sur 21.5 cm').slice(0, 60),
-        String(book_interior || 'une couleur N & B').slice(0, 60),
-        String(book_paper || 'bouffant 80 grammes').slice(0, 60),
-        String(book_cover || 'cartonné, coucher brillant, quadrichromie avec pellicule').slice(0, 200),
-        parseFloat(book_price_eur) || 0,
-        String(diffusion || 'Paris, Dakar, dans les grandes capitales européennes et sur Internet').slice(0, 200),
-        JSON.stringify(sanitizedItems),
-        total,
-        req.admin.username,
-      );
+      // Génération de référence + insertion dans une seule transaction : sans ça,
+      // deux créations concurrentes le même mois calculent le même MAX(ref) et
+      // violent la contrainte UNIQUE(ref). La transaction sérialise le calcul.
+      const insertQuote = db.transaction(() => {
+        const ref = generateRef();
+        const r = db.prepare(`INSERT INTO contract_quotes (
+          contract_id, ref, recipient_title, recipient_name, book_title, book_pages,
+          book_format, book_interior, book_paper, book_cover, book_price_eur, diffusion,
+          items_json, total, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          contractId, ref,
+          String(recipient_title || 'Monsieur').slice(0, 20),
+          recipient_name.trim().slice(0, 120),
+          book_title.trim().slice(0, 300),
+          Math.max(0, parseInt(book_pages) || 0),
+          String(book_format || '13.5 cm sur 21.5 cm').slice(0, 60),
+          String(book_interior || 'une couleur N & B').slice(0, 60),
+          String(book_paper || 'bouffant 80 grammes').slice(0, 60),
+          String(book_cover || 'cartonné, coucher brillant, quadrichromie avec pellicule').slice(0, 200),
+          parseFloat(book_price_eur) || 0,
+          String(diffusion || 'Paris, Dakar, dans les grandes capitales européennes et sur Internet').slice(0, 200),
+          JSON.stringify(sanitizedItems),
+          total,
+          req.admin.username,
+        );
+        return { id: r.lastInsertRowid, ref };
+      });
+      const { id, ref } = insertQuote();
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'create_quote', `Devis ${ref} (contrat #${contractId}) — total ${total} FCFA`);
 
-      res.status(201).json({ id: r.lastInsertRowid, ref, total });
+      res.status(201).json({ id, ref, total });
     } catch (err) {
       console.error('Create quote error:', err.message);
       res.status(500).json({ error: 'Erreur création devis' });
@@ -188,8 +218,9 @@ export function createContractQuoteRouter({ db, csrfProtection }) {
       tmpDir = join('/tmp', `quote-${quote.id}-${Date.now()}`);
       mkdirSync(tmpDir, { recursive: true });
 
-      // Unzip template
-      execSync(`cd ${tmpDir} && unzip -oq "${templatePath}"`);
+      // Unzip template — execFileSync (pas de shell) : aucun risque d'injection
+      // même si un chemin venait à contenir des métacaractères shell.
+      execFileSync('unzip', ['-oq', templatePath], { cwd: tmpDir });
 
       let content = readFileSync(join(tmpDir, 'content.xml'), 'utf-8');
 
@@ -233,22 +264,24 @@ export function createContractQuoteRouter({ db, csrfProtection }) {
       // (le template embarque le logo PNG).
       const odtPath = join(tmpDir, 'output.odt');
       const hasPictures = existsSync(join(tmpDir, 'Pictures'));
-      execSync(
-        `cd ${tmpDir} && zip -q -X -0 "${odtPath}" mimetype && ` +
-        `zip -q -r -X "${odtPath}" META-INF content.xml styles.xml meta.xml${hasPictures ? ' Pictures' : ''}`,
-      );
+      // mimetype d'abord, non compressé (-0), puis le reste — sans shell.
+      execFileSync('zip', ['-q', '-X', '-0', odtPath, 'mimetype'], { cwd: tmpDir });
+      execFileSync('zip', [
+        '-q', '-r', '-X', odtPath,
+        'META-INF', 'content.xml', 'styles.xml', 'meta.xml',
+        ...(hasPictures ? ['Pictures'] : []),
+      ], { cwd: tmpDir });
 
       // Convert to PDF via LibreOffice headless.
       // --user-installation : nécessaire sous systemd ProtectHome=read-only, sinon soffice
       // tente d'écrire son profil dans $HOME/.config et plante "Unspecified Application Error".
       const sofficeProfile = join(tmpDir, 'soffice-profile');
       mkdirSync(sofficeProfile, { recursive: true });
-      execSync(
-        `soffice --headless --norestore --nologo --nofirststartwizard ` +
-        `-env:UserInstallation=file://${sofficeProfile} ` +
-        `--convert-to pdf --outdir "${tmpDir}" "${odtPath}"`,
-        { stdio: 'pipe', timeout: 60000 },
-      );
+      execFileSync('soffice', [
+        '--headless', '--norestore', '--nologo', '--nofirststartwizard',
+        `-env:UserInstallation=file://${sofficeProfile}`,
+        '--convert-to', 'pdf', '--outdir', tmpDir, odtPath,
+      ], { stdio: 'pipe', timeout: 60000 });
       const pdfPath = join(tmpDir, 'output.pdf');
       if (!existsSync(pdfPath)) throw new Error('Conversion PDF échouée');
 

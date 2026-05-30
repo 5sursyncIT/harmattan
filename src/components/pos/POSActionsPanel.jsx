@@ -1,4 +1,4 @@
-import { FiFilePlus, FiClock, FiPackage, FiPercent, FiScissors, FiCreditCard, FiDollarSign, FiBarChart2, FiLogIn } from 'react-icons/fi';
+import { FiFilePlus, FiClock, FiPackage, FiPercent, FiScissors, FiCreditCard, FiDollarSign, FiBarChart2, FiLogIn, FiInbox } from 'react-icons/fi';
 import usePosCartStore from '../../store/posCartStore';
 import './POSActionsPanel.css';
 
@@ -10,6 +10,7 @@ export default function POSActionsPanel({
   onSplit,
   onPay,
   onPayCash,
+  onUnpaid,
   onCashReport,
   onCloseRegister,
 }) {
@@ -25,6 +26,7 @@ export default function POSActionsPanel({
     { key: 'pay', label: 'Règlement', icon: <FiCreditCard />, onClick: onPay, disabled: !hasItems, primary: true },
     { key: 'cash', label: 'Paiement direct', icon: <FiDollarSign />, onClick: onPayCash, disabled: !hasItems, primary: true },
     { key: 'report', label: 'Rapport caisse', icon: <FiBarChart2 />, onClick: onCashReport },
+    { key: 'unpaid', label: 'Encaisser impayé', icon: <FiInbox />, onClick: onUnpaid },
     { key: 'close', label: 'Fermer caisse', icon: <FiLogIn />, onClick: onCloseRegister },
   ];
 

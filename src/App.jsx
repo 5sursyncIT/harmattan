@@ -97,9 +97,13 @@ const AccountingSuppliers = lazy(() => import('./pages/admin/panels/AccountingSu
 const AccountingVat = lazy(() => import('./pages/admin/panels/AccountingVat'));
 const InvoicesPanel = lazy(() => import('./pages/admin/panels/InvoicesPanel'));
 const InvoicesAuditPanel = lazy(() => import('./pages/admin/panels/InvoicesAuditPanel'));
+const DeliveriesPanel = lazy(() => import('./pages/admin/panels/DeliveriesPanel'));
+const OrdersPanel = lazy(() => import('./pages/admin/panels/OrdersPanel'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
+const StockRecommendationsPanel = lazy(() => import('./pages/admin/panels/StockRecommendationsPanel'));
+const StockPurchaseOrdersPanel = lazy(() => import('./pages/admin/panels/StockPurchaseOrdersPanel'));
 const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'));
 const CustomersPanel = lazy(() => import('./pages/admin/panels/CustomersPanel'));
 const CustomerDetailPage = lazy(() => import('./pages/admin/panels/CustomerDetailPage'));
@@ -183,9 +187,13 @@ export default function App() {
             <Route path="accounting/vat" element={<AccountingVat />} />
             <Route path="invoices" element={<InvoicesPanel />} />
             <Route path="invoices/audit-log" element={<InvoicesAuditPanel />} />
+            <Route path="deliveries" element={<DeliveriesPanel />} />
+            <Route path="orders" element={<OrdersPanel />} />
             <Route path="stock" element={<StockDashboardPanel />} />
             <Route path="stock/alerts" element={<StockAlertsPanel />} />
             <Route path="stock/products" element={<StockProductsPanel />} />
+            <Route path="stock/recommendations" element={<StockRecommendationsPanel />} />
+            <Route path="stock/purchase-orders" element={<StockPurchaseOrdersPanel />} />
             <Route path="suppliers" element={<SuppliersPanel />} />
             <Route path="contracts" element={<ContractsPanel />} />
             <Route path="contracts/list" element={<ContractsList />} />

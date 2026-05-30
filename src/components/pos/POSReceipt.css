@@ -287,3 +287,5 @@
     margin: 2mm;
   }
 }
+
+.pos-receipt-unpaid { font-weight: 800; color: #b45309; }

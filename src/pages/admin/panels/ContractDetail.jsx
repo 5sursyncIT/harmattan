@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   getContract, validateContract, closeContract, deleteContract,
@@ -68,15 +68,28 @@ function InfoRow({ icon, label, value, mono = false }) {
   );
 }
 
-function ConfirmModal({ title, message, confirmLabel = 'Confirmer', danger = false, onConfirm, onCancel }) {
+function ConfirmModal({ title, message, confirmLabel = 'Confirmer', danger = false, loading = false, onConfirm, onCancel }) {
+  const cancelRef = useRef(null);
+
+  // Accessibilité : fermeture au clavier (Échap) + focus initial sur « Annuler »
+  // (choix par défaut sûr pour une action potentiellement destructive).
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !loading) onCancel?.(); };
+    document.addEventListener('keydown', onKey);
+    cancelRef.current?.focus();
+    return () => document.removeEventListener('keydown', onKey);
+  }, [loading, onCancel]);
+
   return (
-    <div className="ct-modal-overlay" onClick={onCancel}>
-      <div className="ct-modal" onClick={e => e.stopPropagation()}>
-        <h3>{title}</h3>
+    <div className="ct-modal-overlay" onClick={() => !loading && onCancel?.()}>
+      <div className="ct-modal" role="dialog" aria-modal="true" aria-labelledby="ct-modal-title" onClick={e => e.stopPropagation()}>
+        <h3 id="ct-modal-title">{title}</h3>
         <p>{message}</p>
         <div className="ct-modal-actions">
-          <button className="ct-btn ct-btn-outline" onClick={onCancel}>Annuler</button>
-          <button className={`ct-btn ${danger ? 'ct-btn-danger' : 'ct-btn-primary'}`} onClick={onConfirm}>{confirmLabel}</button>
+          <button ref={cancelRef} className="ct-btn ct-btn-outline" onClick={onCancel} disabled={loading}>Annuler</button>
+          <button className={`ct-btn ${danger ? 'ct-btn-danger' : 'ct-btn-primary'}`} onClick={onConfirm} disabled={loading}>
+            {loading ? 'Traitement…' : confirmLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -95,12 +108,15 @@ export default function ContractDetail() {
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [confirmAction, setConfirmAction] = useState(null);
+  const [actionLoading, setActionLoading] = useState(false);
   const [showQuoteModal, setShowQuoteModal] = useState(false);
   const [quotes, setQuotes] = useState([]);
+  const [quotesError, setQuotesError] = useState(false);
 
   const loadQuotes = () => {
     if (!id) return;
-    listContractQuotes(id).then(r => setQuotes(r.data || [])).catch(() => {});
+    setQuotesError(false);
+    listContractQuotes(id).then(r => setQuotes(r.data || [])).catch(() => setQuotesError(true));
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadQuotes(); }, [id]);
@@ -116,33 +132,35 @@ export default function ContractDetail() {
     }
   };
 
+  // Construit le formulaire d'édition à partir des données du contrat (source unique,
+  // évite la duplication entre le chargement initial et les rechargements après action).
+  const buildEditForm = (data) => {
+    const ef = data?.extrafields || {};
+    return {
+      contract_type: ef.contractType || 'harmattan_2024',
+      book_title: ef.bookTitle || '',
+      book_isbn: ef.bookIsbn || '',
+      royalty_rate_print: ef.royaltyPrint ?? 10,
+      royalty_rate_digital: ef.royaltyDigital ?? 10,
+      royalty_threshold: ef.royaltyThreshold ?? 500,
+      free_author_copies: ef.freeCopies ?? 5,
+      note_private: data?.notePrivate || '',
+    };
+  };
+
   const load = () => {
     setLoading(true);
-    getContract(id)
-      .then(r => {
-        setContract(r.data);
-        if (r.data) {
-          const ef = r.data.extrafields || {};
-          setEditForm({
-            contract_type: ef.contractType || 'harmattan_2024',
-            book_title: ef.bookTitle || '',
-            book_isbn: ef.bookIsbn || '',
-            royalty_rate_print: ef.royaltyPrint ?? 10,
-            royalty_rate_digital: ef.royaltyDigital ?? 10,
-            royalty_threshold: ef.royaltyThreshold ?? 500,
-            free_author_copies: ef.freeCopies ?? 5,
-            note_private: r.data.notePrivate || '',
-          });
-        }
-      })
+    return getContract(id)
+      .then(r => { setContract(r.data); if (r.data) setEditForm(buildEditForm(r.data)); })
       .catch(() => toast.error('Contrat introuvable'))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     getContract(id)
-      .then(r => { if (!cancelled) { setContract(r.data); const ef = r.data?.extrafields || {}; setEditForm({ contract_type: ef.contractType || 'harmattan_2024', book_title: ef.bookTitle || '', book_isbn: ef.bookIsbn || '', royalty_rate_print: ef.royaltyPrint ?? 10, royalty_rate_digital: ef.royaltyDigital ?? 10, royalty_threshold: ef.royaltyThreshold ?? 500, free_author_copies: ef.freeCopies ?? 5, note_private: r.data?.notePrivate || '' }); } })
+      .then(r => { if (!cancelled) { setContract(r.data); setEditForm(buildEditForm(r.data)); } })
       .catch(() => { if (!cancelled) toast.error('Contrat introuvable'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -176,18 +194,23 @@ export default function ContractDetail() {
   };
 
   const handleValidate = async () => {
-    setConfirmAction(null);
+    if (actionLoading) return;
+    setActionLoading(true);
     try {
       const res = await validateContract(id);
       toast.success(`Contrat validé : ${res.data.ref}`);
-      load();
-    } catch { toast.error('Erreur validation'); }
+      setConfirmAction(null);
+      await load();
+    } catch (err) { toast.error(err.response?.data?.error || 'Erreur validation'); }
+    finally { setActionLoading(false); }
   };
 
   const handleClose = async () => {
-    setConfirmAction(null);
-    try { await closeContract(id); toast.success('Contrat clôturé'); load(); }
-    catch { toast.error('Erreur clôture'); }
+    if (actionLoading) return;
+    setActionLoading(true);
+    try { await closeContract(id); toast.success('Contrat clôturé'); setConfirmAction(null); await load(); }
+    catch (err) { toast.error(err.response?.data?.error || 'Erreur clôture'); }
+    finally { setActionLoading(false); }
   };
 
   const handleDownload = async () => {
@@ -203,17 +226,26 @@ export default function ContractDetail() {
   };
 
   const handleDelete = async () => {
-    setConfirmAction(null);
+    if (actionLoading) return;
+    setActionLoading(true);
     try { await deleteContract(id); toast.success('Contrat supprimé'); navigate('/admin/contracts/list'); }
-    catch (err) { toast.error(err.response?.data?.error || 'Erreur suppression'); }
+    catch (err) { toast.error(err.response?.data?.error || 'Erreur suppression'); setActionLoading(false); }
   };
 
   const handleUpdate = async () => {
-    try { await updateContract(id, editForm); toast.success('Contrat mis à jour'); setIsEditing(false); load(); }
+    if (actionLoading) return;
+    setActionLoading(true);
+    try { await updateContract(id, editForm); toast.success('Contrat mis à jour'); setIsEditing(false); await load(); }
     catch (err) { toast.error(err.response?.data?.error || 'Erreur lors de la mise à jour'); }
+    finally { setActionLoading(false); }
   };
 
-  const copyRef = () => { navigator.clipboard?.writeText(contract.ref); toast.success('Référence copiée'); };
+  const copyRef = async () => {
+    try {
+      await navigator.clipboard.writeText(contract.ref);
+      toast.success('Référence copiée');
+    } catch { toast.error('Copie impossible (presse-papier indisponible)'); }
+  };
 
   if (loading) return <Loader />;
   if (!contract) return <div className="ct-empty"><FiAlertCircle size={48} className="ct-empty-icon" /><h3>Contrat introuvable</h3></div>;
@@ -251,8 +283,8 @@ export default function ContractDetail() {
           {contract.status === 0 && (
             isEditing ? (
               <>
-                <button onClick={handleUpdate} className="ct-btn ct-btn-blue"><FiSave size={14} /> Enregistrer</button>
-                <button onClick={() => { setIsEditing(false); load(); }} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Annuler</button>
+                <button onClick={handleUpdate} disabled={actionLoading} className="ct-btn ct-btn-blue"><FiSave size={14} /> {actionLoading ? 'Enregistrement…' : 'Enregistrer'}</button>
+                <button onClick={() => { setIsEditing(false); load(); }} disabled={actionLoading} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Annuler</button>
               </>
             ) : (
               <>
@@ -370,7 +402,12 @@ export default function ContractDetail() {
                 <FiPlus size={12} /> Générer un devis
               </button>
             </div>
-            {quotes.length === 0 ? (
+            {quotesError ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#b45309', fontSize: '0.85rem' }}>
+                <FiAlertCircle size={14} /> Impossible de charger les devis.
+                <button onClick={loadQuotes} className="ct-btn-link">Réessayer</button>
+              </div>
+            ) : quotes.length === 0 ? (
               <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: 0 }}>Aucun devis. Cliquez sur « Générer un devis » pour proposer une participation aux frais d'édition à l'auteur.</p>
             ) : (
               <div className="ct-quotes-list">
@@ -408,7 +445,7 @@ export default function ContractDetail() {
                 const isPdf = ext === 'pdf';
                 const iconColor = isPdf ? '#dc2626' : '#0284c7';
                 return (
-                  <div key={i} className="ct-doc-item">
+                  <div key={d.name || i} className="ct-doc-item">
                     <div className="ct-doc-info">
                       <span className="ct-doc-icon" style={{ background: `${iconColor}12`, color: iconColor }}>{ext.toUpperCase()}</span>
                       <span className="ct-doc-name">{d.name}</span>
@@ -494,6 +531,7 @@ export default function ContractDetail() {
           title="Valider ce contrat ?"
           message="Le contrat passera en statut Actif et ne pourra plus être modifié. Le PDF sera généré automatiquement."
           confirmLabel="Valider le contrat"
+          loading={actionLoading}
           onConfirm={handleValidate}
           onCancel={() => setConfirmAction(null)}
         />
@@ -504,6 +542,7 @@ export default function ContractDetail() {
           message="Le contrat sera définitivement clôturé. Cette action est irréversible."
           confirmLabel="Clôturer"
           danger
+          loading={actionLoading}
           onConfirm={handleClose}
           onCancel={() => setConfirmAction(null)}
         />
@@ -514,6 +553,7 @@ export default function ContractDetail() {
           message="Le contrat sera définitivement supprimé. Cette action est irréversible."
           confirmLabel="Supprimer"
           danger
+          loading={actionLoading}
           onConfirm={handleDelete}
           onCancel={() => setConfirmAction(null)}
         />

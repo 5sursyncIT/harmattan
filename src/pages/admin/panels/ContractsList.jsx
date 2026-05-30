@@ -21,6 +21,7 @@ export default function ContractsList() {
   const navigate = useNavigate();
   const [data, setData] = useState({ contracts: [], total: 0, pages: 1 });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [filters, setFilters] = useState({
     status: '', type: '', author: '', date_from: '', date_to: '',
@@ -31,9 +32,10 @@ export default function ContractsList() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(false);
     getContracts(filters)
       .then((r) => { if (!cancelled) setData(r.data); })
-      .catch(() => {})
+      .catch(() => { if (!cancelled) setLoadError(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [filters]);
@@ -114,7 +116,7 @@ export default function ContractsList() {
       {/* Search */}
       <div className="ct-search-wrap">
         <FiSearch size={16} className="ct-search-icon" />
-        <input type="text" className="ct-search-input" placeholder="Rechercher par auteur, titre, ISBN..."
+        <input type="text" className="ct-search-input" placeholder="Rechercher par nom d'auteur..."
           value={filters.author} onChange={e => update('author', e.target.value)} />
       </div>
 
@@ -168,7 +170,14 @@ export default function ContractsList() {
       </div>
 
       {/* Content */}
-      {loading ? <Loader /> : data.contracts.length === 0 ? (
+      {loading ? <Loader /> : loadError ? (
+        <div className="ct-empty">
+          <FiX size={48} className="ct-empty-icon" style={{ color: '#ef4444' }} />
+          <h3>Erreur de chargement</h3>
+          <p>Impossible de récupérer les contrats.</p>
+          <button onClick={() => setFilters(f => ({ ...f })) } className="ct-btn ct-btn-primary" style={{ marginTop: 8 }}>Réessayer</button>
+        </div>
+      ) : data.contracts.length === 0 ? (
         <div className="ct-empty">
           <FiBookOpen size={48} className="ct-empty-icon" />
           <h3>Aucun contrat trouv&eacute;</h3>

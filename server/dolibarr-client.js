@@ -9,6 +9,9 @@ const dolibarrApi = axios.create({
   headers: {
     'DOLAPIKEY': API_KEY,
     'Content-Type': 'application/json',
+    // Réponses NON compressées : évite l'erreur zlib « incorrect header check » sur
+    // les grosses réponses gzippées par Apache (localhost → coût négligeable).
+    'Accept-Encoding': 'identity',
   },
   timeout: 30000,
 });

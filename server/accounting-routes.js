@@ -711,21 +711,24 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
         const freeCopies = Number(c.free_author_copies) || 0;
         const rate = Number(c.royalty_rate_print) || 0;
 
-        // Seuil cumulatif : unités au-dessus du seuil = max(0, cumulative - threshold - freeCopies)
-        // Mais on ne compte dans la période que les unités qui dépassent le seuil dans la période
+        // Assiette des royalties = unités VENDUES au-dessus du seuil de versement.
+        // IMPORTANT : on NE retranche PAS les exemplaires gratuits (free_author_copies).
+        // Ces exemplaires sont remis gratuitement à l'auteur et ne sont jamais facturés
+        // (absents de llx_facturedet), donc déjà exclus de `unitsSold`. Les soustraire
+        // une seconde fois sous-estimait les droits dus (cf. contrat Art. 4 : « les droits
+        // ne portent pas sur les exemplaires remis gratuitement » — exclusion, pas seuil).
         let unitsOver = 0;
         if (threshold_mode === 'cumulative') {
           const cumBefore = cumulativeUnits - unitsSold; // cumulative avant cette période
-          const thresholdPlusFree = threshold + freeCopies;
-          if (cumulativeUnits > thresholdPlusFree) {
-            if (cumBefore >= thresholdPlusFree) {
+          if (cumulativeUnits > threshold) {
+            if (cumBefore >= threshold) {
               unitsOver = unitsSold;
             } else {
-              unitsOver = cumulativeUnits - thresholdPlusFree;
+              unitsOver = cumulativeUnits - threshold;
             }
           }
         } else {
-          unitsOver = Math.max(0, unitsSold - threshold - freeCopies);
+          unitsOver = Math.max(0, unitsSold - threshold);
         }
 
         const avgHtPerUnit = unitsSold > 0 ? grossHt / unitsSold : 0;
@@ -967,7 +970,8 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           if (units === 0) continue;
           const gross = Number(sales.gross_ht);
           const rate = Number(c.royalty_rate_print) || 0;
-          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0) - Number(c.free_author_copies || 0));
+          // Pas de soustraction des ex. gratuits : non facturés, déjà hors `units`.
+          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0));
           const royalty = (gross / units) * unitsOver * (rate / 100);
           rows.push({
             ref: c.ref, author: c.author, email: c.email, book: c.book_title, isbn: c.book_isbn,
@@ -1033,7 +1037,8 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           if (units === 0) continue;
           const gross = Number(sales.gross_ht);
           const rate = Number(c.royalty_rate_print) || 0;
-          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0) - Number(c.free_author_copies || 0));
+          // Pas de soustraction des ex. gratuits : non facturés, déjà hors `units`.
+          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0));
           const royalty = Math.round((gross / units) * unitsOver * (rate / 100));
           if (royalty <= 0) continue;
 
