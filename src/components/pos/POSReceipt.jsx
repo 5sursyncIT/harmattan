@@ -118,7 +118,12 @@ export default function POSReceipt({ sale, onClose }) {
 
           {/* Payments */}
           <div className="pos-receipt-payments-section">
-            {sale.unpaid ? (
+            {sale.service_presse ? (
+              <div className="pos-receipt-payment-line pos-receipt-unpaid">
+                <span>SERVICE DE PRESSE{sale.press_organ ? ` — ${sale.press_organ}` : ''}</span>
+                <span>0 F</span>
+              </div>
+            ) : sale.unpaid ? (
               <div className="pos-receipt-payment-line pos-receipt-unpaid">
                 <span>À RÉGLER (facture impayée)</span>
                 <span>{sale.total_ttc?.toLocaleString('fr-FR')} F</span>

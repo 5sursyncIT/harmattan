@@ -38,6 +38,7 @@ export default function POSPage() {
   const [showChangePin, setShowChangePin] = useState(false);
   const [showReturn, setShowReturn] = useState(false);
   const [showUnpaid, setShowUnpaid] = useState(false);
+  const [unpaidInitialRef, setUnpaidInitialRef] = useState('');
   const [returnInitialRef, setReturnInitialRef] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [showFreeProduct, setShowFreeProduct] = useState(false);
@@ -339,11 +340,16 @@ export default function POSPage() {
         <POSHistory
           onClose={() => setShowHistory(false)}
           onReturn={(ref) => { setReturnInitialRef(ref); setShowReturn(true); }}
+          onSettle={(ref) => { setUnpaidInitialRef(ref); setShowUnpaid(true); }}
         />
       )}
 
       {showUnpaid && (
-        <POSSettleUnpaid onClose={() => setShowUnpaid(false)} onSettled={loadSession} />
+        <POSSettleUnpaid
+          onClose={() => { setShowUnpaid(false); setUnpaidInitialRef(''); }}
+          onSettled={loadSession}
+          initialRef={unpaidInitialRef}
+        />
       )}
 
       {showFreeProduct && (

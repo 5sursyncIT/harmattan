@@ -1,0 +1,221 @@
+rowid;nom;client;fournisseur;email;phone;datec;status
+14;bathily;1;0;bathilydame@gestionnairehermattan.sn;778002031;2022-02-25;1
+32;DIRECTION DU LIVRE ET DE LA LECTURE;1;0;;;2022-04-11;1
+41;SAMBA DIOUF;3;0;;;2022-04-14;1
+45;HENAN CHINE;1;0;;;2022-04-19;1
+46;Hane;3;0;;;2022-04-19;1
+61;KA;3;0;;;2022-04-27;1
+62;Diop;3;0;;;2022-04-28;1
+67;Mbow;3;0;;;2022-04-30;1
+74;Gueye;3;0;;;2022-04-30;1
+1929;PRESSE;1;0;;;2022-04-30;1
+1930;Dons;1;0;;;2022-04-30;1
+81;NINA;2;0;;;2022-05-04;1
+84;LONASE;1;0;;;2022-05-06;1
+86;Cour de Justice de l'UEMOA;1;0;;;2022-05-06;1
+87;Mbengue;3;0;;;2022-05-06;1
+93;ly;3;0;;;2022-05-12;1
+94;Diouf;3;0;;;2022-05-12;1
+96;Ndiaye;3;0;;;2022-05-13;1
+98;AGEROUTE;1;0;;;2022-05-13;1
+99;Sané;3;0;;;2022-05-14;1
+102;Sylla 2022;1;0;;;2022-05-14;1
+103;Gomis;3;0;;;2022-05-16;1
+108;Ndiaye;3;0;;;2022-05-17;1
+112;NDIAYE;1;0;;;2022-05-19;1
+113;FAYE;3;0;gilbertfaye87@gmail.com;;2022-05-20;1
+120;Gueye;3;0;;;2022-05-20;1
+127;Mbengue;3;0;;;2022-05-25;1
+140;Dione;3;0;;;2022-05-31;1
+141;Diédhiou;3;0;;;2022-05-31;1
+143;FAYE;3;0;;;2022-05-31;1
+146;COTE D'IVOIRE;1;0;;;2022-06-01;1
+148;DIALLO;3;0;;;2022-06-02;1
+160;Kamara;3;0;;;2022-06-08;1
+164;Lo;3;0;;;2022-06-08;1
+177;Sokeng;3;0;;;2022-06-10;1
+187;YENOUSSI;3;0;;;2022-06-16;1
+188;HANE;3;0;;;2022-06-16;1
+197;Acquisition de matériels pédagogiqes;1;0;;;2022-06-21;1
+198;Mbengue;3;0;;;2022-06-22;1
+201;Mbengue;3;0;;;2022-06-23;1
+207;BAKHOUM;3;0;;;2022-06-24;1
+208;SARR;3;0;;;2022-06-24;1
+212;Seid;3;0;;;2022-06-24;1
+214;Faye;3;0;;;2022-06-24;1
+219;Mboup;3;0;;;2022-06-30;1
+221;DIAO;3;0;;;2022-07-02;1
+222;KEBE;3;0;;;2022-07-04;1
+223;DIOP;3;0;;;2022-07-18;1
+224;DIA;3;0;;;2022-07-20;1
+230;NGAM;3;0;;;2022-07-27;1
+231;SOW;3;0;;;2022-07-27;1
+232;Camara;3;0;;;2022-07-27;1
+234;DIEYE;3;0;;;2022-07-28;1
+239;SARR;3;0;;;2022-07-29;1
+241;ZACCARIA;3;0;;;2022-08-03;1
+242;AIHUNZOUN;3;0;;;2022-08-03;1
+245;SALEH;3;0;;;2022-08-04;1
+248;KI;3;0;;;2022-08-08;1
+255;Diarisso;3;0;;;2022-08-11;1
+259;NDONG;3;0;;;2022-08-16;1
+268;LOME;3;0;;;2022-08-22;1
+271;NDIAYE;3;0;;;2022-08-22;1
+273;DIOP;3;0;amadoudiop@geradsn.org;;2022-08-25;1
+275;DIAGNE;3;0;;;2022-08-27;1
+276;DIAKHATE;3;0;;;2022-08-29;1
+279;Malick;3;0;;;2022-08-30;1
+293;SARR;3;0;;;2022-09-08;1
+295;NIANG;1;0;;;2022-09-09;1
+318;THIOYE;3;0;;;2022-09-30;1
+367;FALL;3;0;;;2022-10-25;1
+410;ABDOULAYE ILIMANE;3;0;;;2022-11-15;1
+414;BABACAR;3;0;;;2022-11-16;1
+416;FATIMA;1;0;;;2022-11-17;1
+442;LEOPOLD;3;0;;;2022-12-14;1
+448;MOUSSA;3;0;;;2022-12-21;1
+449;NIASS;3;0;;;2022-12-21;1
+460;ECOLE;3;0;;;2022-12-29;1
+471;RIBEIRO;3;0;;;2023-01-10;1
+477;SALAM SALL;3;0;;;2023-01-12;1
+550;FALL;3;0;;;2023-02-18;1
+1931;MAME BIRAME DIOP;1;0;;;2023-03-01;1
+595;Dr. Papa GUEYE;3;0;;;2023-03-21;1
+616;OUSMANE;3;0;;;2023-04-07;1
+619;Dr SANOU;3;0;;;2023-04-11;1
+633;EIFFAGE;1;0;;;2023-04-18;1
+642;SEEN;3;0;;;2023-04-20;1
+668;SENE Abib;3;0;;;2023-05-11;1
+676;MARIANE;3;0;;;2023-05-19;1
+683;DIALLO;3;0;;;2023-05-24;1
+1932;EXPOSITION Département Histoire;1;0;;;2023-07-12;1
+785;Bassirou Sakho et Yannick Rauch;3;0;senharmattan@gmail.com;;2023-08-18;1
+786;LO;3;0;;;2023-08-19;1
+787;LO;3;0;;;2023-08-19;1
+803;DIOP;3;0;ambsen.bruxelles@gmail.com;;2023-08-29;1
+814;TALL;3;0;;;2023-09-05;1
+821;Bibliothèques Sans Frontières;3;0;;;2023-09-11;1
+822;SOUNG;3;0;;;2023-09-12;1
+833;Diéne;3;0;;;2023-09-15;1
+847;LO;3;0;;;2023-09-26;1
+872;FALL;3;0;sokhnafall@ymail.com;;2023-10-17;1
+897;Abasse Sadio dit Ibn ab's;3;0;;;2023-10-30;1
+911;GUEYE;3;0;;;2023-11-07;1
+920;NDIAYE;3;0;;;2023-11-10;1
+1933;EXPO-VENTE;1;0;;;2023-11-27;1
+967;Bodiang;3;0;aida.adjiba@gmail.com;;2023-12-14;1
+1073;MEDE;3;0;nmede@becg-i.com;;2024-03-06;1
+1102;NDIAYE SECK;3;0;;;2024-03-28;1
+1116;DIOP;1;0;;;2024-04-15;1
+1124;FESTIVAL INTERNATIONAL DE LITTERATURE DE DAKAR;1;0;;;2024-04-22;1
+1146;Vital;3;0;;;2024-05-14;1
+1150;DIOUF;3;0;;;2024-05-17;1
+1155;FALL;3;0;;;2024-05-23;1
+1161;DIA;3;0;;;2024-05-29;1
+1184;GOMIS;3;0;;;2024-06-11;1
+1191;LO;3;0;;;2024-06-25;1
+1272;DIOP;3;0;;;2024-08-30;1
+1306;DIOP SALL;3;0;;;2024-09-24;1
+1310;TOSTAN INC;1;0;;+221772252217;2024-09-25;1
+1327;YADE;3;0;;;2024-10-11;1
+1355;Tabasky DIOUF;3;0;asmalick13@yahoo.fr;785377388;2024-11-09;1
+1367;DAOUDA BA;3;0;badaouda11@gmail.com;;2024-11-27;1
+1372;NDIAYE;3;0;;;2024-11-27;1
+1373;ENAMC;1;0;;;2024-11-27;1
+1934;MAME BIRAME DIOP;0;0;;;2024-12-06;1
+1392;MAME BIRAME DIOP;0;0;;;2024-12-06;1
+1395;Ibrahima Souaré;3;0;;774279597;2024-12-07;1
+1412;CARVALHO;3;0;;;2025-01-09;1
+1427;État-major général des armées;1;0;;;2025-01-21;1
+1437;NDIAYE;3;0;;;2025-01-25;1
+1438;NDIAYE;3;0;;;2025-01-25;1
+1464;Odile Tendeng-Weidler;3;0;odiletendengweidler@gmail.com;+49/15902267336;2025-02-18;1
+1466;Paul Macodou Sène;3;0;;;2025-02-19;1
+1470;"Académie africaine des Sciences religieuses, sociales et politiques (AASRSP)";3;0;;;2025-02-25;1
+1485;MAMADOU FAYE;3;0;;;2025-03-06;1
+1495;Mme Kouaté Absa Clédor Ndiaye;1;0;;776496624;2025-03-18;1
+1496;Mme Kouaté Absa Clédor Ndiaye;1;0;;776496624;2025-03-18;1
+1504;NICOLA GOMIS;1;0;;776297272;2025-03-29;1
+1523;Babacar MBAYE;3;0;;;2025-04-15;1
+1935;SALON DU LIVRE;1;0;;;2025-04-17;1
+1550;Direction de la planification ( Ministère de l'économie );0;0;;;2025-05-26;1
+1936;Direction de la planification ( Ministère de l'économie );0;0;;;2025-05-26;1
+1572;Librairie Joussour Abdel Aziz Nouakchott;2;0;;0022236308939;2025-06-03;1
+1576;SY;3;0;;;2025-06-13;1
+1584;Bibliothèque de l’Université Amadou Mahtar Mbow;1;0;;;2025-07-03;1
+1692;SAMBOU;1;0;;;2025-09-13;1
+1756;SENE;3;0;;;2025-11-17;1
+1798;ANCIENS ELEVES HAMO 4;3;0;;;2025-12-17;1
+1808;Paulette DIEDHIOU;3;0;;;2025-12-29;1
+1939;MOR TALLA GAYE;3;0;mortallusgaye@gmail.com;;2026-02-18;1
+1940;SALL;3;0;;;2026-02-19;1
+1859;Pascal BIANCHINI;3;0;pascalbian@gmail.com;;2026-02-23;1
+1860;Yatma GUEYE;3;0;falyyat@gmail.com;;2026-02-25;1
+1861;Eugène Pierre LAMAH;3;0;eugenepiersonlah@gmail.com;;2026-02-25;1
+1863;Gilles Arsene Tchedji;3;0;gillesarsenetchedji@gmail.com;;2026-02-26;1
+1864;Tamsir MBAYE;3;0;tamsirmbaye76@gmail.com;+221763837836;2026-02-26;1
+1867;Joseph Antoine Meki;3;0;hello.joseph.meki@gmail.com;;2026-03-02;1
+1868;Boudal NDIATH;3;0;ndiathboudal@gmail.com;;2026-03-03;1
+1869;Cheikh DIOUF;3;0;chicdiouv@gmail.com;;2026-03-05;1
+1870;Amadou Lamarana BAH;3;0;mamadysylla55@yahoo.fr;;2026-03-05;1
+1871;Seydina Oumar DIEDHIOU;3;0;seydinaoumaryalone.diedhiou@ucad.edu.sn;;2026-03-05;1
+1873;Mamadou Lamine FAYE;3;0;laminebnc@gmail.com;+1-438-995-2033/Séné;2026-03-06;1
+1875;Cheikhou Oumar BA;3;0;cheikh.ba@ipar.sn;;2026-03-10;1
+1876;Olivier NADIELINE;3;0;onadeline@cms.sn;;2026-03-10;1
+1877;Yaré KEBE;3;0;adjak91@gmail.com;;2026-03-11;1
+1878;Romaric Lucien BADOUSSI;3;0;rbadoussi@yahoo.fr;;2026-03-11;1
+1879;Aminata NDIAYE;3;0;aminata.ndiaye@ucad.edu.sn;;2026-03-11;1
+1880;Papa Meissa SAMB;3;0;samb.papa-meissa@ugb.edu.sn;;2026-03-11;1
+1881;Maria SISSOKHO;3;0;maria.sskho@gmail.com;;2026-03-12;1
+1882;AWA BA;3;0;awaelba17@gmail.com;;2026-03-13;1
+1883;Ousmane DIABY;1;0;;;2026-03-13;1
+1884;Thione Fally SENE;3;0;senefally@gmail.com;;2026-03-14;1
+1885;Papa Saliou THIOUNE;3;0;thiounesaliou@outlook.com;;2026-03-14;1
+1886;Dan Abraham Jacques Massamba SENE;3;0;abraham.danni88@gmail.com;;2026-03-14;1
+1887;CHEIKH ABDOU SEYE;3;0;cabdouseye@gmail.com;;2026-03-14;1
+1888;Philippe SAHUC;3;0;helipsahuc@wanadoo.fr;;2026-03-16;1
+1889;Ababacar Fall GUEYE;3;0;gueyeababacarfall@gmail.com;;2026-03-16;1
+1891;Moulin Aymar MBINA YEMBI;3;0;mbinaaymar790@gmail.com;;2026-03-17;1
+1892;Alexandre Ablaye SOUMARE;3;0;soumarealexandre@gmail.com;777832327783354244;2026-03-18;1
+1893;Boubacar LY;3;0;astufall02@gmail.com;773352410;2026-03-23;1
+1894;Moustapha SANE;3;0;taphasane1910@gmail.com;;2026-03-25;1
+1895;Mame Samba DIAMANKA;3;0;ddiamanka9@gmail.com;;2026-03-26;1
+1897;Abdoul Kader Taslimanka SYLLA;3;0;ousmanesyllafr@yahoo.fr;;2026-03-26;1
+1899;Léon Patrice SARR;3;0;lp.sarr@lps-law.com;(+221)776551484/(+22;2026-03-31;1
+1900;Ibrahima Amadou NIANG;3;0;ibrahima.niang@gmail.com;;2026-04-01;1
+1901;Hamadounn BEN AYA;3;0;hamadounn.benaya@gmail.com;;2026-04-01;1
+1902;Dibocor Philippe NGOM;3;0;phildibocor@gmail.com;;2026-04-02;1
+1904;Mouhamadou El Mountakha FALL;3;0;mountakha.fall@univ-thies.sn;+221775724087;2026-04-06;1
+1905;Moustapha SAMBA;3;0;mustafasamba66@yahoo.com;772344002;2026-04-06;1
+1906;Jean Pascal MVONDO;3;0;jeanpascalmvondo@gmail.com;+221772990185(Senega;2026-04-06;1
+1908;El Hadji Yaya SALL;3;0;elhadjiyaya@hotmail.com;;2026-04-07;1
+1909;Papa Thioune GNING;3;0;gningbtp@gmail.com;;2026-04-07;1
+1910;Cheikh Ahmed Tidiane FAYE;3;0;cheikhahmedtidianef8@gmail.com;;2026-04-08;1
+1911;Aissatou Lamarane DIALLO;3;0;aissatoulamarana0101@gmail.com;00221771314449;2026-04-08;1
+1912;Marième NGOM;3;0;ngommarieme011@gmail.com;785672293;2026-04-08;1
+1913;Mahmoud ABDOU;3;0;mahmoudabdouattabo@gmail.com;;2026-04-09;1
+1914;Laity NDIAYE;3;0;laitynd83@gmail.com;;2026-04-09;1
+1915;Ndèye Fatou NDIAYE;3;0;ndeyefatou06@gmail.com;;2026-04-13;1
+1916;Lamine NDIAYE;3;0;lamine.ndiaye@ucad.edu.sn;;2026-04-14;1
+1917;El Hadji Malick MBOUP;3;0;mawdo70@gmail.com;775329921;2026-04-15;1
+1918;Arona SOUMARE;3;0;arona.soumare@gmail.com;+2250575753270;2026-04-15;1
+1919;Papa Modou NDIAYE;3;0;pndiaye4@worldbank.org;;2026-04-15;1
+1920;Ndongo DIAO;3;0;zamzamholding@gmail.com;+221781053783;2026-04-15;1
+1921;Alioune DIONE;3;0;alioune.dione.sn@gmail.com;763326464;2026-04-15;1
+1922;Sheikh Alassane SÈNE;3;0;dioufpap@gmail.com;+221776500745;2026-04-16;1
+1923;Pierre SAMBOU (Université Cheikh Anta Diop);3;0;pierre.sambou@ucad.edu.sn;;2026-04-16;1
+1924;Mamoudou SY;3;0;symamoudou600@gmail.com;;2026-04-16;1
+1925;Seydou Nourou SAMB;3;0;seydoulahi@gmail.com;;2026-04-16;1
+1926;Abdou karim DIOUF;3;0;abdoukarimdiouf359@gmail.com;;2026-04-16;1
+1927;Pape Batina FAYE;3;0;papebatinaf@gmail.com;;2026-04-21;1
+1944;Tafsir Samba KANE;3;0;tafsirsambakane@gmail.com;;2026-04-30;1
+1945;TEST A;3;0;issa.harmattan@gmail.com;;2026-05-04;1
+1946;Edouard Fara MILLIMOUNO;3;0;edouardmillimono809@gmail.com;;2026-05-05;1
+1950;Mouhamadou Tahirou NDOYE;3;0;ndoyetahirou01@gmail.com;0644985716;2026-05-08;1
+1951;Aliou GUEYE;3;0;gueyealiou622@gmail.com;;2026-05-08;1
+1953;Mouhamadou Cabir THIAM;3;0;thiam.kabir.96@gmail.com;;2026-05-11;1
+1955;SARR;3;0;;;2026-05-12;1
+1957;CIRE LO;3;0;aerolabafrique@gmail.com;+221781957797;2026-05-13;1
+1958;Jean PACHOT LAGARRIGUE;3;0;genevievejean.pachot@gmail.com;;2026-05-15;1
+1966;Moustapha Cissé;1;0;wwwflex425@gmail.com;+221779804241;2026-05-25;1
+1967;BCEAO-AGENCE PRINCIPALE DE DAKAR;1;0;;;2026-05-26;1

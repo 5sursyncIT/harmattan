@@ -9,8 +9,8 @@ const FALLBACK_METHODS = [
   { code: 'CHQ', label: 'Chèque' }, { code: 'WAVE', label: 'Wave' }, { code: 'OM', label: 'Orange Money' },
 ];
 
-export default function POSSettleUnpaid({ onClose, onSettled }) {
-  const [q, setQ] = useState('');
+export default function POSSettleUnpaid({ onClose, onSettled, initialRef = '' }) {
+  const [q, setQ] = useState(initialRef);
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
@@ -19,15 +19,25 @@ export default function POSSettleUnpaid({ onClose, onSettled }) {
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
   const timer = useRef(null);
+  const autoPicked = useRef(false);
 
   const load = (query) => {
     setLoading(true);
     posGetUnpaidInvoices(query)
-      .then(r => setList(r.data.invoices || []))
+      .then(r => {
+        const invoices = r.data.invoices || [];
+        setList(invoices);
+        // Ouvert depuis l'historique sur une réf précise : sélection directe si
+        // la recherche ne renvoie que cette facture (évite un clic de plus).
+        if (initialRef && !autoPicked.current && invoices.length === 1) {
+          autoPicked.current = true;
+          pick(invoices[0]);
+        }
+      })
       .catch(() => toast.error('Erreur chargement'))
       .finally(() => setLoading(false));
   };
-  useEffect(() => { load(''); posGetConfig().then(r => { if (r.data?.paymentMethods?.length) setMethods(r.data.paymentMethods); }).catch(() => {}); }, []);
+  useEffect(() => { load(initialRef); posGetConfig().then(r => { if (r.data?.paymentMethods?.length) setMethods(r.data.paymentMethods); }).catch(() => {}); }, []);
 
   const onSearch = (v) => {
     setQ(v);

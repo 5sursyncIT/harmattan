@@ -3,7 +3,7 @@ import { posCreateSale, posGetConfig } from '../../api/pos';
 import usePosCartStore from '../../store/posCartStore';
 import usePosAuthStore from '../../store/posAuthStore';
 import { enqueueSale } from '../../utils/offlineQueue';
-import { FiX, FiCheck, FiClock } from 'react-icons/fi';
+import { FiX, FiCheck, FiClock, FiGift } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import './PaymentPanel.css';
 
@@ -39,6 +39,9 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
   const [payments, setPayments] = useState([]);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState('');
+  // Service de presse : mode + organe de presse destinataire (obligatoire).
+  const [presseMode, setPresseMode] = useState(false);
+  const [presseOrgane, setPresseOrgane] = useState('');
   // Garde synchrone : neutralise un double-tap avant que `processing` ne soit rendu.
   const submittingRef = useRef(false);
 
@@ -115,6 +118,35 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
       onComplete(result.data);
     } catch (err) {
       setError(err.response?.data?.error || 'Erreur lors de la facturation à crédit');
+    } finally {
+      submittingRef.current = false;
+      setProcessing(false);
+    }
+  };
+
+  // Service de presse — facture tous les articles à 0 F (exemplaires gratuits
+  // remis à la presse/médias), rattachée au client SERVICE PRESSE côté serveur.
+  // Aucun encaissement, aucun client à sélectionner. Le stock est décrémenté.
+  const handlePresse = async () => {
+    if (submittingRef.current) return;
+    const organe = presseOrgane.trim();
+    if (organe.length < 2) { setError("Indiquez l'organe de presse destinataire (2 caractères min)."); return; }
+    if (!window.confirm(`Émettre une facture SERVICE DE PRESSE pour « ${organe} » ?\nLes ${items.reduce((s, i) => s + i.qty, 0)} article(s) seront facturés à 0 F (exemplaires gratuits) et le stock sera décrémenté.`)) return;
+    submittingRef.current = true;
+    setProcessing(true);
+    setError('');
+    const saleId = ensureSaleId();
+    try {
+      const result = await posCreateSale({
+        client_sale_id: saleId,
+        items: buildItems(),
+        payments: [],
+        service_presse: true,
+        press_organ: organe,
+      });
+      onComplete(result.data);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Erreur lors de la vente service de presse');
     } finally {
       submittingRef.current = false;
       setProcessing(false);
@@ -307,6 +339,52 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
         </button>
         {!customer?.id && (
           <p className="pos-payment-credit-hint">Un client doit être sélectionné pour une facture à crédit.</p>
+        )}
+
+        {/* Service de presse — exemplaires gratuits (0 F), client SERVICE PRESSE.
+            L'organe de presse destinataire est obligatoire. */}
+        {!presseMode ? (
+          <button
+            className="pos-payment-presse"
+            onClick={() => { setError(''); setPresseMode(true); }}
+            disabled={processing}
+            title="Facturer les articles à 0 F (exemplaires remis à la presse)"
+          >
+            <FiGift /> Service de presse (0 F)
+          </button>
+        ) : (
+          <div className="pos-payment-presse-form">
+            <label htmlFor="presse-organe">Organe de presse destinataire</label>
+            <input
+              id="presse-organe"
+              type="text"
+              autoFocus
+              value={presseOrgane}
+              onChange={(e) => { setPresseOrgane(e.target.value); if (error) setError(''); }}
+              placeholder="Ex. Le Soleil, RTS, Seneweb…"
+              maxLength={200}
+              className="pos-presse-input"
+              disabled={processing}
+            />
+            <div className="pos-presse-actions">
+              <button
+                type="button"
+                className="pos-presse-cancel"
+                onClick={() => { setPresseMode(false); setPresseOrgane(''); setError(''); }}
+                disabled={processing}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="pos-payment-presse"
+                onClick={handlePresse}
+                disabled={processing || presseOrgane.trim().length < 2}
+              >
+                <FiGift /> {processing ? 'Traitement...' : 'Valider (0 F)'}
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>

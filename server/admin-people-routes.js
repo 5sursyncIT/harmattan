@@ -4,8 +4,35 @@
 import { Router } from 'express';
 import axios from 'axios';
 import crypto from 'crypto';
+import { execFileSync } from 'child_process';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { join } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
 import { dolibarrApi } from './dolibarr-client.js';
+
+// Convertit un buffer ODT en PDF via LibreOffice headless. Le modèle de devis
+// (module custom devislibrairie) génère de l'ODT, pas du PDF — sans conversion,
+// le navigateur recevait un ODT étiqueté application/pdf → « Invalid PDF structure ».
+function odtBufferToPdf(odtBuf) {
+  const dir = join('/tmp', `propalpdf-${Date.now()}-${process.pid}`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    const odtPath = join(dir, 'doc.odt');
+    writeFileSync(odtPath, odtBuf);
+    const profile = join(dir, 'profile');
+    mkdirSync(profile, { recursive: true });
+    execFileSync('soffice', [
+      '--headless', '--norestore', '--nologo', '--nofirststartwizard',
+      `-env:UserInstallation=file://${profile}`,
+      '--convert-to', 'pdf', '--outdir', dir, odtPath,
+    ], { stdio: 'pipe', timeout: 60000 });
+    const pdfPath = join(dir, 'doc.pdf');
+    if (!existsSync(pdfPath)) throw new Error('Conversion PDF échouée (soffice)');
+    return readFileSync(pdfPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 const adminApi = axios.create({
   baseURL: process.env.DOLIBARR_URL || 'http://localhost/dolibarr/htdocs/api/index.php',
@@ -867,11 +894,21 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
           validateStatus: () => true,
         }
       );
-      const contentType = phpRes.headers['content-type'] || '';
-      if (phpRes.status >= 200 && phpRes.status < 300 && contentType.includes('application/pdf')) {
+      const buf = Buffer.from(phpRes.data);
+      const isPdf = buf.slice(0, 5).toString('latin1') === '%PDF-';
+      const isZip = buf[0] === 0x50 && buf[1] === 0x4B; // 'PK' = conteneur ODT/zip
+      if (phpRes.status >= 200 && phpRes.status < 300 && (isPdf || isZip)) {
+        // Le modèle de devis sort de l'ODT → on convertit en PDF à la volée.
+        let pdf;
+        try {
+          pdf = isPdf ? buf : odtBufferToPdf(buf);
+        } catch (convErr) {
+          console.error('[PROPAL /pdf] conversion ODT→PDF échouée:', convErr.message);
+          return res.status(500).json({ error: 'Conversion du devis en PDF échouée' });
+        }
         res.set('Content-Type', 'application/pdf');
-        res.set('Content-Disposition', `inline; filename="propal-${id}.pdf"`);
-        return res.send(Buffer.from(phpRes.data));
+        res.set('Content-Disposition', `inline; filename="devis-${id}.pdf"`);
+        return res.send(pdf);
       }
       let detail = 'Erreur génération PDF';
       try {

@@ -44,6 +44,7 @@
 .ac-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; white-space: nowrap; }
 .ac-badge-paid { background: #d1fae5; color: #065f46; }
 .ac-badge-unpaid { background: #fef3c7; color: #92400e; }
+.ac-badge-partial { background: #ffedd5; color: #9a3412; }
 .ac-badge-draft { background: #f3f4f6; color: #4b5563; }
 .ac-badge-cancel { background: #fee2e2; color: #991b1b; }
 
@@ -304,4 +305,49 @@
   .ac-table { min-width: 700px; }
   .ac-entry-line, .ac-entry-head { grid-template-columns: 1fr 1fr; }
   .ac-entry-head { display: none; }
+}
+
+/* ─── Facturation avancée : progression, timeline, splits, crédits ─── */
+
+/* Barre de progression payé / reste à payer */
+.ac-progress-block { margin: 14px 0 4px; }
+.ac-progress-head { display: flex; justify-content: space-between; font-size: 0.85rem; color: #475569; margin-bottom: 6px; }
+.ac-progress { height: 10px; background: #f1f5f9; border-radius: 6px; overflow: hidden; border: 1px solid #e2e8f0; }
+.ac-progress-bar { height: 100%; background: #f59e0b; border-radius: 6px 0 0 6px; transition: width 0.3s ease; }
+.ac-progress-bar.full { background: #10531a; border-radius: 6px; }
+.ac-progress-sub { font-size: 0.75rem; color: #94a3b8; margin-top: 4px; }
+
+/* Timeline paiements & imputations */
+.ac-timeline { display: flex; flex-direction: column; gap: 0; margin: 4px 0 8px; }
+.ac-timeline-item { display: flex; gap: 12px; padding: 10px 0; border-left: 2px solid #e5e7eb; margin-left: 6px; padding-left: 16px; position: relative; }
+.ac-timeline-item:last-child { border-left-color: transparent; }
+.ac-timeline-dot { position: absolute; left: -7px; top: 14px; width: 12px; height: 12px; border-radius: 50%; background: #10531a; border: 2px solid #fff; box-shadow: 0 0 0 1px #e2e8f0; }
+.ac-timeline-item.kind-deposit .ac-timeline-dot { background: #7c3aed; }
+.ac-timeline-item.kind-credit_note .ac-timeline-dot { background: #9333ea; }
+.ac-timeline-body { flex: 1; }
+.ac-timeline-row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ac-timeline-amount { font-weight: 800; font-size: 0.95rem; color: #0f172a; font-variant-numeric: tabular-nums; }
+.ac-timeline-date { color: #94a3b8; font-size: 0.78rem; margin-left: auto; }
+.ac-timeline-row2 { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.78rem; color: #64748b; margin-top: 3px; }
+.ac-timeline-ref { font-family: monospace; }
+.ac-timeline-remaining { margin-left: auto; }
+
+/* Pastille crédit (acompte/avoir) */
+.ac-credit-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; background: #ede9fe; color: #5b21b6; }
+
+/* Lignes de paiement fractionné */
+.ac-split-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ac-split-summary { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 0.82rem; color: #475569; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e2e8f0; }
+
+/* Liste de crédits à imputer */
+.ac-credit-list { display: flex; flex-direction: column; gap: 8px; }
+.ac-credit-choice { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+.ac-credit-choice:hover { border-color: #c4b5fd; }
+.ac-credit-choice.active { border-color: #7c3aed; background: #faf5ff; }
+.ac-credit-amount { font-weight: 800; color: #0f172a; font-variant-numeric: tabular-nums; }
+.ac-credit-meta { color: #94a3b8; font-size: 0.78rem; margin-left: auto; }
+
+@media (max-width: 640px) {
+  .ac-split-row { grid-template-columns: 1fr 1fr; }
+  .ac-credit-meta { margin-left: 0; width: 100%; }
 }

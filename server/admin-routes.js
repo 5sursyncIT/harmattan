@@ -1371,6 +1371,10 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       let openAlerts = 0;
       try { openAlerts = db.prepare("SELECT COUNT(*) AS c FROM stock_alerts WHERE status = 'open' AND severity IN ('critique', 'haute')").get()?.c || 0; } catch { /* table may not exist */ }
 
+      // Sorties d'argent non acquittées (badge admin/comptable « nouveau retrait »)
+      let unackExpenses = 0;
+      try { unackExpenses = db.prepare("SELECT COUNT(*) AS c FROM expenses WHERE status = 'recorded' AND acknowledged = 0").get()?.c || 0; } catch { /* table may not exist */ }
+
       // Manuscrits : nouveaux à traiter (stage = submitted dans la nouvelle table) + fallback legacy
       let pendingManuscripts = 0;
       try { pendingManuscripts = db.prepare("SELECT COUNT(*) AS c FROM manuscripts WHERE current_stage = 'submitted'").get()?.c || 0; } catch { /* table may not exist */ }
@@ -1412,6 +1416,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         }
       } catch (err) { console.error('Workflow counts error:', err.message); }
 
+      // Badge dépenses : visible pour admins + comptable uniquement.
+      const expenses = ['super_admin', 'admin', 'comptable'].includes(role) ? unackExpenses : 0;
+
       res.json({
         messages: unreadMessages,
         payments: pendingPayments,
@@ -1422,10 +1429,11 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         editorial,
         covers,
         printing,
+        expenses,
       });
     } catch (err) {
       console.error('Notification counts error:', err.message);
-      res.json({ messages: 0, payments: 0, stock_alerts: 0, manuscripts: 0, evaluations: 0, corrections: 0, editorial: 0, covers: 0, printing: 0 });
+      res.json({ messages: 0, payments: 0, stock_alerts: 0, manuscripts: 0, evaluations: 0, corrections: 0, editorial: 0, covers: 0, printing: 0, expenses: 0 });
     }
   });
 

@@ -448,16 +448,69 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
          ORDER BY p.datep DESC`, [id]
       );
 
+      // Acomptes / avoirs imputés SUR cette facture (réduisent le reste à payer,
+      // comme dans getListOfPayments() de Dolibarr). Source type : 3=acompte, 2=avoir.
+      const [creditsApplied] = await dolibarrPool.query(
+        `SELECT re.rowid, re.amount_ttc, re.description,
+                DATE_FORMAT(re.datec, '%Y-%m-%d') AS datec,
+                fs.ref AS source_ref, fs.type AS source_type
+         FROM llx_societe_remise_except re
+         LEFT JOIN llx_facture fs ON fs.rowid = re.fk_facture_source
+         WHERE re.fk_facture = ?
+         ORDER BY re.datec ASC, re.rowid ASC`, [id]
+      );
+
       const auditRows = db.prepare(`
         SELECT id, action, reason, user_name, user_role, created_at, before_snapshot, after_snapshot
         FROM invoice_audit_log WHERE fk_facture = ? ORDER BY created_at DESC, id DESC
       `).all(id);
 
+      // Normalisation des montants.
+      const paymentsOut = payments.map(p => ({
+        ...p, amount: Number(p.amount),
+        method_label: PAYMENT_METHOD_LABELS[p.method_code] || p.method_label || p.method_code,
+      }));
+      const creditsOut = creditsApplied.map(c => ({
+        id: c.rowid,
+        amount: Number(c.amount_ttc),
+        date: c.datec,
+        kind: c.source_type === 3 ? 'deposit' : 'credit_note',
+        label: c.source_type === 3 ? 'Acompte imputé' : 'Avoir imputé',
+        source_ref: c.source_ref || null,
+        description: c.description || null,
+      }));
+
+      const totalTtc = Number(invoice.total_ttc);
+      const paidPayments = paymentsOut.reduce((s, p) => s + p.amount, 0);
+      const paidCredits = creditsOut.reduce((s, c) => s + c.amount, 0);
+      const paidAmount = paidPayments + paidCredits;
+
+      // Timeline fusionnée (chronologique) avec reste à payer après chaque opération.
+      const events = [
+        ...paymentsOut.map(p => ({
+          kind: 'payment', date: p.datep, amount: p.amount,
+          label: p.method_label, method_code: p.method_code,
+          bank_label: p.bank_label || null, num: p.num_paiement || null,
+        })),
+        ...creditsOut.map(c => ({
+          kind: c.kind, date: c.date, amount: c.amount,
+          label: c.label, source_ref: c.source_ref, num: null,
+        })),
+      ].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+      let running = totalTtc;
+      const timeline = events.map(e => {
+        running = Math.round((running - e.amount) * 100) / 100;
+        return { ...e, running_remaining: running };
+      });
+
       res.json({
         invoice: {
           ...invoice,
           status_label: INVOICE_STATUS_LABELS[invoice.fk_statut] || '?',
-          paid_amount: payments.reduce((s, p) => s + Number(p.amount), 0),
+          paid_amount: paidAmount,
+          paid_payments: paidPayments,
+          paid_credits: paidCredits,
+          remaining: Math.round((totalTtc - paidAmount) * 100) / 100,
           source: invoice.module_source || 'direct',
         },
         lines: lines.map(l => ({
@@ -466,10 +519,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
           remise_percent: Number(l.remise_percent),
           total_ht: Number(l.total_ht), total_ttc: Number(l.total_ttc),
         })),
-        payments: payments.map(p => ({
-          ...p, amount: Number(p.amount),
-          method_label: PAYMENT_METHOD_LABELS[p.method_code] || p.method_label || p.method_code,
-        })),
+        payments: paymentsOut,
+        credits_applied: creditsOut,
+        timeline,
         audit: auditRows.map(r => ({
           ...r,
           before_snapshot: r.before_snapshot ? safeParse(r.before_snapshot) : null,
@@ -524,22 +576,28 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
   });
 
   // ═══════════════════════════════════════════════════════════
-  // PAY — encaissement manuel d'une facture impayée
+  // PAY — encaissement manuel (mono ou multi-méthode / fractionné)
+  // Payload : { reason, bank_account, date, splits:[{method, amount, num_payment?}] }
+  // Rétro-compat : { reason, method, amount, bank_account, num_payment } accepté.
   // ═══════════════════════════════════════════════════════════
   router.post('/:id/pay', auth, noCsrf, async (req, res) => {
     const id = parseInt(req.params.id);
     const reason = nonEmptyReason(req.body?.reason);
-    const amountRaw = Number(req.body?.amount);
-    const method = String(req.body?.method || '').toUpperCase();
     const bankAccount = parseInt(req.body?.bank_account);
     const datepRaw = req.body?.date || new Date().toISOString().split('T')[0];
     const datepUnix = Math.floor(new Date(`${datepRaw}T12:00:00Z`).getTime() / 1000);
-    const numPayment = String(req.body?.num_payment || '').slice(0, 64);
+
+    // Normalisation : splits[] sinon repli sur le format mono-méthode historique.
+    const splits = normalizeSplits(req.body);
 
     if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
-    if (!PAYMENT_METHODS_ALLOWED.has(method)) return res.status(400).json({ error: 'Méthode de paiement invalide', received: req.body?.method });
     if (!bankAccount) return res.status(400).json({ error: 'Compte bancaire requis', received: req.body?.bank_account });
-    if (!(amountRaw > 0)) return res.status(400).json({ error: 'Montant invalide', received: req.body?.amount });
+    if (!splits.length) return res.status(400).json({ error: 'Au moins une ligne de paiement requise' });
+    for (const s of splits) {
+      if (!PAYMENT_METHODS_ALLOWED.has(s.method)) return res.status(400).json({ error: 'Méthode de paiement invalide', received: s.method });
+      if (!(s.amount > 0)) return res.status(400).json({ error: 'Montant invalide', received: s.amount });
+    }
+    const totalSplit = splits.reduce((sum, s) => sum + s.amount, 0);
 
     try {
       const before = await loadInvoiceRow(dolibarrPool, id);
@@ -550,26 +608,14 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
       const { paid: alreadyPaid } = await sumPayments(dolibarrPool, id);
       const remaining = Number(before.total_ttc) - alreadyPaid;
-      if (amountRaw > remaining + 0.01) {
-        return res.status(400).json({ error: `Montant supérieur au reste à payer (${remaining})` });
+      if (totalSplit > remaining + 0.01) {
+        return res.status(400).json({ error: `Montant total (${totalSplit}) supérieur au reste à payer (${remaining})` });
       }
 
-      const paymentId = await resolvePaymentId(dolibarrPool, method);
-      if (!paymentId) return res.status(400).json({ error: `Code paiement inconnu dans Dolibarr`, received: method });
+      const paymentIds = await recordSplitPayments(dolibarrPool, id, splits, bankAccount, datepUnix, `Régularisation libraire — ${reason}`);
 
-      // Création du paiement via API Dolibarr (gère llx_paiement + llx_paiement_facture + llx_bank)
-      const payRes = await adminApi.post(`/invoices/${id}/payments`, {
-        datepaye: datepUnix,
-        paymentid: paymentId,
-        closepaidinvoices: 'yes',
-        accountid: bankAccount,
-        num_payment: numPayment || undefined,
-        comment: `Régularisation libraire — ${reason}`,
-      });
-
-      // Si paiement couvre tout, marquer la facture soldée (au cas où l'API
-      // n'aurait pas posé paye=1 automatiquement).
-      if (Math.abs(remaining - amountRaw) < 0.01) {
+      // Si l'encaissement solde la facture, forcer paye=1 (l'API ne le fait pas toujours).
+      if (Math.abs(remaining - totalSplit) < 0.01) {
         try { await adminApi.post(`/invoices/${id}/settopaid`); } catch (e) { void e; }
       }
 
@@ -578,9 +624,10 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         admin: req.admin, fk_facture: id, ref_facture: before.ref,
         action: 'pay', reason,
         before: { fk_statut: before.fk_statut, paye: before.paye, paid_before: alreadyPaid },
-        after:  { fk_statut: after?.fk_statut, paye: after?.paye, amount: amountRaw, method, bank_account: bankAccount, payment_id: payRes.data },
+        after:  { fk_statut: after?.fk_statut, paye: after?.paye, total_amount: totalSplit, bank_account: bankAccount,
+                  splits: splits.map(s => ({ method: s.method, amount: s.amount })), payment_ids: paymentIds },
       });
-      res.json({ success: true, payment_id: payRes.data });
+      res.json({ success: true, payment_ids: paymentIds, total: totalSplit });
     } catch (err) {
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] pay error:', msg);
@@ -804,12 +851,230 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
     }
   });
 
+  // ═══════════════════════════════════════════════════════════
+  // CREDITS DISPONIBLES — acomptes/avoirs non encore imputés d'un client
+  // (3 segments → aucune collision avec /:id ni /customers/search)
+  // ═══════════════════════════════════════════════════════════
+  router.get('/customers/:socid/credits', auth, async (req, res) => {
+    try {
+      const socid = parseInt(req.params.socid);
+      if (!socid) return res.status(400).json({ error: 'Client invalide' });
+      const [rows] = await dolibarrPool.query(
+        `SELECT re.rowid AS id, re.amount_ttc, re.amount_ht, re.tva_tx, re.description,
+                DATE_FORMAT(re.datec, '%Y-%m-%d') AS datec,
+                fs.ref AS source_ref, fs.type AS source_type
+         FROM llx_societe_remise_except re
+         LEFT JOIN llx_facture fs ON fs.rowid = re.fk_facture_source
+         WHERE re.fk_soc = ? AND re.discount_type = 0
+           AND re.fk_facture IS NULL AND re.fk_invoice_supplier IS NULL
+         ORDER BY re.datec DESC, re.rowid DESC`, [socid]
+      );
+      res.json({
+        credits: rows.map(r => ({
+          id: r.id,
+          amount: Number(r.amount_ttc),
+          amount_ht: Number(r.amount_ht),
+          tva_tx: Number(r.tva_tx),
+          kind: r.source_type === 3 ? 'deposit' : (r.source_type === 2 ? 'credit_note' : 'discount'),
+          label: r.source_type === 3 ? 'Acompte' : (r.source_type === 2 ? 'Avoir' : 'Remise'),
+          source_ref: r.source_ref || null,
+          description: r.description || null,
+          date: r.datec,
+        })),
+      });
+    } catch (err) {
+      console.error('[INVOICES] credits error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement des crédits disponibles' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // DEPOSIT — créer une facture d'acompte (type=3), l'encaisser et la
+  // convertir en avoir disponible (DEPOSIT), prêt à imputer sur la finale.
+  // Body : { socid, amount, tva_tx?, date?, reason, pay?:{ splits, bank_account } }
+  // ═══════════════════════════════════════════════════════════
+  router.post('/deposit', auth, noCsrf, async (req, res) => {
+    const reason = nonEmptyReason(req.body?.reason);
+    const socid = parseInt(req.body?.socid);
+    const amount = Number(req.body?.amount);
+    const tvaTx = Number(req.body?.tva_tx) || 0;
+    const dateRaw = req.body?.date || new Date().toISOString().split('T')[0];
+
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+    if (!socid) return res.status(400).json({ error: 'Client requis' });
+    if (!(amount > 0)) return res.status(400).json({ error: 'Montant de l\'acompte invalide' });
+
+    try {
+      const [[customer]] = await dolibarrPool.query(
+        'SELECT rowid, nom FROM llx_societe WHERE rowid = ? AND (client = 1 OR client = 3)', [socid]
+      );
+      if (!customer) return res.status(404).json({ error: 'Client introuvable ou non actif' });
+
+      // Le montant saisi est le TTC encaissé → subprice HT déduit de la TVA.
+      const subpriceHt = Math.round((amount / (1 + tvaTx / 100)) * 100) / 100;
+
+      // 1. Création de la facture d'acompte (type 3).
+      const createRes = await adminApi.post('/invoices', {
+        socid,
+        date: dateRaw,
+        type: 3,
+        lines: [{
+          desc: `Acompte — ${reason}`,
+          subprice: subpriceHt,
+          qty: 1,
+          tva_tx: tvaTx,
+          product_type: 0,
+        }],
+        note_private: `Acompte saisi par ${req.admin.username} — ${reason}`,
+      });
+      const depositId = createRes.data;
+
+      // 2. Validation.
+      await adminApi.post(`/invoices/${depositId}/validate`);
+
+      // 3. Encaissement optionnel (multi-méthode).
+      let paymentIds = [];
+      const pay = req.body?.pay;
+      if (pay && Array.isArray(pay.splits) && pay.splits.length) {
+        const bankAccount = parseInt(pay.bank_account);
+        if (!bankAccount) return res.status(400).json({ error: 'Compte bancaire requis pour l\'encaissement' });
+        const splits = normalizeSplits({ splits: pay.splits });
+        for (const s of splits) {
+          if (!PAYMENT_METHODS_ALLOWED.has(s.method)) return res.status(400).json({ error: 'Méthode de paiement invalide', received: s.method });
+        }
+        const datepUnix = Math.floor(new Date(`${dateRaw}T12:00:00Z`).getTime() / 1000);
+        paymentIds = await recordSplitPayments(dolibarrPool, depositId, splits, bankAccount, datepUnix, `Encaissement acompte — ${reason}`);
+      }
+
+      // 4. Conversion en avoir disponible (DEPOSIT) — idempotent côté Dolibarr.
+      await adminApi.post(`/invoices/${depositId}/markAsCreditAvailable`);
+
+      // 5. Récupération de l'id du crédit créé (pour imputation immédiate éventuelle).
+      let discountId = null;
+      try {
+        const disc = await adminApi.get(`/invoices/${depositId}/discount`);
+        discountId = disc.data?.id || null;
+      } catch (e) { void e; }
+
+      const depositRow = await loadInvoiceRow(dolibarrPool, depositId);
+      writeAudit(db, {
+        admin: req.admin, fk_facture: depositId, ref_facture: depositRow?.ref,
+        action: 'deposit_create', reason,
+        before: null,
+        after: { socid, customer: customer.nom, amount, tva_tx: tvaTx, payment_ids: paymentIds, discount_id: discountId },
+      });
+
+      res.json({ success: true, deposit_id: depositId, deposit_ref: depositRow?.ref, discount_id: discountId, payment_ids: paymentIds });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('[INVOICES] deposit error:', msg);
+      res.status(err.statusCode || 500).json({ error: 'Erreur création acompte', detail: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // APPLY-CREDIT — imputer un acompte/avoir disponible sur une facture
+  // finale (réduit le reste à payer via une ligne de remise négative).
+  // Body : { discountid, reason }
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/apply-credit', auth, noCsrf, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const reason = nonEmptyReason(req.body?.reason);
+    const discountId = parseInt(req.body?.discountid);
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+    if (!discountId) return res.status(400).json({ error: 'Crédit à imputer requis' });
+
+    try {
+      const before = await loadInvoiceRow(dolibarrPool, id);
+      if (!before) return res.status(404).json({ error: 'Facture introuvable' });
+      if (before.fk_statut < 1) return res.status(409).json({ error: 'La facture doit être validée pour imputer un crédit' });
+      if (before.paye === 1) return res.status(409).json({ error: 'Facture déjà soldée' });
+      if (before.type === 2) return res.status(409).json({ error: 'Impossible d\'imputer un crédit sur un avoir' });
+
+      // Le crédit doit appartenir au même client et être disponible (non imputé).
+      const [[credit]] = await dolibarrPool.query(
+        `SELECT re.rowid, re.fk_soc, re.amount_ttc, re.fk_facture, re.description,
+                fs.type AS source_type
+         FROM llx_societe_remise_except re
+         LEFT JOIN llx_facture fs ON fs.rowid = re.fk_facture_source
+         WHERE re.rowid = ?`, [discountId]
+      );
+      if (!credit) return res.status(404).json({ error: 'Crédit introuvable' });
+      if (credit.fk_facture) return res.status(409).json({ error: 'Ce crédit a déjà été imputé' });
+      if (Number(credit.fk_soc) !== Number(before.fk_soc)) {
+        return res.status(409).json({ error: 'Le crédit appartient à un autre client' });
+      }
+
+      // Acompte (DEPOSIT) → ligne de remise (usediscount). Avoir (CREDIT_NOTE) →
+      // imputé comme paiement (usecreditnote). On se base sur le type de la source.
+      const isCreditNote = credit.source_type === 2 || /CREDIT_NOTE/i.test(credit.description || '');
+      const endpoint = isCreditNote
+        ? `/invoices/${id}/usecreditnote/${discountId}`
+        : `/invoices/${id}/usediscount/${discountId}`;
+      await adminApi.post(endpoint);
+      const after = await loadInvoiceRow(dolibarrPool, id);
+
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: before.ref,
+        action: 'apply_credit', reason,
+        before: { fk_statut: before.fk_statut, total_ttc: Number(before.total_ttc) },
+        after: { discount_id: discountId, amount: Number(credit.amount_ttc), total_ttc: Number(after?.total_ttc) },
+      });
+      res.json({ success: true, amount: Number(credit.amount_ttc) });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('[INVOICES] apply-credit error:', msg);
+      res.status(500).json({ error: 'Erreur imputation du crédit', detail: msg });
+    }
+  });
+
   return router;
 }
 
 // ─── INTERNAL HELPERS ────────────────────────────────────────
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+// Normalise un corps de requête de paiement vers un tableau de splits
+// [{ method, amount, num_payment }]. Accepte le format multi-méthode (splits[])
+// comme l'ancien format mono-méthode ({ method, amount, num_payment }).
+function normalizeSplits(body) {
+  const raw = Array.isArray(body?.splits) && body.splits.length
+    ? body.splits
+    : [{ method: body?.method, amount: body?.amount, num_payment: body?.num_payment }];
+  return raw
+    .map(s => ({
+      method: String(s?.method || '').toUpperCase(),
+      amount: Number(s?.amount),
+      num_payment: String(s?.num_payment || '').slice(0, 64),
+    }))
+    .filter(s => s.method && s.amount > 0);
+}
+
+// Enregistre N paiements (un par split / méthode) sur une facture via l'API
+// Dolibarr. Chaque appel crée une ligne llx_paiement + llx_paiement_facture + banque.
+// closepaidinvoices='yes' ne solde la facture qu'au reste atteint = 0.
+async function recordSplitPayments(pool, invoiceId, splits, bankAccount, datepUnix, comment) {
+  const ids = [];
+  for (const s of splits) {
+    const paymentId = await resolvePaymentId(pool, s.method);
+    if (!paymentId) {
+      const err = new Error(`Code paiement inconnu dans Dolibarr : ${s.method}`);
+      err.statusCode = 400;
+      throw err;
+    }
+    const r = await adminApi.post(`/invoices/${invoiceId}/payments`, {
+      datepaye: datepUnix,
+      paymentid: paymentId,
+      closepaidinvoices: 'yes',
+      accountid: bankAccount,
+      num_payment: s.num_payment || undefined,
+      comment,
+    });
+    ids.push(r.data);
+  }
+  return ids;
+}
 
 // Dolibarr v21 exige un id entier pour paymentid ; on résout dynamiquement
 // le code (LIQ/CB/CHQ/WAVE/OM/VIR) en id via llx_c_paiement, avec un cache mémoire.

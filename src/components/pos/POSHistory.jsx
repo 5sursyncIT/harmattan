@@ -6,7 +6,7 @@ import './POSHistory.css';
 
 const PAGE_SIZES = [25, 50, 100];
 
-export default function POSHistory({ onClose, onReturn }) {
+export default function POSHistory({ onClose, onReturn, onSettle }) {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -161,9 +161,24 @@ export default function POSHistory({ onClose, onReturn }) {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {rows.map((r) => {
+                  const isUnpaid = r.paid != 1;
+                  const isPartial = isUnpaid && Number(r.paid_amount) > 0;
+                  const canSettle = isUnpaid && onSettle && r.type != 2;
+                  return (
                   <tr key={r.id}>
-                    <td className="ref">{r.ref}</td>
+                    <td className="ref">
+                      {canSettle ? (
+                        <button
+                          type="button"
+                          className="pos-history-ref-link"
+                          onClick={() => { onSettle(r.ref); onClose(); }}
+                          title="Ouvrir / encaisser cette facture"
+                        >
+                          {r.ref}
+                        </button>
+                      ) : r.ref}
+                    </td>
                     <td>{fmtDate(r.date)}</td>
                     <td>{fmtDate(r.date_due)}</td>
                     <td>{r.customer_name || 'Client comptoir'}</td>
@@ -171,8 +186,8 @@ export default function POSHistory({ onClose, onReturn }) {
                     <td className="num strong">{fmtMoney(r.total_ttc)}</td>
                     <td>{r.creator_name || '—'}</td>
                     <td>
-                      <span className={`pos-history-status ${r.paid == 1 ? 'paid' : 'unpaid'}`}>
-                        {r.paid == 1 ? 'Payée' : 'Impayée'}
+                      <span className={`pos-history-status ${r.paid == 1 ? 'paid' : isPartial ? 'partial' : 'unpaid'}`}>
+                        {r.paid == 1 ? 'Payée' : isPartial ? 'Partiel' : 'Impayée'}
                       </span>
                     </td>
                     <td className="actions">
@@ -194,7 +209,8 @@ export default function POSHistory({ onClose, onReturn }) {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}

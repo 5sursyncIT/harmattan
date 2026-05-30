@@ -3,12 +3,13 @@ import { Link } from 'react-router-dom';
 import {
   FiFileText, FiDollarSign, FiRefreshCw, FiEdit, FiTrash2, FiUser,
   FiCornerUpLeft, FiX, FiAlertTriangle, FiList, FiCalendar, FiPrinter,
-  FiDownload, FiSearch,
+  FiDownload, FiSearch, FiPlusCircle, FiPlus, FiGift,
 } from 'react-icons/fi';
 import {
-  listInvoices, getInvoice, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
+  listInvoices, getInvoice, getInvoicePdf, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
   payInvoice, createCreditNote, setInvoiceToDraft,
   reassignInvoiceCustomer, deleteInvoiceDraft,
+  getCustomerCredits, createDeposit, applyCredit,
 } from '../../../api/invoices';
 import { formatPrice } from '../../../utils/formatters';
 import {
@@ -38,9 +39,15 @@ const SOURCE_OPTIONS = [
   { value: 'direct',  label: 'Direct' },
 ];
 
-function statusBadge(status, paid) {
+function statusBadge(status, paid, paidAmount = 0) {
   if (status === 0) return <span className="ac-badge ac-badge-draft">Brouillon</span>;
-  if (status === 1 && !paid) return <span className="ac-badge ac-badge-unpaid">Impayée</span>;
+  if (status === 1 && !paid) {
+    // Dolibarr garde paye=0 tant que la facture n'est pas soldée à 100 %.
+    // On distingue le paiement partiel pour éviter la confusion « impayée alors
+    // qu'un acompte/règlement est déjà encaissé ».
+    if (Number(paidAmount) > 0) return <span className="ac-badge ac-badge-partial">Partiellement payée</span>;
+    return <span className="ac-badge ac-badge-unpaid">Impayée</span>;
+  }
   if (status === 2 || paid) return <span className="ac-badge ac-badge-paid">Payée</span>;
   if (status === 3) return <span className="ac-badge ac-badge-cancel">Abandonnée</span>;
   return <span className="ac-badge">?</span>;
@@ -60,6 +67,7 @@ export default function InvoicesPanel() {
   const [selected, setSelected] = useState(null); // facture en cours d'inspection
   const [actionModal, setActionModal] = useState(null); // { type, invoice }
   const [reportModal, setReportModal] = useState(null); // 'daily' | 'monthly'
+  const [depositModal, setDepositModal] = useState(false); // modale création acompte
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -88,6 +96,9 @@ export default function InvoicesPanel() {
           <FiFileText /> Factures ({data.total})
         </h3>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-primary" onClick={() => setDepositModal(true)}>
+            <FiPlusCircle size={14} /> Acompte
+          </button>
           <button className="btn btn-outline" onClick={() => setReportModal('daily')}>
             <FiCalendar size={14} /> Rapport journalier
           </button>
@@ -205,7 +216,7 @@ export default function InvoicesPanel() {
                     <td className="ac-amount" style={{ color: inv.remaining > 0 ? '#9a3412' : '#10531a' }}>
                       {formatPrice(inv.remaining)}
                     </td>
-                    <td>{statusBadge(inv.status, inv.paid)}</td>
+                    <td>{statusBadge(inv.status, inv.paid, inv.paid_amount)}</td>
                     <td style={{ textAlign: 'right' }}>
                       <InvoiceActions invoice={inv} onAction={(type) => setActionModal({ type, invoice: inv })} />
                     </td>
@@ -247,6 +258,10 @@ export default function InvoicesPanel() {
 
       {reportModal && (
         <ReportModal kind={reportModal} onClose={() => setReportModal(null)} />
+      )}
+
+      {depositModal && (
+        <DepositModal onClose={() => setDepositModal(false)} onDone={() => { setDepositModal(false); reload(); }} />
       )}
     </div>
   );
@@ -350,9 +365,10 @@ function InvoiceActions({ invoice, onAction }) {
       list.push({ key: 'delete',   label: 'Supprimer brouillon', icon: <FiTrash2 />, danger: true });
     }
     if (invoice.status === 1 && !invoice.paid && !isCredit) {
-      list.push({ key: 'pay',         label: 'Marquer payée', icon: <FiDollarSign /> });
-      list.push({ key: 'settodraft',  label: 'Repasser en brouillon', icon: <FiCornerUpLeft />, danger: true });
-      list.push({ key: 'credit-note', label: 'Créer un avoir', icon: <FiRefreshCw />, danger: true });
+      list.push({ key: 'pay',          label: 'Encaisser', icon: <FiDollarSign /> });
+      list.push({ key: 'apply-credit', label: 'Imputer un acompte / avoir', icon: <FiGift /> });
+      list.push({ key: 'settodraft',   label: 'Repasser en brouillon', icon: <FiCornerUpLeft />, danger: true });
+      list.push({ key: 'credit-note',  label: 'Créer un avoir', icon: <FiRefreshCw />, danger: true });
     }
     if ((invoice.status === 2 || invoice.paid) && !isCredit) {
       list.push({ key: 'credit-note', label: 'Créer un avoir', icon: <FiRefreshCw />, danger: true });
@@ -378,6 +394,34 @@ function InvoiceActions({ invoice, onAction }) {
 
 // ─── Modal détail facture ───────────────────────────────────
 function InvoiceDetailModal({ data, onClose, onAction }) {
+  const [downloading, setDownloading] = useState(false);
+
+  const downloadPdf = async (invoice) => {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const res = await getInvoicePdf(invoice.id);
+      const url = window.URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${invoice.ref || `facture-${invoice.id}`}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      // Le backend renvoie un JSON d'erreur (en blob) — on tente de le lire.
+      let msg = 'Échec du téléchargement du PDF';
+      try {
+        const txt = await err.response?.data?.text?.();
+        if (txt) msg = JSON.parse(txt).error || msg;
+      } catch { /* garde le message par défaut */ }
+      toast.error(msg);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   if (data.loading) {
     return (
       <ModalShell onClose={onClose} title="Chargement…">
@@ -385,19 +429,40 @@ function InvoiceDetailModal({ data, onClose, onAction }) {
       </ModalShell>
     );
   }
-  const { invoice, lines, payments, audit } = data;
+  const { invoice, lines, timeline = [], audit } = data;
+  const totalTtc = Number(invoice.total_ttc) || 0;
+  const paidAmount = Number(invoice.paid_amount) || 0;
+  const remaining = invoice.remaining != null ? Number(invoice.remaining) : totalTtc - paidAmount;
+  const pct = totalTtc > 0 ? Math.min(100, Math.round((paidAmount / totalTtc) * 100)) : 0;
+  const isCreditNote = invoice.type === 2;
   return (
     <ModalShell onClose={onClose} title={`Facture ${invoice.ref || `#${invoice.id}`}`} wide>
       <div className="ac-detail-grid">
         <div><strong>Client :</strong> {invoice.customer_name || '—'}</div>
         <div><strong>Date :</strong> {fmtDate(invoice.datef)}</div>
         <div><strong>Échéance :</strong> {fmtDate(invoice.date_lim_reglement)}</div>
-        <div><strong>Statut :</strong> {statusBadge(invoice.fk_statut, !!invoice.paye)}</div>
+        <div><strong>Statut :</strong> {statusBadge(invoice.fk_statut, !!invoice.paye, paidAmount)}</div>
         <div><strong>Source :</strong> {invoice.source}</div>
         <div><strong>Total TTC :</strong> {formatPrice(invoice.total_ttc)}</div>
-        <div><strong>Payé :</strong> {formatPrice(invoice.paid_amount)}</div>
-        <div><strong>Reste :</strong> {formatPrice(Number(invoice.total_ttc) - Number(invoice.paid_amount))}</div>
       </div>
+
+      {/* Progression payé / reste à payer */}
+      {!isCreditNote && (
+        <div className="ac-progress-block">
+          <div className="ac-progress-head">
+            <span>Payé : <strong>{formatPrice(paidAmount)}</strong></span>
+            <span>Reste : <strong style={{ color: remaining > 0 ? '#9a3412' : '#10531a' }}>{formatPrice(remaining)}</strong></span>
+          </div>
+          <div className="ac-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
+            aria-label={`Facture payée à ${pct}%`}>
+            <div className={`ac-progress-bar ${remaining <= 0 ? 'full' : ''}`} style={{ width: `${pct}%` }} />
+          </div>
+          <div className="ac-progress-sub">
+            {pct}% encaissé
+            {Number(invoice.paid_credits) > 0 && <> · dont {formatPrice(invoice.paid_credits)} en acomptes/avoirs imputés</>}
+          </div>
+        </div>
+      )}
 
       <h4 style={{ marginTop: 16 }}>Lignes</h4>
       <div className="ac-table-wrap">
@@ -418,24 +483,36 @@ function InvoiceDetailModal({ data, onClose, onAction }) {
         </table>
       </div>
 
-      <h4 style={{ marginTop: 16 }}>Paiements imputés</h4>
-      <div className="ac-table-wrap">
-        <table className="ac-table">
-          <thead><tr><th>Date</th><th className="ac-amount">Montant</th><th>Méthode</th><th>Banque</th><th>Référence</th></tr></thead>
-          <tbody>
-            {payments.map((p, i) => (
-              <tr key={i}>
-                <td className="ac-date">{fmtDate(p.datep)}</td>
-                <td className="ac-amount">{formatPrice(p.amount)}</td>
-                <td>{p.method_label}</td>
-                <td>{p.bank_label || '—'}</td>
-                <td style={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{p.num_paiement || '—'}</td>
-              </tr>
-            ))}
-            {payments.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: '#94a3b8', padding: 16 }}>Aucun paiement</td></tr>}
-          </tbody>
-        </table>
-      </div>
+      <h4 style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <FiDollarSign /> Historique des paiements &amp; imputations
+      </h4>
+      {timeline.length === 0 ? (
+        <p style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Aucun paiement ni acompte imputé.</p>
+      ) : (
+        <div className="ac-timeline">
+          {timeline.map((e, i) => (
+            <div key={i} className={`ac-timeline-item kind-${e.kind}`}>
+              <div className="ac-timeline-dot" />
+              <div className="ac-timeline-body">
+                <div className="ac-timeline-row1">
+                  <span className="ac-timeline-amount">{formatPrice(e.amount)}</span>
+                  {e.kind === 'payment'
+                    ? <span className={`ac-method-pill ac-method-${e.method_code || 'default'}`}>{e.label}</span>
+                    : <span className="ac-credit-pill">{e.label}{e.source_ref ? ` · ${e.source_ref}` : ''}</span>}
+                  <span className="ac-timeline-date">{fmtDate(e.date)}</span>
+                </div>
+                <div className="ac-timeline-row2">
+                  {e.kind === 'payment' && e.bank_label && <span>{e.bank_label}</span>}
+                  {e.kind === 'payment' && e.num && <span className="ac-timeline-ref">Réf. {e.num}</span>}
+                  <span className="ac-timeline-remaining">
+                    Reste après : <strong>{formatPrice(e.running_remaining)}</strong>
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <h4 style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 6 }}>
         <FiList /> Historique des régularisations
@@ -455,6 +532,14 @@ function InvoiceDetailModal({ data, onClose, onAction }) {
       </div>
 
       <div className="ac-modal-footer">
+        <button
+          type="button"
+          className="btn btn-outline"
+          onClick={() => downloadPdf(invoice)}
+          disabled={downloading}
+        >
+          <FiDownload /> {downloading ? 'Génération…' : 'Télécharger PDF'}
+        </button>
         <InvoiceActions invoice={{ ...invoice, id: invoice.id, status: invoice.fk_statut, paid: !!invoice.paye, type: invoice.type }}
           onAction={(type) => onAction(type, { ...invoice, id: invoice.id, status: invoice.fk_statut, paid: !!invoice.paye, type: invoice.type, ref: invoice.ref })} />
       </div>
@@ -493,6 +578,7 @@ function ActionModal({ type, invoice, onClose, onDone }) {
 
         {type === 'pay' && <PayFields invoice={invoice} extra={extra} setExtra={setExtra} />}
         {type === 'reassign' && <ReassignFields extra={extra} setExtra={setExtra} />}
+        {type === 'apply-credit' && <ApplyCreditFields invoice={invoice} extra={extra} setExtra={setExtra} />}
 
         <label className="ac-form-label">Motif de la régularisation <span style={{ color: '#dc2626' }}>*</span></label>
         <textarea
@@ -518,51 +604,131 @@ function ActionModal({ type, invoice, onClose, onDone }) {
   );
 }
 
-// ─── Champs spécifiques au paiement manuel ──────────────────
+// ─── Méthodes de paiement autorisées (= PAYMENT_METHODS_ALLOWED backend) ──
+const PAY_METHODS = [
+  { code: 'LIQ', label: 'Espèces' },
+  { code: 'CB', label: 'Carte bancaire' },
+  { code: 'CHQ', label: 'Chèque' },
+  { code: 'WAVE', label: 'Wave' },
+  { code: 'OM', label: 'Orange Money' },
+  { code: 'VIR', label: 'Virement' },
+];
+
+// Saisie d'un encaissement fractionné multi-méthode (réutilisée pour la facture
+// et l'acompte). Gère la liste `splits` [{method, amount, num_payment}] dans extra.
+function SplitPaymentEditor({ remaining, extra, setExtra, banks, withBank = true }) {
+  const splits = extra.splits || [];
+  const totalSplit = splits.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const left = Math.round((remaining - totalSplit) * 100) / 100;
+
+  const setSplit = (i, patch) => {
+    const next = splits.map((s, j) => (j === i ? { ...s, ...patch } : s));
+    setExtra({ ...extra, splits: next });
+  };
+  const addSplit = () => setExtra({ ...extra, splits: [...splits, { method: '', amount: left > 0 ? left : 0, num_payment: '' }] });
+  const removeSplit = (i) => setExtra({ ...extra, splits: splits.filter((_, j) => j !== i) });
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {withBank && (
+        <div className="ac-form-grid" style={{ marginBottom: 10 }}>
+          <div>
+            <label className="ac-form-label">Compte bancaire *</label>
+            <select className="ac-form-select" required value={extra.bank_account || ''}
+              onChange={e => setExtra({ ...extra, bank_account: Number(e.target.value) })}>
+              <option value="">—</option>
+              {banks.map(b => <option key={b.id} value={b.id}>{b.label || b.ref}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="ac-form-label">Date</label>
+            <input type="date" className="ac-form-input"
+              value={extra.date || today()} onChange={e => setExtra({ ...extra, date: e.target.value })} />
+          </div>
+        </div>
+      )}
+
+      <label className="ac-form-label">Encaissement(s) {remaining != null && <>— reste à payer : {formatPrice(remaining)}</>}</label>
+      {splits.map((s, i) => (
+        <div key={i} className="ac-split-row">
+          <select className="ac-form-select" required value={s.method || ''}
+            onChange={e => setSplit(i, { method: e.target.value })}>
+            <option value="">Méthode…</option>
+            {PAY_METHODS.map(m => <option key={m.code} value={m.code}>{m.label}</option>)}
+          </select>
+          <input type="number" className="ac-form-input" step="1" min="1" placeholder="Montant"
+            value={s.amount ?? ''} onChange={e => setSplit(i, { amount: Number(e.target.value) })} />
+          <input type="text" className="ac-form-input" maxLength={64} placeholder="N° pièce (opt.)"
+            value={s.num_payment || ''} onChange={e => setSplit(i, { num_payment: e.target.value })} />
+          {splits.length > 1 && (
+            <button type="button" className="ac-mini-btn danger" title="Retirer" onClick={() => removeSplit(i)}><FiX /></button>
+          )}
+        </div>
+      ))}
+      <button type="button" className="btn btn-outline" style={{ marginTop: 6 }} onClick={addSplit}>
+        <FiPlus size={14} /> Ajouter une méthode
+      </button>
+      <div className="ac-split-summary">
+        <span>Total saisi : <strong>{formatPrice(totalSplit)}</strong></span>
+        {remaining != null && (
+          <span style={{ color: left < -0.01 ? '#b91c1c' : (left > 0.01 ? '#9a3412' : '#10531a') }}>
+            {left > 0.01 ? `Reste à couvrir : ${formatPrice(left)}`
+              : left < -0.01 ? `Dépasse de ${formatPrice(-left)}` : 'Solde complet ✓'}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Champs encaissement manuel de facture (multi-méthode) ──────────────
 function PayFields({ invoice, extra, setExtra }) {
   const [banks, setBanks] = useState([]);
   useEffect(() => { getInvoiceBanks().then(r => setBanks(r.data.accounts || [])); }, []);
-  const remaining = Number(invoice.total_ttc) - Number(invoice.paid_amount || 0);
+  const remaining = invoice.remaining != null
+    ? Number(invoice.remaining)
+    : Number(invoice.total_ttc) - Number(invoice.paid_amount || 0);
   useEffect(() => {
-    if (extra.amount == null) setExtra(prev => ({ ...prev, amount: remaining }));
+    if (!extra.splits) setExtra(prev => ({ ...prev, splits: [{ method: '', amount: remaining, num_payment: '' }], date: today() }));
   }, [remaining]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <SplitPaymentEditor remaining={remaining} extra={extra} setExtra={setExtra} banks={banks} />;
+}
+
+// ─── Champs imputation d'un acompte / avoir disponible ──────────────────
+function ApplyCreditFields({ invoice, extra, setExtra }) {
+  const socid = invoice.customer_id ?? invoice.fk_soc;
+  const [credits, setCredits] = useState(null);
+  const remaining = invoice.remaining != null
+    ? Number(invoice.remaining)
+    : Number(invoice.total_ttc) - Number(invoice.paid_amount || 0);
+
+  useEffect(() => {
+    if (!socid) { setCredits([]); return; }
+    getCustomerCredits(socid)
+      .then(r => setCredits(r.data.credits || []))
+      .catch(() => setCredits([]));
+  }, [socid]);
+
+  if (credits === null) return <Loader />;
+  if (credits.length === 0) {
+    return <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginBottom: 12 }}>
+      Aucun acompte ni avoir disponible pour ce client. Créez d'abord un acompte.
+    </p>;
+  }
   return (
-    <div className="ac-form-grid">
-      <div>
-        <label className="ac-form-label">Montant *</label>
-        <input type="number" className="ac-form-input" step="1" min="1" max={remaining}
-          required value={extra.amount ?? remaining}
-          onChange={e => setExtra({ ...extra, amount: Number(e.target.value) })} />
-        <div style={{ fontSize: '0.7rem', color: '#64748b' }}>Reste à payer : {formatPrice(remaining)}</div>
-      </div>
-      <div>
-        <label className="ac-form-label">Méthode *</label>
-        <select className="ac-form-select" required value={extra.method || ''} onChange={e => setExtra({ ...extra, method: e.target.value })}>
-          <option value="">—</option>
-          <option value="LIQ">Espèces</option>
-          <option value="CB">Carte bancaire</option>
-          <option value="CHQ">Chèque</option>
-          <option value="WAVE">Wave</option>
-          <option value="OM">Orange Money</option>
-          <option value="VIR">Virement</option>
-        </select>
-      </div>
-      <div>
-        <label className="ac-form-label">Compte bancaire *</label>
-        <select className="ac-form-select" required value={extra.bank_account || ''} onChange={e => setExtra({ ...extra, bank_account: Number(e.target.value) })}>
-          <option value="">—</option>
-          {banks.map(b => <option key={b.id} value={b.id}>{b.label || b.ref}</option>)}
-        </select>
-      </div>
-      <div>
-        <label className="ac-form-label">Date</label>
-        <input type="date" className="ac-form-input"
-          value={extra.date || today()} onChange={e => setExtra({ ...extra, date: e.target.value })} />
-      </div>
-      <div style={{ gridColumn: '1 / -1' }}>
-        <label className="ac-form-label">N° de transaction (chèque, virement…)</label>
-        <input type="text" className="ac-form-input" maxLength={64}
-          value={extra.num_payment || ''} onChange={e => setExtra({ ...extra, num_payment: e.target.value })} />
+    <div style={{ marginBottom: 12 }}>
+      <label className="ac-form-label">Crédit à imputer * <span style={{ color: '#64748b', fontWeight: 400 }}>(reste à payer : {formatPrice(remaining)})</span></label>
+      <div className="ac-credit-list">
+        {credits.map(c => (
+          <label key={c.id} className={`ac-credit-choice ${extra.discountid === c.id ? 'active' : ''}`}>
+            <input type="radio" name="credit" value={c.id}
+              checked={extra.discountid === c.id}
+              onChange={() => setExtra({ ...extra, discountid: c.id })} />
+            <span className="ac-credit-pill">{c.label}</span>
+            <span className="ac-credit-amount">{formatPrice(c.amount)}</span>
+            <span className="ac-credit-meta">{c.source_ref || ''} · {fmtDate(c.date)}</span>
+          </label>
+        ))}
       </div>
     </div>
   );
@@ -612,15 +778,154 @@ function ReassignFields({ extra, setExtra }) {
   );
 }
 
+// ─── Modale de création d'un acompte (facture type 3) ───────
+function DepositModal({ onClose, onDone }) {
+  const [banks, setBanks] = useState([]);
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [socid, setSocid] = useState(null);
+  const [customerLabel, setCustomerLabel] = useState('');
+  const [amount, setAmount] = useState('');
+  const [tvaTx, setTvaTx] = useState(0);
+  const [dateIso, setDateIso] = useState(today());
+  const [reason, setReason] = useState('');
+  const [encash, setEncash] = useState(true);
+  const [extra, setExtra] = useState({ splits: [], bank_account: '', date: today() });
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => { getInvoiceBanks().then(r => setBanks(r.data.accounts || [])); }, []);
+  useEffect(() => {
+    if (q.length < 2) { setResults([]); return; }
+    const t = setTimeout(() => { searchInvoiceCustomers(q).then(r => setResults(r.data.customers || [])); }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Pré-remplit l'encaissement avec le montant de l'acompte.
+  const amt = Number(amount) || 0;
+  useEffect(() => {
+    if (encash && amt > 0 && (!extra.splits || extra.splits.length === 0)) {
+      setExtra(e => ({ ...e, splits: [{ method: '', amount: amt, num_payment: '' }] }));
+    }
+  }, [encash, amt]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!socid) { toast.error('Sélectionnez un client'); return; }
+    if (!(amt > 0)) { toast.error('Montant de l\'acompte invalide'); return; }
+    if (reason.trim().length < 4) { toast.error('Motif requis (min 4 caractères)'); return; }
+    let pay;
+    if (encash) {
+      const splits = (extra.splits || []).filter(s => s.method && Number(s.amount) > 0);
+      if (!splits.length) { toast.error('Ajoutez une méthode d\'encaissement'); return; }
+      if (!extra.bank_account) { toast.error('Compte bancaire requis'); return; }
+      pay = { splits, bank_account: extra.bank_account };
+    }
+    setSubmitting(true);
+    try {
+      await createDeposit({ socid, amount: amt, tva_tx: Number(tvaTx) || 0, date: dateIso, reason: reason.trim(), pay });
+      toast.success('Acompte créé');
+      onDone();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || err.response?.data?.error || 'Erreur création acompte');
+    } finally { setSubmitting(false); }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Nouvel acompte">
+      <form onSubmit={submit}>
+        <div className="ac-modal-warning">
+          <FiAlertTriangle /> Crée une facture d'acompte convertie en avoir disponible, imputable ensuite sur la facture finale du client.
+        </div>
+
+        {/* Client */}
+        <div style={{ position: 'relative', marginBottom: 12 }}>
+          <label className="ac-form-label">Client *</label>
+          <input type="text" className="ac-form-input"
+            placeholder="Rechercher par nom, code client ou email…"
+            value={customerLabel}
+            onChange={e => { setQ(e.target.value); setSocid(null); setCustomerLabel(e.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)} />
+          {open && results.length > 0 && (
+            <div className="ac-autocomplete">
+              {results.map(c => (
+                <button type="button" key={c.id} className="ac-autocomplete-item"
+                  onClick={() => { setSocid(c.id); setCustomerLabel(c.nom); setQ(''); setOpen(false); }}>
+                  <strong>{c.nom}</strong>
+                  <span style={{ color: '#64748b', fontSize: '0.75rem', marginLeft: 8 }}>{c.code_client || '—'} · {c.town || ''}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {socid && <div style={{ fontSize: '0.75rem', color: '#10531a', marginTop: 4 }}>✓ Client sélectionné</div>}
+        </div>
+
+        <div className="ac-form-grid">
+          <div>
+            <label className="ac-form-label">Montant de l'acompte (TTC) *</label>
+            <input type="number" className="ac-form-input" step="1" min="1" required
+              value={amount} onChange={e => setAmount(e.target.value)} />
+          </div>
+          <div>
+            <label className="ac-form-label">TVA (%)</label>
+            <input type="number" className="ac-form-input" step="0.1" min="0"
+              value={tvaTx} onChange={e => setTvaTx(e.target.value)} />
+          </div>
+          <div>
+            <label className="ac-form-label">Date</label>
+            <input type="date" className="ac-form-input" value={dateIso} max={today()} onChange={e => setDateIso(e.target.value)} />
+          </div>
+        </div>
+
+        <label className="ac-form-label" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+          <input type="checkbox" checked={encash} onChange={e => setEncash(e.target.checked)} />
+          Encaisser l'acompte maintenant
+        </label>
+        {encash && (
+          <SplitPaymentEditor remaining={amt > 0 ? amt : null} extra={extra} setExtra={setExtra} banks={banks} />
+        )}
+
+        <label className="ac-form-label">Motif <span style={{ color: '#dc2626' }}>*</span></label>
+        <textarea className="ac-form-textarea" rows={2} minLength={4} maxLength={500} required
+          placeholder="Ex : acompte de réservation commande client"
+          value={reason} onChange={e => setReason(e.target.value)} />
+
+        <div className="ac-modal-actions">
+          <button type="button" className="btn btn-outline" onClick={onClose} disabled={submitting}>Annuler</button>
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? '...' : 'Créer l\'acompte'}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
 // ─── Métadonnées des actions ───────────────────────────────
 const ACTION_META = {
   pay: {
-    title: 'Marquer la facture payée',
-    confirmLabel: 'Enregistrer le paiement',
-    warning: (inv) => `Enregistre un paiement manuel sur la facture ${inv.ref}. Le paiement sera comptabilisé dans le journal de banque.`,
+    title: 'Encaisser la facture',
+    confirmLabel: 'Enregistrer l\'encaissement',
+    warning: (inv) => `Enregistre un ou plusieurs paiements sur la facture ${inv.ref}. Les montants seront comptabilisés au journal de banque ; un encaissement partiel laisse la facture impayée.`,
     danger: false,
-    successMessage: 'Paiement enregistré',
-    run: (inv, reason, extra) => payInvoice(inv.id, { reason, ...extra }),
+    successMessage: 'Encaissement enregistré',
+    run: (inv, reason, extra) => {
+      const splits = (extra.splits || []).filter(s => s.method && Number(s.amount) > 0);
+      if (!splits.length) throw new Error('Ajoutez au moins une méthode de paiement');
+      if (!extra.bank_account) throw new Error('Compte bancaire requis');
+      return payInvoice(inv.id, { reason, bank_account: extra.bank_account, date: extra.date, splits });
+    },
+  },
+  'apply-credit': {
+    title: 'Imputer un acompte / avoir',
+    confirmLabel: 'Imputer le crédit',
+    warning: (inv) => `Le crédit sélectionné sera imputé sur la facture ${inv.ref} et réduira son reste à payer.`,
+    danger: false,
+    successMessage: 'Crédit imputé',
+    run: (inv, reason, extra) => {
+      if (!extra.discountid) throw new Error('Sélectionnez un crédit à imputer');
+      return applyCredit(inv.id, extra.discountid, reason);
+    },
   },
   'credit-note': {
     title: 'Créer un avoir (annulation)',
@@ -661,12 +966,14 @@ const ACTION_META = {
 
 function actionLabel(action) {
   return {
-    pay: 'Paiement manuel',
+    pay: 'Encaissement',
     credit_note: 'Avoir créé',
     settodraft: 'Repassée en brouillon',
     edit_lines: 'Lignes modifiées',
     reassign_customer: 'Client réassigné',
     delete: 'Brouillon supprimé',
+    deposit_create: 'Acompte créé',
+    apply_credit: 'Acompte / avoir imputé',
   }[action] || action;
 }
 

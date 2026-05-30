@@ -271,3 +271,32 @@
 .pos-payment-credit:hover:not(:disabled) { background: #fef3c7; }
 .pos-payment-credit:disabled { opacity: 0.5; cursor: not-allowed; }
 .pos-payment-credit-hint { text-align: center; font-size: 0.78rem; color: #94a3b8; margin: 6px 0 0; }
+
+.pos-payment-presse {
+  width: 100%; margin-top: 10px; padding: 14px; border-radius: 12px;
+  border: 2px solid #8b5cf6; background: #f5f3ff; color: #5b21b6;
+  font-size: 1rem; font-weight: 700; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.pos-payment-presse:hover:not(:disabled) { background: #ede9fe; }
+.pos-payment-presse:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pos-payment-presse-form {
+  width: 100%; margin-top: 10px; padding: 14px; border-radius: 12px;
+  border: 2px solid #8b5cf6; background: #f5f3ff;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.pos-payment-presse-form label { font-size: 0.85rem; font-weight: 700; color: #5b21b6; }
+.pos-presse-input {
+  width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #c4b5fd;
+  font-size: 1rem; box-sizing: border-box;
+}
+.pos-presse-input:focus { outline: none; border-color: #8b5cf6; box-shadow: 0 0 0 3px rgba(139,92,246,0.2); }
+.pos-presse-actions { display: flex; gap: 8px; }
+.pos-presse-actions .pos-payment-presse { margin-top: 0; flex: 1; }
+.pos-presse-cancel {
+  padding: 14px 18px; border-radius: 12px; border: 1px solid #cbd5e1;
+  background: #fff; color: #475569; font-weight: 700; font-size: 1rem; cursor: pointer;
+}
+.pos-presse-cancel:hover:not(:disabled) { background: #f1f5f9; }
+.pos-presse-cancel:disabled { opacity: 0.5; cursor: not-allowed; }

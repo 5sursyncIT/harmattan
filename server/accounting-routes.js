@@ -680,7 +680,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
              FROM llx_facturedet fd
              JOIN llx_facture f ON f.rowid = fd.fk_facture
              JOIN llx_product p ON p.rowid = fd.fk_product
-             WHERE f.fk_statut >= 1 AND fd.qty > 0
+             WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
                AND f.datef <= ?`,
             [isbnNorm, date_to]
@@ -688,7 +688,10 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           cumulativeUnits = Number(cumRow.units);
         }
 
-        // Ventes sur la période
+        // Ventes sur la période.
+        // fd.total_ht > 0 : exclut les exemplaires facturés à 0 F (service de
+        // presse, dons) — ils décrémentent le stock mais ne sont pas des ventes,
+        // donc ni comptés en unités ni dans l'assiette des royalties.
         const [[periodRow]] = await dolibarrPool.query(
           `SELECT COALESCE(SUM(fd.qty), 0) AS units_sold,
                   COALESCE(SUM(fd.total_ht), 0) AS gross_ht,
@@ -696,7 +699,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
            FROM llx_facturedet fd
            JOIN llx_facture f ON f.rowid = fd.fk_facture
            JOIN llx_product p ON p.rowid = fd.fk_product
-           WHERE f.fk_statut >= 1 AND fd.qty > 0
+           WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
              AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
              AND ${periodClause}`,
           [isbnNorm, ...periodParams]
@@ -819,7 +822,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
          JOIN llx_facture f ON f.rowid = fd.fk_facture
          JOIN llx_product p ON p.rowid = fd.fk_product
          LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
-         WHERE f.fk_statut >= 1 AND fd.qty > 0
+         WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
            AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
            AND f.datef BETWEEN ? AND ?
          ORDER BY f.datef DESC`,
@@ -961,7 +964,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
              FROM llx_facturedet fd
              JOIN llx_facture f ON f.rowid = fd.fk_facture
              JOIN llx_product p ON p.rowid = fd.fk_product
-             WHERE f.fk_statut >= 1 AND fd.qty > 0
+             WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
                AND f.datef BETWEEN ? AND ?`,
             [isbnNorm, d_from, d_to]
@@ -1028,7 +1031,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
              FROM llx_facturedet fd
              JOIN llx_facture f ON f.rowid = fd.fk_facture
              JOIN llx_product p ON p.rowid = fd.fk_product
-             WHERE f.fk_statut >= 1 AND fd.qty > 0
+             WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
                AND f.datef BETWEEN ? AND ?`,
             [isbnNorm, d_from, d_to]

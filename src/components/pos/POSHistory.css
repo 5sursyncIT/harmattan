@@ -352,6 +352,28 @@
   color: #b91c1c;
 }
 
+.pos-history-status.partial {
+  background: rgba(234, 88, 12, 0.14);
+  color: #9a3412;
+}
+
+/* Réf. cliquable (factures non soldées → ouvre l'encaissement) */
+.pos-history-ref-link {
+  font: inherit;
+  color: #0891b2;
+  font-weight: 700;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pos-history-ref-link:hover {
+  color: #b91c1c;
+}
+
 .pos-history-action {
   display: inline-flex;
   align-items: center;

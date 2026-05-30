@@ -4,7 +4,8 @@ import {
   FiSettings, FiMail, FiFileText, FiUsers, FiLogOut, FiHome, FiImage, FiHelpCircle,
   FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck,
   FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiCheckSquare, FiLayers,
-  FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss,
+  FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss, FiArchive,
+  FiTrendingDown,
 } from 'react-icons/fi';
 import { adminLogout, adminMe, getNotificationCounts, adminChangePassword } from '../../api/admin';
 import AdminLogin from './AdminLogin';
@@ -55,9 +56,12 @@ const NAV_GROUPS = [
       { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
       { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support', 'librarian', 'comptable'] },
       { path: 'orders', label: 'Commandes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'comptable'] },
+      { path: 'devis', label: 'Devis', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'invoices', label: 'Factures', icon: <FiFileText />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
       { path: 'deliveries', label: 'Bons de livraison', icon: <FiTruck />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
+      { path: 'consignments', label: 'Dépôt-vente', icon: <FiArchive />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin', 'comptable'] },
+      { path: 'expenses', label: "Sorties d'argent", icon: <FiTrendingDown />, roles: ['super_admin', 'admin', 'comptable'] },
       { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin', 'comptable'] },
     ],
   },
@@ -94,6 +98,7 @@ function flattenTabs() {
 const BADGE_KEYS = {
   contacts: 'messages',
   payments: 'payments',
+  expenses: 'expenses',
   stock: 'stock_alerts',
   manuscripts: 'manuscripts',
   evaluations: 'evaluations',

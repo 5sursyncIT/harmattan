@@ -1574,6 +1574,26 @@ try {
   console.error('[DELIVERIES] Failed to mount delivery routes:', err);
 }
 
+// ─── DÉPÔT-VENTE MODULE ─────────────────────────────────────
+import { createConsignmentRouter } from './consignment-routes.js';
+try {
+  const consignmentAuth = adminAuth(db);
+  app.use('/api/admin/consignments', createConsignmentRouter({ db, dolibarrPool, auth: consignmentAuth, csrfProtection }));
+  console.log('[CONSIGNMENT] Consignment (dépôt-vente) routes mounted');
+} catch (err) {
+  console.error('[CONSIGNMENT] Failed to mount consignment routes:', err);
+}
+
+// ─── SORTIES D'ARGENT / DÉPENSES MODULE ─────────────────────
+import { createExpensesRouter } from './expenses-routes.js';
+try {
+  const expensesAuth = adminAuth(db);
+  app.use('/api/admin/expenses', createExpensesRouter({ db, dolibarrPool, auth: expensesAuth, csrfProtection, getTransporter: () => transporter }));
+  console.log('[EXPENSES] Expenses (sorties d\'argent) routes mounted');
+} catch (err) {
+  console.error('[EXPENSES] Failed to mount expenses routes:', err);
+}
+
 // ─── COMMANDES WEB MODULE ───────────────────────────────────
 import { createOrdersRouter } from './orders-routes.js';
 try {
@@ -1581,6 +1601,15 @@ try {
   console.log('[ORDERS] Web orders routes mounted');
 } catch (err) {
   console.error('[ORDERS] Failed to mount orders routes:', err);
+}
+
+// ─── DEVIS MODULE (propositions commerciales) ───────────────
+import { createPropalsRouter } from './propals-routes.js';
+try {
+  app.use('/api/admin/propals', adminAuth(db), createPropalsRouter({ dolibarrPool }));
+  console.log('[PROPALS] Devis routes mounted');
+} catch (err) {
+  console.error('[PROPALS] Failed to mount propals routes:', err);
 }
 
 // ─── STOCK & REAPPROVISIONNEMENT MODULE ─────────────────────

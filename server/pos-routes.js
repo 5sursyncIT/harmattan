@@ -24,6 +24,7 @@ const POS_CONFIG = {
   defaultTerminal: 3,
   warehouse: 4,           // Rayon
   defaultCustomer: 13,    // CLIENT LIBRAIRE
+  pressCustomer: 33,      // SERVICE PRESSE — destinataire des ventes à 0 F (exemplaires presse)
   receiptName: 'HARMATTAN',
 };
 
@@ -862,13 +863,24 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     // État de la vente — suivi pour permettre un rollback ciblé en cas d'échec.
     const sale = { invoiceId: null, invoiceRef: null, validated: false, paymentsRecorded: 0, lines: null, socid: null, terminal: null };
     try {
-      const { items, customer_id, payments, note, client_sale_id, unpaid } = req.body;
+      const { items, customer_id, payments, note, client_sale_id, unpaid, service_presse, press_organ } = req.body;
       const terminal = getTerminal(req);
+      // Service de presse : exemplaires remis gratuitement (presse/médias). Tous
+      // les articles sont facturés à 0 F, rattachés au client SERVICE PRESSE, sans
+      // encaissement (facture classée payée car total = 0). Le stock est décrémenté.
+      // L'organe de presse destinataire est obligatoire (tracé dans la note + audit,
+      // car le client Dolibarr reste le générique SERVICE PRESSE).
+      const isPresse = service_presse === true;
+      const pressOrgan = String(press_organ || '').trim();
 
       if (!items?.length) return res.status(400).json({ error: 'Aucun article' });
+      if (isPresse && (pressOrgan.length < 2 || pressOrgan.length > 200)) {
+        return res.status(400).json({ error: "Nom de l'organe de presse destinataire requis (2-200 caractères)." });
+      }
       // Facture à crédit (impayée) : aucun paiement requis, MAIS un client identifié
       // est obligatoire pour attribuer la créance (pas le client comptoir par défaut).
-      if (!unpaid && !payments?.length) return res.status(400).json({ error: 'Aucun paiement' });
+      // Service de presse : aucun paiement non plus (total 0 F).
+      if (!unpaid && !isPresse && !payments?.length) return res.status(400).json({ error: 'Aucun paiement' });
       if (unpaid && (!customer_id || parseInt(customer_id) === POS_CONFIG.defaultCustomer)) {
         return res.status(400).json({ error: 'Sélectionnez un client identifié pour émettre une facture à crédit (impayée).' });
       }
@@ -890,9 +902,12 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           if (!lbl || lbl.length > 200) {
             return res.status(400).json({ error: `Libellé du produit libre invalide (1-200 caractères)` });
           }
-          const sp = parseInt(item?.subprice ?? item?.price_ttc);
-          if (!Number.isInteger(sp) || sp <= 0 || sp > 10_000_000) {
-            return res.status(400).json({ error: `Prix du produit libre invalide (${lbl})` });
+          // Service de presse : prix forcé à 0 F côté serveur → pas de contrôle de prix.
+          if (!isPresse) {
+            const sp = parseInt(item?.subprice ?? item?.price_ttc);
+            if (!Number.isInteger(sp) || sp <= 0 || sp > 10_000_000) {
+              return res.status(400).json({ error: `Prix du produit libre invalide (${lbl})` });
+            }
           }
         } else {
           const pid = parseInt(item?.product_id);
@@ -901,7 +916,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           }
           // Override de prix : autorisé uniquement avec un motif (3-200 caractères).
           // Le prix override est validé contre les mêmes bornes que les produits libres.
-          if (item?.price_override_reason || item?.price_original != null) {
+          // Ignoré pour le service de presse (tout est forcé à 0 F).
+          if (!isPresse && (item?.price_override_reason || item?.price_original != null)) {
             const op = parseInt(item?.price_ttc);
             if (!Number.isInteger(op) || op <= 0 || op > 10_000_000) {
               return res.status(400).json({ error: `Prix modifié invalide pour l'article ${item?.label || pid}` });
@@ -983,8 +999,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         return sum + Math.round(price * item.qty * (1 - disc / 100));
       }, 0);
       const paidSum = normalizedPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
-      // Contrôle de couverture ignoré pour une facture à crédit (paidSum = 0 attendu).
-      if (!unpaid && paidSum + 1 < expectedTotal) {
+      // Contrôle de couverture ignoré pour une facture à crédit ou service de
+      // presse (paidSum = 0 attendu, total facturé = 0 F pour le service presse).
+      if (!unpaid && !isPresse && paidSum + 1 < expectedTotal) {
         return res.status(400).json({
           error: `Paiement insuffisant : ${Math.round(paidSum)} FCFA reçus pour ${expectedTotal} FCFA dûs`,
         });
@@ -996,7 +1013,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         return res.status(409).json({ error: 'Vente déjà en cours de traitement', code: 'SALE_IN_PROGRESS' });
       }
 
-      const socid = customer_id || POS_CONFIG.defaultCustomer;
+      // Service de presse : toujours rattaché au client SERVICE PRESSE (33),
+      // quel que soit le client sélectionné au comptoir.
+      const socid = isPresse ? POS_CONFIG.pressCustomer : (customer_id || POS_CONFIG.defaultCustomer);
       const today = new Date().toISOString().split('T')[0];
       sale.socid = socid;
       sale.terminal = terminal;
@@ -1012,7 +1031,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           return {
             fk_product: null,
             qty: item.qty,
-            subprice: parseInt(item.subprice ?? item.price_ttc),
+            // Service de presse : 0 F. Sinon, prix saisi pour la ligne libre.
+            subprice: isPresse ? 0 : parseInt(item.subprice ?? item.price_ttc),
             tva_tx: 0,
             product_type: 0,
             remise_percent: item.discount || 0,
@@ -1023,8 +1043,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         const pid = parseInt(item.product_id);
         const catalogPrice = priceMap[pid].price_ttc;
         const reason = String(item.price_override_reason || '').trim();
-        const subprice = reason.length >= 3 ? parseInt(item.price_ttc) : catalogPrice;
-        if (reason.length >= 3 && subprice !== catalogPrice) {
+        // Service de presse : prix unitaire forcé à 0 F (exemplaire gratuit).
+        const subprice = isPresse ? 0 : (reason.length >= 3 ? parseInt(item.price_ttc) : catalogPrice);
+        if (!isPresse && reason.length >= 3 && subprice !== catalogPrice) {
           priceOverrides.push({ pid, label: priceMap[pid].label, from: catalogPrice, to: subprice, reason });
         }
         return {
@@ -1085,7 +1106,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         // L'override de prix est ouvert à tous les rôles POS (cashier =
         // libraire, manager) — l'audit nominatif suffit comme garde-fou.
         const roleLabel = req.posStaff.role === 'manager' ? 'manager' : 'libraire';
-        let invoiceNote = `POS Terminal ${terminal} | Caissier: ${req.posStaff.name} (${roleLabel})${note ? ' | ' + note : ''}`;
+        let invoiceNote = `POS Terminal ${terminal} | Caissier: ${req.posStaff.name} (${roleLabel})${isPresse ? ` | SERVICE DE PRESSE → ${pressOrgan} (exemplaires gratuits)` : ''}${note ? ' | ' + note : ''}`;
         if (priceOverrides.length > 0) {
           const lines = priceOverrides.map((o) =>
             `[PRIX MODIFIÉ par ${req.posStaff.name}/${roleLabel}] ${o.label} : ${o.from} → ${o.to} F (${o.reason})`,
@@ -1143,7 +1164,20 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       // 4-5. Encaissement — INTÉGRALEMENT SAUTÉ pour une facture à crédit (impayée) :
       //      la facture reste validée avec paye=0 (créance), réglable plus tard.
       const paymentResults = [];
-      if (!unpaid) {
+      if (isPresse) {
+        // Service de presse : facture à 0 F → classée payée directement, sans
+        // aucune ligne de paiement (cohérent avec l'historique TakePOS natif :
+        // fk_statut=2, paye=1, llx_paiement_facture vide).
+        try {
+          await adminApi.post(`/invoices/${invoiceId}/settopaid`);
+        } catch (paidErr) {
+          console.error(`[POS] Service presse : facture ${invoiceRef} non classée payée:`, paidErr.response?.data || paidErr.message);
+        }
+        try {
+          db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+            .run(req.posStaff.name || 'pos', 'pos_service_presse', `T${terminal} | Service de presse ${invoiceRef} → ${pressOrgan} — ${items.reduce((s, i) => s + i.qty, 0)} exemplaire(s) à 0 F`);
+        } catch { /* ignore */ }
+      } else if (!unpaid) {
         // 4. Record each payment, capped at the invoice total.
         //    Cash tendered above the total is change — it must not be recorded
         //    as a Dolibarr payment (that would overpay the invoice).
@@ -1220,6 +1254,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         total_ttc: totalTtc,
         payments: paymentResults,
         unpaid: !!unpaid,
+        service_presse: !!isPresse,
+        press_organ: isPresse ? pressOrgan : undefined,
         staff: req.posStaff.name,
         terminal,
       };
@@ -1877,19 +1913,30 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const [rows] = await dolibarrPool.query(
         `SELECT f.rowid AS id, f.ref, f.total_ht, f.total_ttc, f.datef AS date,
                 f.date_lim_reglement AS date_due,
-                f.paye AS paid, f.fk_statut AS status, f.pos_source AS terminal,
+                f.paye AS paid, f.fk_statut AS status, f.type, f.pos_source AS terminal,
                 s.nom AS customer_name,
+                COALESCE(pf.paid_amount, 0) AS paid_amount,
                 COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.firstname, u.lastname)), ''), u.login) AS creator_name
          FROM llx_facture f
          LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
          LEFT JOIN llx_user u ON u.rowid = f.fk_user_author
+         LEFT JOIN (SELECT fk_facture, SUM(amount) AS paid_amount
+                    FROM llx_paiement_facture GROUP BY fk_facture) pf
+           ON pf.fk_facture = f.rowid
          WHERE ${whereSql}
          ORDER BY f.datef DESC, f.rowid DESC
          LIMIT ? OFFSET ?`,
         [...params, pageSize, offset]
       );
 
-      res.json({ rows, total, page, pageSize });
+      res.json({
+        rows: rows.map(r => ({
+          ...r,
+          paid_amount: Number(r.paid_amount),
+          remaining: Number(r.total_ttc) - Number(r.paid_amount),
+        })),
+        total, page, pageSize,
+      });
     } catch (err) {
       console.error('POS sales history error:', err);
       res.status(500).json({ error: 'Erreur historique factures' });
