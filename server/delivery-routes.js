@@ -17,7 +17,6 @@
 
 import { Router } from 'express';
 import axios from 'axios';
-import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
@@ -546,9 +545,6 @@ export function buildBlStyles() {
 
 export function buildBlContent(dto) {
   const today = new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
-  const clientLines = [
-    `<text:p text:style-name="Box"><text:span text:style-name="Bold">${escXml(dto.client.name)}</text:span></text:p>`,
-  ];
   const addr = [dto.client.address, [dto.client.zip, dto.client.town].filter(Boolean).join(' ')].filter(Boolean);
   // On regroupe l'adresse dans une seule boîte visuelle.
   let clientBox = `<text:p text:style-name="Box"><text:span text:style-name="Bold">${escXml(dto.client.name)}</text:span>`;

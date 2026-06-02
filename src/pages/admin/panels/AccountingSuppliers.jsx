@@ -20,7 +20,7 @@ export default function AccountingSuppliers() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
-    supplier_id: '', date: today(), date_due: today(), ref_supplier: '', label: '', total_ht: '', vat_rate: '0',
+    supplier_id: '', date: today(), date_due: today(), ref_supplier: '', label: '', total_ht: '',
   });
 
   const refresh = useCallback(() => {
@@ -37,22 +37,20 @@ export default function AccountingSuppliers() {
   const setF = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const ht = Number(form.total_ht) || 0;
-  const tva = Math.round(ht * (Number(form.vat_rate) || 0) / 100);
-  const ttc = ht + tva;
 
   const handleSave = async () => {
     if (!form.supplier_id) { toast.error('Sélectionnez un fournisseur'); return; }
-    if (ht <= 0) { toast.error('Montant HT invalide'); return; }
+    if (ht <= 0) { toast.error('Montant invalide'); return; }
     setSaving(true);
     try {
       const r = await createSupplierInvoice({
         supplier_id: form.supplier_id, date: form.date, date_due: form.date_due,
         ref_supplier: form.ref_supplier, label: form.label,
-        total_ht: ht, vat_rate: Number(form.vat_rate) || 0,
+        total_ht: ht,
       });
       toast.success(`Facture fournisseur ${r.data.ref} créée`);
       setShowForm(false);
-      setForm({ supplier_id: '', date: today(), date_due: today(), ref_supplier: '', label: '', total_ht: '', vat_rate: '0' });
+      setForm({ supplier_id: '', date: today(), date_due: today(), ref_supplier: '', label: '', total_ht: '' });
       refresh();
     } catch (e) {
       toast.error(e.response?.data?.error || 'Erreur création');
@@ -102,18 +100,12 @@ export default function AccountingSuppliers() {
               <input type="text" value={form.label} onChange={e => setF('label', e.target.value)} placeholder="ex: Fournitures de bureau, transport..." />
             </div>
             <div className="ac-form-field">
-              <label>Montant HT (XOF)</label>
+              <label>Montant (XOF)</label>
               <input type="number" min="0" value={form.total_ht} onChange={e => setF('total_ht', e.target.value)} placeholder="0" />
-            </div>
-            <div className="ac-form-field">
-              <label>Taux TVA (%)</label>
-              <input type="number" min="0" step="0.1" value={form.vat_rate} onChange={e => setF('vat_rate', e.target.value)} />
             </div>
           </div>
           <div className="ac-breakdown" style={{ marginTop: 12, marginBottom: 12 }}>
-            <div className="ac-breakdown-item"><strong>{formatPrice(ht)}</strong>HT</div>
-            <div className="ac-breakdown-item"><strong>{formatPrice(tva)}</strong>TVA</div>
-            <div className="ac-breakdown-item" style={{ background: '#f0fdf4' }}><strong style={{ color: '#10531a' }}>{formatPrice(ttc)}</strong>TTC</div>
+            <div className="ac-breakdown-item" style={{ background: '#f0fdf4' }}><strong style={{ color: '#10531a' }}>{formatPrice(ht)}</strong>Montant</div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
@@ -137,9 +129,7 @@ export default function AccountingSuppliers() {
 
       {!loading && t.nb > 0 && (
         <div className="ac-breakdown">
-          <div className="ac-breakdown-item"><strong>{formatPrice(t.ht)}</strong>Total HT</div>
-          <div className="ac-breakdown-item"><strong>{formatPrice(t.tva)}</strong>Total TVA</div>
-          <div className="ac-breakdown-item" style={{ background: '#fef2f2' }}><strong style={{ color: '#dc2626' }}>{formatPrice(t.ttc)}</strong>Total TTC</div>
+          <div className="ac-breakdown-item" style={{ background: '#fef2f2' }}><strong style={{ color: '#dc2626' }}>{formatPrice(t.ttc)}</strong>Total</div>
         </div>
       )}
 
@@ -149,8 +139,7 @@ export default function AccountingSuppliers() {
             <thead>
               <tr>
                 <th>Date</th><th>Référence</th><th>Fournisseur</th><th>Libellé</th>
-                <th className="ac-amount">HT</th><th className="ac-amount">TVA</th>
-                <th className="ac-amount">TTC</th><th className="ac-amount">Reste dû</th><th>Statut</th>
+                <th className="ac-amount">Montant</th><th className="ac-amount">Reste dû</th><th>Statut</th>
               </tr>
             </thead>
             <tbody>
@@ -160,15 +149,13 @@ export default function AccountingSuppliers() {
                   <td className="ac-ref">{inv.ref}</td>
                   <td style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.supplier || '—'}</td>
                   <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.83rem', color: '#64748b' }}>{inv.label || '—'}</td>
-                  <td className="ac-amount">{formatPrice(inv.total_ht)}</td>
-                  <td className="ac-amount">{formatPrice(inv.total_tva)}</td>
                   <td className="ac-amount" style={{ fontWeight: 700 }}>{formatPrice(inv.total_ttc)}</td>
                   <td className="ac-amount" style={{ color: inv.remaining > 0 ? '#dc2626' : '#94a3b8' }}>{formatPrice(inv.remaining)}</td>
                   <td><span className={`ac-badge ${inv.is_paid ? 'ac-badge-paid' : 'ac-badge-unpaid'}`}>{STATUS_LABELS[inv.status] || '—'}</span></td>
                 </tr>
               ))}
               {data.invoices.length === 0 && (
-                <tr><td colSpan={9} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>Aucune facture fournisseur sur la période</td></tr>
+                <tr><td colSpan={7} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>Aucune facture fournisseur sur la période</td></tr>
               )}
             </tbody>
           </table>

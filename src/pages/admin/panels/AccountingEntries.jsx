@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { FiArrowLeft, FiRefreshCw, FiPlus, FiTrash2, FiDownload, FiX, FiSave } from 'react-icons/fi';
-import { getTransferStatus, runTransfer, getEntries, createEntry, deleteEntry, exportAccounting } from '../../../api/accounting';
+import { FiArrowLeft, FiRefreshCw, FiPlus, FiTrash2, FiDownload, FiX, FiSave, FiLock } from 'react-icons/fi';
+import { getTransferStatus, runTransfer, getEntries, createEntry, deleteEntry, exportAccounting, getFiscalYears, createFiscalYear, closeFiscalYear } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
@@ -17,29 +17,76 @@ export default function AccountingEntries() {
   const [loading, setLoading] = useState(true);
   const [transferring, setTransferring] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [fiscalYears, setFiscalYears] = useState([]);
+  const [closing, setClosing] = useState(false);
   const [period, setPeriod] = useState({ date_from: yearStart(), date_to: today() });
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ date: today(), ref: '', label: '', lines: [emptyLine(), emptyLine()] });
 
   const refresh = useCallback(() => {
-    Promise.all([getTransferStatus(), getEntries({ date_from: `${new Date().getFullYear()}-01-01`, date_to: today() })])
-      .then(([s, e]) => { setStatus(s.data); setEntries(e.data.entries || []); })
+    Promise.all([
+      getTransferStatus(),
+      getEntries({ date_from: `${new Date().getFullYear()}-01-01`, date_to: today() }),
+      getFiscalYears(),
+    ])
+      .then(([s, e, fy]) => { setStatus(s.data); setEntries(e.data.entries || []); setFiscalYears(fy.data.fiscal_years || []); })
       .catch(() => toast.error('Erreur chargement'))
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleTransfer = async () => {
+  const runTransferWith = async (force) => {
     setTransferring(true);
     try {
-      const r = await runTransfer(period);
+      const r = await runTransfer({ ...period, ...(force ? { force: true } : {}) });
       toast.success(`Transfert terminé : ${r.data.inserted} lignes générées`);
+      (r.data.warnings || []).forEach(w => toast(w, { icon: '⚠️', duration: 8000 }));
       refresh();
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Erreur transfert');
+      // Conflit avec le transfert natif Dolibarr : proposer de forcer en connaissance de cause.
+      if (e.response?.status === 409 && e.response?.data?.code === 'NATIVE_CONFLICT') {
+        if (window.confirm(`${e.response.data.error}\n\nForcer quand même la régénération ?`)) {
+          return runTransferWith(true);
+        }
+      } else {
+        toast.error(e.response?.data?.error || 'Erreur transfert');
+      }
     } finally { setTransferring(false); }
+  };
+
+  const handleTransfer = () => runTransferWith(false);
+
+  const handleCreateFiscalYear = async () => {
+    const year = window.prompt('Créer un exercice comptable — année (ex. 2026) ou « AAAA-MM-JJ AAAA-MM-JJ » pour des dates personnalisées :', `${new Date().getFullYear()}`);
+    if (!year) return;
+    let date_start, date_end, label;
+    const m = year.trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) { date_start = `${m[1]}-${m[2]}-${m[3]}`; date_end = `${m[4]}-${m[5]}-${m[6]}`; label = `Exercice ${m[1]}`; }
+    else if (/^\d{4}$/.test(year.trim())) { date_start = `${year.trim()}-01-01`; date_end = `${year.trim()}-12-31`; label = `Exercice ${year.trim()}`; }
+    else { toast.error('Saisie invalide'); return; }
+    setClosing(true);
+    try {
+      await createFiscalYear({ date_start, date_end, label });
+      toast.success(`Exercice « ${label} » créé`);
+      refresh();
+    } catch (e) { toast.error(e.response?.data?.error || 'Erreur création exercice'); }
+    finally { setClosing(false); }
+  };
+
+  const handleCloseFiscalYear = async (fy) => {
+    if (!window.confirm(
+      `Clôturer l'exercice « ${fy.label} » (${fmtDate(fy.date_start)} → ${fmtDate(fy.date_end)}) ?\n\n` +
+      `Action IRRÉVERSIBLE : les ${fy.lines} écriture(s) de la période seront figées — ni modifiables, ni supprimables, ni régénérables.`
+    )) return;
+    setClosing(true);
+    try {
+      const r = await closeFiscalYear(fy.id);
+      toast.success(`Exercice « ${fy.label} » clôturé — ${r.data.frozen} écriture(s) figée(s)`);
+      refresh();
+    } catch (e) { toast.error(e.response?.data?.error || 'Erreur clôture'); }
+    finally { setClosing(false); }
   };
 
   const handleExportFec = async () => {
@@ -131,11 +178,20 @@ export default function AccountingEntries() {
           </button>
         </div>
 
+        {status?.closed_until && (
+          <div style={{ marginTop: 12, padding: '8px 12px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: '0.85rem', color: '#92400e', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <FiLock size={14} /> Comptabilité close jusqu'au <strong>{fmtDate(status.closed_until)}</strong> — écritures figées, ni modifiables ni régénérables avant cette date.
+          </div>
+        )}
+
         {status && (
           <div className="ac-breakdown" style={{ marginTop: 14, marginBottom: 0 }}>
             <div className="ac-breakdown-item"><strong>{status.lines}</strong>Lignes au grand livre</div>
             <div className="ac-breakdown-item"><strong>{status.pieces}</strong>Pièces</div>
             <div className="ac-breakdown-item"><strong>{status.manual_lines}</strong>Lignes manuelles (OD)</div>
+            {status.validated_lines > 0 && (
+              <div className="ac-breakdown-item"><strong>{status.validated_lines}</strong>Lignes figées (clôture)</div>
+            )}
             {status.by_journal?.map(j => (
               <div key={j.code} className="ac-breakdown-item">
                 <strong>{j.lines}</strong>{j.label} ({j.code})
@@ -143,6 +199,44 @@ export default function AccountingEntries() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* Exercices comptables (clôture / verrouillage) */}
+      <div className="ac-section-header">
+        <h4 className="ac-section-title">Exercices comptables ({fiscalYears.length})</h4>
+        <button className="btn btn-primary btn-sm" onClick={handleCreateFiscalYear} disabled={closing}><FiPlus size={14} /> Nouvel exercice</button>
+      </div>
+      <div className="ac-table-wrap" style={{ marginBottom: 20 }}>
+        <table className="ac-table">
+          <thead>
+            <tr><th>Exercice</th><th>Début</th><th>Fin</th><th className="ac-amount">Écritures</th><th>Statut</th><th></th></tr>
+          </thead>
+          <tbody>
+            {fiscalYears.map(fy => (
+              <tr key={fy.id}>
+                <td className="ac-ref">{fy.label}</td>
+                <td className="ac-date">{fmtDate(fy.date_start)}</td>
+                <td className="ac-date">{fmtDate(fy.date_end)}</td>
+                <td className="ac-amount">{fy.lines}</td>
+                <td>
+                  <span className={`ac-badge ${fy.closed ? 'ac-badge-paid' : 'ac-badge-unpaid'}`}>
+                    {fy.closed ? <><FiLock size={11} /> Clôturé</> : 'Ouvert'}
+                  </span>
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  {!fy.closed && (
+                    <button className="btn btn-outline btn-sm" onClick={() => handleCloseFiscalYear(fy)} disabled={closing}>
+                      <FiLock size={12} /> Clôturer
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {fiscalYears.length === 0 && (
+              <tr><td colSpan={6} style={{ textAlign: 'center', padding: 24, color: '#94a3b8' }}>Aucun exercice défini — créez-en un pour pouvoir clôturer une période.</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       {/* Saisie d'une écriture OD */}

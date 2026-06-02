@@ -13,7 +13,7 @@ import Loader from '../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Admin.css';
 
-const ALL_ROLES = ['super_admin', 'admin', 'editor', 'support', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
+const ALL_ROLES = ['super_admin', 'admin', 'editor', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
 
 // Navigation regroupée par domaine métier
 // Un groupe dont tous les items sont filtrés (RBAC) est masqué automatiquement.
@@ -22,7 +22,7 @@ const NAV_GROUPS = [
     id: 'overview',
     label: null, // pas de titre pour le premier groupe
     items: [
-      { path: '', label: 'Tableau de bord', icon: <FiHome />, roles: ['super_admin', 'admin', 'editor', 'support', 'comptable'] },
+      { path: '', label: 'Tableau de bord', icon: <FiHome />, roles: ['super_admin', 'admin', 'editor', 'librarian', 'comptable'] },
     ],
   },
   {
@@ -31,7 +31,7 @@ const NAV_GROUPS = [
     items: [
       { path: 'books', label: 'Livres', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
       { path: 'tags', label: 'Tags curation', icon: <FiTag />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'authors', label: 'Auteurs', icon: <FiPenTool />, roles: ['super_admin', 'admin', 'editor', 'support'] },
+      { path: 'authors', label: 'Auteurs', icon: <FiPenTool />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
       { path: 'stock', label: 'Stock', icon: <FiPackage />, roles: ['super_admin', 'admin', 'librarian'] },
       { path: 'suppliers', label: 'Fournisseurs', icon: <FiTruck />, roles: ['super_admin', 'admin'] },
     ],
@@ -54,8 +54,8 @@ const NAV_GROUPS = [
     label: 'Ventes',
     items: [
       { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
-      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support', 'librarian', 'comptable'] },
-      { path: 'orders', label: 'Commandes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'comptable'] },
+      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
+      { path: 'orders', label: 'Commandes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'devis', label: 'Devis', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'invoices', label: 'Factures', icon: <FiFileText />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
       { path: 'deliveries', label: 'Bons de livraison', icon: <FiTruck />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
@@ -71,11 +71,11 @@ const NAV_GROUPS = [
     items: [
       { path: 'config', label: 'Configuration', icon: <FiSettings />, roles: ['super_admin', 'admin'] },
       { path: 'slides', label: 'Bannières', icon: <FiImage />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'news', label: 'Actualités', icon: <FiRss />, roles: ['super_admin', 'admin', 'editor', 'support'] },
-      { path: 'faq', label: 'FAQ', icon: <FiHelpCircle />, roles: ['super_admin', 'admin', 'support'] },
-      { path: 'contacts', label: 'Messages', icon: <FiMail />, roles: ['super_admin', 'admin', 'support'] },
-      { path: 'newsletter', label: 'Newsletter', icon: <FiUsers />, roles: ['super_admin', 'admin', 'support'] },
-      { path: 'customers', label: 'Comptes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'support'] },
+      { path: 'news', label: 'Actualités', icon: <FiRss />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
+      { path: 'faq', label: 'FAQ', icon: <FiHelpCircle />, roles: ['super_admin', 'admin', 'librarian'] },
+      { path: 'contacts', label: 'Messages', icon: <FiMail />, roles: ['super_admin', 'admin', 'librarian'] },
+      { path: 'newsletter', label: 'Newsletter', icon: <FiUsers />, roles: ['super_admin', 'admin', 'librarian'] },
+      { path: 'customers', label: 'Comptes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'librarian'] },
     ],
   },
   {

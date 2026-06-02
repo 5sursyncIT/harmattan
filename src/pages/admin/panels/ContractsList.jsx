@@ -5,10 +5,15 @@ import { FiSearch, FiPlus, FiChevronLeft, FiChevronRight, FiArrowLeft, FiFilter,
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Contracts.css';
+import { contractTypeLabel, CONTRACT_TYPE_FILTER_GROUPS } from '../../../utils/contractTypes';
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
-const TYPE_LABELS = { harmattan_2024: 'Harmattan 2024', harmattan_dll: 'Harmattan DLL', tamarinier: 'Le Tamarinier' };
-const TYPE_COLORS = { harmattan_2024: '#10531a', harmattan_dll: '#0284c7', tamarinier: '#7c3aed' };
+// Couleur de pastille par modèle (le type stocké commence par la clé du modèle)
+const MODEL_COLORS = { harmattan_dll: '#0284c7', tamarinier: '#7c3aed', harmattan_2024: '#10531a' };
+const typeColor = (type) => {
+  const key = Object.keys(MODEL_COLORS).find(m => String(type || '').startsWith(m));
+  return MODEL_COLORS[key] || '#10531a';
+};
 const SORT_OPTIONS = [
   { key: 'date', label: 'Date' },
   { key: 'ref', label: 'Ref' },
@@ -136,9 +141,11 @@ export default function ContractsList() {
             <label className="ct-filter-label">Type</label>
             <select className="ct-filter-select" value={filters.type} onChange={e => update('type', e.target.value)}>
               <option value="">Tous</option>
-              <option value="harmattan_2024">Harmattan 2024</option>
-              <option value="harmattan_dll">Harmattan DLL</option>
-              <option value="tamarinier">Le Tamarinier</option>
+              {CONTRACT_TYPE_FILTER_GROUPS.map(g => (
+                <optgroup key={g.model} label={g.label}>
+                  {g.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </optgroup>
+              ))}
             </select>
           </div>
           <div className="ct-filter-group">
@@ -193,8 +200,8 @@ export default function ContractsList() {
                     <span className="ct-card-ref">{c.ref}</span>
                     <span className={`ct-badge ${statusClass(c.status)}`}>{c.statusLabel}</span>
                     {c.type && (
-                      <span className="ct-badge" style={{ background: `${TYPE_COLORS[c.type] || '#888'}10`, color: TYPE_COLORS[c.type] || '#888' }}>
-                        {TYPE_LABELS[c.type]}
+                      <span className="ct-badge" style={{ background: `${typeColor(c.type)}10`, color: typeColor(c.type) }}>
+                        {c.typeLabel || contractTypeLabel(c.type)}
                       </span>
                     )}
                   </div>

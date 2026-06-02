@@ -8,7 +8,6 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
-import { dolibarrApi } from './dolibarr-client.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 
 // Convertit un buffer ODT en PDF via LibreOffice headless. Le modèle de devis
@@ -199,7 +198,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
   // Reset password → envoie email de réinitialisation. Le reset lui-même se fait
   // via la page /reinitialiser-mdp (ResetPasswordPage), pas /mot-de-passe-oublie
   // qui n'est que le formulaire de demande.
-  router.post('/customers/:id/reset-password', auth, requireRoles('super_admin', 'admin', 'support'), csrfProtection, async (req, res) => {
+  router.post('/customers/:id/reset-password', auth, requireRoles('super_admin', 'admin', 'librarian'), csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const customer = db.prepare('SELECT email, firstname FROM customers WHERE id = ?').get(id);
@@ -609,6 +608,12 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       else if (type === 'prospect')  where.push(`s.client IN (2,3)`);
       else if (type === 'fournisseur') where.push(`s.fournisseur = 1`);
 
+      // Statut : actifs par défaut (les tiers archivés/fusionnés status=0 sont
+      // masqués). 'archived' → uniquement archivés ; 'all' → tout.
+      const statut = String(req.query.statut || 'active');
+      if (statut === 'active') where.push(`s.status = 1`);
+      else if (statut === 'archived') where.push(`s.status = 0`);
+
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const [[{ n: total }]] = await dolibarrPool.query(
         `SELECT COUNT(*) AS n FROM llx_societe s ${whereSql}`, params
@@ -616,7 +621,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       const [rows] = await dolibarrPool.query(
         `SELECT s.rowid AS id, s.nom, s.name_alias, s.code_client, s.code_fournisseur,
                 s.client, s.fournisseur, s.email, s.phone, s.town, s.zip, s.barcode,
-                s.datec AS created_at
+                s.status, s.datec AS created_at
          FROM llx_societe s
          ${whereSql}
          ORDER BY s.nom ASC
@@ -717,7 +722,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     return data;
   }
 
-  router.post('/societes', auth, requireRoles('super_admin', 'admin', 'editor', 'support'), csrfProtection, async (req, res) => {
+  router.post('/societes', auth, requireRoles('super_admin', 'admin', 'editor', 'librarian'), csrfProtection, async (req, res) => {
     try {
       const data = sanitizeSocieteInput(req.body);
       const firstname = String(req.body.firstname || '').trim();
@@ -761,7 +766,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     }
   });
 
-  router.put('/societes/:id', auth, requireRoles('super_admin', 'admin', 'editor', 'support'), csrfProtection, async (req, res) => {
+  router.put('/societes/:id', auth, requireRoles('super_admin', 'admin', 'editor', 'librarian'), csrfProtection, async (req, res) => {
     // NOTE : on n'utilise PAS la REST API Dolibarr (PUT /thirdparties/{id})
     // car la base contient des code_fournisseur legacy ("SU001439") qui ne
     // respectent pas la syntaxe du module configuré (mod_codeclient_monkey,

@@ -4,9 +4,9 @@ import { getContractStats, getExpiringContracts } from '../../../api/contracts';
 import { FiFileText, FiPlus, FiAlertTriangle, FiCheckCircle, FiClock, FiBookOpen } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import './Contracts.css';
+import { contractTypeColor } from '../../../utils/contractTypes';
 
 const STATUS_COLORS = { 0: '#f59e0b', 1: '#10b981', 2: '#6b7280' };
-const TYPE_COLORS = { harmattan_2024: '#10531a', harmattan_dll: '#0284c7', tamarinier: '#7c3aed' };
 
 function StatCard({ icon, label, value, color = '#10531a' }) {
   return (
@@ -83,7 +83,7 @@ export default function ContractsPanel() {
           <div className="ct-type-row">
             {byType.map(t => (
               <div key={t.type} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="ct-type-dot" style={{ background: TYPE_COLORS[t.type] || '#888' }} />
+                <span className="ct-type-dot" style={{ background: contractTypeColor(t.type) }} />
                 <strong>{t.label}</strong>
                 <span style={{ color: '#888' }}>({t.count})</span>
               </div>

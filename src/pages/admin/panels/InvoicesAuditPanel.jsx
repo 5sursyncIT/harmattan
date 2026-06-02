@@ -78,7 +78,7 @@ export default function InvoicesAuditPanel() {
             <option value="">Tous</option>
             <option value="super_admin">Super Admin</option>
             <option value="admin">Admin</option>
-            <option value="librarian">Libraire</option>
+            <option value="librarian">Libraire & Support</option>
             <option value="comptable">Comptable</option>
           </select>
         </div>

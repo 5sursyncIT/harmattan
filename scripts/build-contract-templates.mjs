@@ -50,6 +50,7 @@ const CONTRACT_MODELS = {
     label: "Harmattan · classique",
     editorLong: "L'Harmattan Sénégal",
     editorShort: "L'Harmattan Sénégal",
+    editorDative: "à L'Harmattan Sénégal",
     footer: FOOTER_HARMATTAN,
     article4: 'classic',
   },
@@ -57,6 +58,7 @@ const CONTRACT_MODELS = {
     label: "Harmattan · DLL (subventionné)",
     editorLong: "L'Harmattan Sénégal",
     editorShort: "L'Harmattan Sénégal",
+    editorDative: "à L'Harmattan Sénégal",
     footer: FOOTER_HARMATTAN,
     article4: 'dll',
   },
@@ -64,6 +66,7 @@ const CONTRACT_MODELS = {
     label: "Le Tamarinier",
     editorLong: "Le Tamarinier (s/c L'Harmattan Sénégal)",
     editorShort: "Le Tamarinier",
+    editorDative: "au Tamarinier",
     footer: FOOTER_TAMARINIER,
     article4: 'classic',
   },
@@ -300,6 +303,7 @@ function buildStyles(variant) {
 function buildOpening(variant) {
   const cfg = VARIANTS[variant];
   const editor = cfg.editorLong;
+  const editorDative = cfg.editorDative || editor;
   return `
   <text:p text:style-name="LetterheadEditor">${esc(editor)}</text:p>
   <text:p text:style-name="LetterheadTag">ÉDITION · DIFFUSION · LIBRAIRIE</text:p>
@@ -311,15 +315,15 @@ function buildOpening(variant) {
   <text:p text:style-name="IdentityBox">Adresse&#160;: {__THIRDPARTY_ADDRESS__} {__THIRDPARTY_ZIP__} {__THIRDPARTY_TOWN__}</text:p>
   <text:p text:style-name="IdentityBoxLast">Courriel&#160;: {__THIRDPARTY_EMAIL__}</text:p>
 
-  <text:p>Entre d'une part <text:span text:style-name="Bold">{__THIRDPARTY_NAME__}</text:span>, ci-après dénommé l'<text:span text:style-name="Italic">Auteur</text:span>, et les éditions <text:span text:style-name="AccentBold">${esc(editor)}</text:span>, dénommées ci-dessous L'Harmattan Sénégal ou l'Éditeur d'autre part, il a été convenu de ce qui suit, concernant l'ouvrage&#160;:</text:p>
+  <text:p>Entre d'une part <text:span text:style-name="Bold">{__THIRDPARTY_NAME__}</text:span>, ci-après dénommé l'<text:span text:style-name="Italic">Auteur</text:span>, et les éditions <text:span text:style-name="AccentBold">${esc(editor)}</text:span>, dénommées ci-dessous ${esc(cfg.editorShort)} ou l'Éditeur d'autre part, il a été convenu de ce qui suit, concernant l'ouvrage&#160;:</text:p>
 
   <text:p>Titre&#160;: <text:span text:style-name="Bold">« {object_options_book_title} »</text:span></text:p>
 
-  <text:p>Dans le cadre du présent traité, l'Auteur cède à ${esc(editor)} <text:span text:style-name="Upper">le droit exclusif d'imprimer, publier, reproduire et vendre</text:span> ledit ouvrage sous forme d'éditions de tous formats, ordinaires, illustrés, de luxe, à tirage limité ou non.</text:p>
+  <text:p>Dans le cadre du présent traité, l'Auteur cède ${esc(editorDative)} <text:span text:style-name="Upper">le droit exclusif d'imprimer, publier, reproduire et vendre</text:span> ledit ouvrage sous forme d'éditions de tous formats, ordinaires, illustrés, de luxe, à tirage limité ou non.</text:p>
 
   <text:p>De son côté, ${esc(editor)} s'engage à assurer à ses frais la publication en librairie de cet ouvrage et s'emploiera à lui procurer, par une diffusion dans le public et auprès des tiers susceptibles d'être intéressés, les conditions favorables à son exploitation sous toutes les formes.</text:p>
 
-  <text:p>En considération du risque pris par ${esc(editor)} en assurant, ainsi qu'il s'y engage, la publication de l'ouvrage dans les conditions prévues ci-dessous, estimant qu'une telle publication est susceptible d'apporter à l'ouvrage un champ d'exploitation étendu, et en vue des avantages que peut offrir l'unité de gestion, l'Auteur cède à ${esc(editor)}, outre le droit d'édition graphique, les droits patrimoniaux&#160;:</text:p>
+  <text:p>En considération du risque pris par ${esc(editor)} en assurant, ainsi qu'il s'y engage, la publication de l'ouvrage dans les conditions prévues ci-dessous, estimant qu'une telle publication est susceptible d'apporter à l'ouvrage un champ d'exploitation étendu, et en vue des avantages que peut offrir l'unité de gestion, l'Auteur cède ${esc(editorDative)}, outre le droit d'édition graphique, les droits patrimoniaux&#160;:</text:p>
   <text:p text:style-name="ListItem">–  de reproduction&#160;;</text:p>
   <text:p text:style-name="ListItem">–  de traduction&#160;;</text:p>
   <text:p>afférant à l'ouvrage sans aucune exception ni réserve et dans les conditions prévues aux articles 5, 6 et 7 ci-après.</text:p>
@@ -342,7 +346,7 @@ function buildArticle4Classic(editor) {
 
   <text:p text:style-name="SubArticle">1. Cession à titre onéreux</text:p>
   <text:p>La cession des droits, objet du présent contrat, est consentie expressément par l'Auteur à titre onéreux à partir du premier (01) exemplaire vendu.</text:p>
-  <text:p text:style-name="Callout">${esc(editor)} versera à l'Auteur, à compter du premier (01) exemplaire vendu, un taux de <text:span text:style-name="AccentBold">{object_options_royalty_rate_print} %</text:span> du chiffre d'affaires réalisé à la vente du livre, une fois la barre des <text:span text:style-name="AccentBold">{object_options_royalty_threshold} exemplaires</text:span> vendus atteinte.</text:p>
+  <text:p text:style-name="Callout">${esc(editor)} versera à l'Auteur un taux de <text:span text:style-name="AccentBold">{object_options_royalty_rate_print} %</text:span> du chiffre d'affaires réalisé sur les exemplaires vendus au-delà de la barre des <text:span text:style-name="AccentBold">{object_options_royalty_threshold} exemplaires</text:span>.</text:p>
   <text:p>Ces versements ont pour assiette le prix de vente public au Sénégal.</text:p>
   <text:p>Les droits d'auteur ne portent pas sur les exemplaires remis gratuitement à l'Auteur, ni sur ceux réservés au Service de Presse dont le nombre sera fixé par l'Éditeur (<text:span text:style-name="Bold">{object_options_exemplaires_sp}</text:span> exemplaires), ni sur les exemplaires cédés à prix réduit (remise supérieure à 50&#160;% du prix public), à l'Auteur ou à des tiers dans l'intérêt de la diffusion de l'ouvrage.</text:p>
 
@@ -569,11 +573,11 @@ function buildAuthorPurchaseAnnex() {
 
   <text:p text:style-name="Preamble">Par contrat conclu en date du {object_date}, l'Auteur a cédé à l'Éditeur le droit exclusif d'imprimer, publier, reproduire et vendre l'ouvrage intitulé <text:span text:style-name="Bold">« {object_options_book_title} »</text:span>.</text:p>
 
-  <text:p text:style-name="Callout">Aux termes de ce contrat, l'Auteur s'engage à acheter <text:span text:style-name="AccentBold">{object_options_author_purchase_qty} exemplaires</text:span> de son ouvrage, sur la base du <text:span text:style-name="Bold">prix public moins {object_options_author_purchase_discount} %</text:span>. Les exemplaires achetés par l'Auteur sur ces bases seront comptabilisés pour le calcul des droits.</text:p>
+  <text:p text:style-name="Callout">Si l'engagement d'achat de l'Auteur est activé pour ce contrat, l'Auteur s'engage à acheter <text:span text:style-name="AccentBold">{object_options_author_purchase_qty} exemplaires</text:span> de son ouvrage, sur la base du <text:span text:style-name="Bold">prix public moins {object_options_author_purchase_discount} %</text:span>. Les exemplaires achetés par l'Auteur sur ces bases seront comptabilisés pour le calcul des droits.</text:p>
 
   <text:p text:style-name="AuthorInlineSign">(Signature de l'Auteur&#160;: ………………….)</text:p>
 
-  <text:p text:style-name="SmallMuted">— Si l'engagement d'achat n'a pas été activé pour ce contrat (quantité 0), cette annexe peut être retirée. —</text:p>
+  <text:p text:style-name="SmallMuted">— Engagement actif uniquement si la quantité indiquée est supérieure à 0. —</text:p>
 `;
 }
 

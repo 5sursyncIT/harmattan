@@ -114,7 +114,7 @@ export function createPropalsRouter({ dolibarrPool }) {
                 pd.description, pd.qty, pd.subprice, pd.remise_percent, pd.total_ht, pd.total_ttc
          FROM llx_propaldet pd
          LEFT JOIN llx_product prod ON prod.rowid = pd.fk_product
-         WHERE pd.fk_propal = ? AND pd.product_type = 0
+         WHERE pd.fk_propal = ?
          ORDER BY pd.rang ASC, pd.rowid ASC`, [id]
       );
 

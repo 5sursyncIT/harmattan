@@ -6,8 +6,7 @@ export const ROLES = {
   super_admin:   { label: 'Super Admin',   color: '#7c3aed', fullAccess: true,  manageUsers: true,  description: "Accès total + gestion des utilisateurs et des rôles." },
   admin:         { label: 'Admin',         color: '#10531a', fullAccess: true,  manageUsers: false, description: "Accès total à tous les modules (sauf gestion des utilisateurs)." },
   editor:        { label: 'Éditeur',       color: '#0284c7', description: "Catalogue, manuscrits, contrats, bannières, statistiques." },
-  support:       { label: 'Support',       color: '#f59e0b', description: "Messages, FAQ, newsletter, clients, statistiques." },
-  librarian:     { label: 'Libraire',      color: '#0891b2', description: "Livres, stock et régularisation des factures." },
+  librarian:     { label: 'Libraire & Support', color: '#0891b2', description: "Librairie (livres, stock, factures, BL, dépôt-vente, commandes) + support (messages, FAQ, newsletter, clients, actualités)." },
   comptable:     { label: 'Comptable',     color: '#0d9488', description: "Comptabilité, paiements, statistiques." },
   vendeur:       { label: 'Vendeur POS',   color: '#dc2626', description: "Accès POS uniquement (via PIN dédié)." },
   evaluateur:    { label: 'Évaluateur',    color: '#9333ea', description: "Évaluation des manuscrits soumis." },
@@ -55,21 +54,10 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/news(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
-  support: [
-    ...COMMON_PATHS,
-    /^\/api\/admin\/stats(\/.*)?$/,
-    /^\/api\/admin\/contact(\/.*)?$/,
-    /^\/api\/admin\/faq(\/.*)?$/,
-    /^\/api\/admin\/newsletter(\/.*)?$/,
-    /^\/api\/admin\/customers(\/.*)?$/,
-    /^\/api\/admin\/societes(\/.*)?$/,
-    /^\/api\/admin\/propals(\/.*)?$/,
-    /^\/api\/admin\/authors(\/.*)?$/,
-    /^\/api\/admin\/news(\/.*)?$/,
-    /^\/api\/admin\/notifications(\/.*)?$/,
-  ],
+  // Profil fusionné « Libraire & Support » : union des accès librairie + support.
   librarian: [
     ...COMMON_PATHS,
+    // ── Volet librairie ──
     /^\/api\/admin\/books(\/.*)?$/,
     /^\/api\/admin\/tags(\/.*)?$/,
     // Stock : lecture seule pour le libraire (méthodes d'écriture refusées par la
@@ -81,6 +69,16 @@ export const ROLE_ALLOWED_PATHS = {
     { re: /^\/api\/admin\/consignments(\/.*)?$/, methods: ['GET'] },
     /^\/api\/admin\/societes(\/.*)?$/,
     /^\/api\/admin\/propals(\/.*)?$/,
+    // Commandes web : lecture seule pour le libraire.
+    { re: /^\/api\/admin\/orders(\/.*)?$/, methods: ['GET'] },
+    // ── Volet support ──
+    /^\/api\/admin\/stats(\/.*)?$/,
+    /^\/api\/admin\/contact(\/.*)?$/,
+    /^\/api\/admin\/faq(\/.*)?$/,
+    /^\/api\/admin\/newsletter(\/.*)?$/,
+    /^\/api\/admin\/customers(\/.*)?$/,
+    /^\/api\/admin\/authors(\/.*)?$/,
+    /^\/api\/admin\/news(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
   comptable: [
@@ -161,12 +159,12 @@ export const MODULE_PERMISSIONS = {
     editorial: 'crud', covers: 'crud', contracts: 'crud', slides: 'crud', news: 'crud',
     profile: 'rw',
   }),
-  support: M({
-    dashboard: 'r', authors: 'r', contacts: 'crud', faq: 'crud', newsletter: 'crud',
-    customers: 'rw', news: 'crud', propals: 'r', profile: 'rw',
-  }),
+  // Profil fusionné « Libraire & Support » : union des permissions des deux anciens rôles.
   librarian: M({
-    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'r', profile: 'rw',
+    dashboard: 'r',
+    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'r', orders: 'r',
+    authors: 'r', contacts: 'crud', faq: 'crud', newsletter: 'crud', customers: 'rw', news: 'crud',
+    profile: 'rw',
   }),
   comptable: M({
     dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'r', profile: 'rw',

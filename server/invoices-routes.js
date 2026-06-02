@@ -15,7 +15,6 @@
 
 import { Router } from 'express';
 import axios from 'axios';
-import { dolibarrApi } from './dolibarr-client.js';
 
 // Client Dolibarr avec clé admin (opérations d'écriture sur factures).
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;

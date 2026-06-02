@@ -9,7 +9,22 @@
  */
 
 import { Router } from 'express';
+import axios from 'axios';
 import { runTransfer, getTransferSummary } from './accounting-engine.js';
+
+// ─── CLIENT API REST DOLIBARR (clé admin) ────────────────────
+// Utilisé pour créer/valider les factures fournisseurs via les classes métier
+// natives (numérotation légale, triggers, mouvements de stock) plutôt que par
+// INSERT SQL direct. Voir remédiation comptable Phase 1.
+const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
+if (!ADMIN_API_KEY) {
+  console.warn('[ACCOUNTING] DOLIBARR_ADMIN_API_KEY non définie — la création de factures fournisseurs échouera');
+}
+const adminApi = axios.create({
+  baseURL: process.env.DOLIBARR_URL || 'http://localhost/dolibarr/htdocs/api/index.php',
+  headers: { DOLAPIKEY: ADMIN_API_KEY, 'Content-Type': 'application/json', 'Accept-Encoding': 'identity' },
+  timeout: 30000,
+});
 
 // ─── LABELS FRANÇAIS ─────────────────────────────────────────
 const PAYMENT_METHOD_LABELS = {
@@ -70,12 +85,133 @@ function parseDateRange(req) {
   return { date_from, date_to };
 }
 
+const DLL_ROYALTY_RATE_AFTER_THRESHOLD = 10;
+
+function isDllContractType(contractType) {
+  return String(contractType || '').startsWith('harmattan_dll');
+}
+
+function computeRoyaltyBreakdown({ contractType, unitsSold, grossHt, cumulativeUnits, threshold, rate, thresholdMode }) {
+  const units = Number(unitsSold) || 0;
+  const gross = Number(grossHt) || 0;
+  const avgHtPerUnit = units > 0 ? gross / units : 0;
+
+  if (units <= 0 || gross <= 0) {
+    return {
+      avgHtPerUnit,
+      unitsOver: 0,
+      royaltyBase: 0,
+      royaltyDue: 0,
+      royaltyRateLabel: `${rate || 0}%`,
+      breakdown: [],
+    };
+  }
+
+  const safeThreshold = Math.max(0, Number(threshold) || 0);
+  const primaryRate = Number(rate) || 0;
+
+  // Contrat DLL : règle contractuelle à paliers.
+  // 15 % sur les 1000 premiers exemplaires subventionnés, puis 10 % au-delà.
+  if (isDllContractType(contractType)) {
+    let firstBandUnits;
+    if (thresholdMode === 'cumulative') {
+      const cum = Number(cumulativeUnits) || units;
+      const before = Math.max(0, cum - units);
+      firstBandUnits = Math.max(0, Math.min(cum, safeThreshold) - Math.min(before, safeThreshold));
+    } else {
+      firstBandUnits = Math.min(units, safeThreshold);
+    }
+
+    const secondBandUnits = Math.max(0, units - firstBandUnits);
+    const firstBandDue = firstBandUnits * avgHtPerUnit * (primaryRate / 100);
+    const secondBandDue = secondBandUnits * avgHtPerUnit * (DLL_ROYALTY_RATE_AFTER_THRESHOLD / 100);
+    const royaltyDue = firstBandDue + secondBandDue;
+
+    return {
+      avgHtPerUnit,
+      unitsOver: units,
+      royaltyBase: gross,
+      royaltyDue,
+      royaltyRateLabel: `${primaryRate}% puis ${DLL_ROYALTY_RATE_AFTER_THRESHOLD}%`,
+      breakdown: [
+        { label: `Premiers ${safeThreshold} ex. DLL`, units: firstBandUnits, rate: primaryRate, amount: firstBandDue },
+        { label: `Au-delà de ${safeThreshold} ex.`, units: secondBandUnits, rate: DLL_ROYALTY_RATE_AFTER_THRESHOLD, amount: secondBandDue },
+      ],
+    };
+  }
+
+  // Contrats classiques : seuil de déclenchement, droits uniquement au-delà du seuil.
+  let unitsOver = 0;
+  if (thresholdMode === 'cumulative') {
+    const cum = Number(cumulativeUnits) || units;
+    const before = cum - units;
+    if (cum > safeThreshold) {
+      unitsOver = before >= safeThreshold ? units : cum - safeThreshold;
+    }
+  } else {
+    unitsOver = Math.max(0, units - safeThreshold);
+  }
+
+  const royaltyBase = unitsOver * avgHtPerUnit;
+  const royaltyDue = royaltyBase * (primaryRate / 100);
+  return {
+    avgHtPerUnit,
+    unitsOver,
+    royaltyBase,
+    royaltyDue,
+    royaltyRateLabel: `${primaryRate}%`,
+    breakdown: [{ label: `Au-delà de ${safeThreshold} ex.`, units: unitsOver, rate: primaryRate, amount: royaltyDue }],
+  };
+}
+
 // ─── ROUTER FACTORY ──────────────────────────────────────────
 
 export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProtection }) {
   const router = Router();
   const CACHE_TTL = 60; // 1 minute pour les journaux
   const noCsrf = csrfProtection || ((req, res, next) => next());
+
+  // ─── EXERCICES FISCAUX (verrouillage natif Dolibarr) ────────
+  // Le verrouillage s'appuie sur llx_accounting_fiscalyear (modèle natif) :
+  // un exercice clôturé (statut=1) fige ses écritures (date_validated) et interdit
+  // toute écriture/transfert sur sa période. Mode 'blockedonclosed' : tout est
+  // ouvert par défaut, seuls les exercices clôturés sont bloqués.
+  // Aligne la config Dolibarr une seule fois (sans écraser un choix explicite).
+  (async () => {
+    try {
+      await dolibarrPool.query(
+        `INSERT INTO llx_const (name, entity, value, type, visible)
+         SELECT 'ACCOUNTANCY_FISCAL_PERIOD_MODE', 0, 'blockedonclosed', 'chaine', 0
+         FROM DUAL WHERE NOT EXISTS (
+           SELECT 1 FROM llx_const WHERE name = 'ACCOUNTANCY_FISCAL_PERIOD_MODE' AND entity IN (0, 1))`
+      );
+    } catch (e) { console.warn('[ACCOUNTING] set ACCOUNTANCY_FISCAL_PERIOD_MODE:', e.message); }
+  })();
+
+  // Liste des exercices clôturés (statut=1) → bornes [start, end].
+  const getClosedRanges = async () => {
+    const [rows] = await dolibarrPool.query(
+      `SELECT DATE(date_start) AS date_start, DATE(date_end) AS date_end
+         FROM llx_accounting_fiscalyear WHERE entity = 1 AND statut = 1
+          AND date_start IS NOT NULL AND date_end IS NOT NULL`
+    );
+    return rows.map(r => ({ start: r.date_start, end: r.date_end }));
+  };
+  // Une date tombe-t-elle dans un exercice clôturé ?
+  const isDateLockedAsync = async (dateStr) => {
+    const ranges = await getClosedRanges();
+    return ranges.some(r => String(dateStr) >= r.start && String(dateStr) <= r.end);
+  };
+  // Un intervalle chevauche-t-il un exercice clôturé ?
+  const rangeOverlapsClosed = async (from, to) => {
+    const ranges = await getClosedRanges();
+    return ranges.find(r => String(from) <= r.end && String(to) >= r.start) || null;
+  };
+  // Borne de clôture (date de fin du dernier exercice clos) — pour affichage.
+  const getClosedUntil = async () => {
+    const ranges = await getClosedRanges();
+    return ranges.length ? ranges.reduce((m, r) => (r.end > m ? r.end : m), ranges[0].end) : null;
+  };
 
   // Invalide les caches dépendant des écritures
   function invalidateAccountingCache() {
@@ -87,6 +223,144 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
   function currentYearRange() {
     const y = new Date().getFullYear();
     return { date_from: `${y}-01-01`, date_to: `${y}-12-31` };
+  }
+
+  async function calculateRoyaltyRows(filters = {}) {
+    const { year = new Date().getFullYear(), month, threshold_mode = 'cumulative', contract_type, author } = filters;
+    const yearInt = parseInt(year) || new Date().getFullYear();
+    const monthInt = month ? parseInt(month) : null;
+    const date_from = monthInt ? `${yearInt}-${String(monthInt).padStart(2, '0')}-01` : `${yearInt}-01-01`;
+    const date_to = monthInt ? new Date(yearInt, monthInt, 0).toISOString().split('T')[0] : `${yearInt}-12-31`;
+
+    let whereContract = `WHERE c.statut >= 1 AND ce.book_isbn IS NOT NULL AND ce.book_isbn <> ''`;
+    const paramsContract = [];
+    if (contract_type) { whereContract += ' AND ce.contract_type = ?'; paramsContract.push(contract_type); }
+    if (author) { whereContract += ' AND s.nom LIKE ?'; paramsContract.push(`%${String(author).replace(/[%_]/g, '')}%`); }
+
+    const [contracts] = await dolibarrPool.query(
+      `SELECT c.rowid AS contract_id, c.ref, c.statut, c.date_contrat,
+              s.rowid AS author_id, s.nom AS author_name, s.email AS author_email,
+              s.code_fournisseur, s.fournisseur,
+              ce.book_title, ce.book_isbn, ce.contract_type,
+              ce.royalty_rate_print, ce.royalty_rate_digital,
+              ce.royalty_threshold, ce.free_author_copies
+       FROM llx_contrat c
+       JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+       JOIN llx_societe s ON s.rowid = c.fk_soc
+       ${whereContract}
+       ORDER BY s.nom ASC, ce.book_title ASC`,
+      paramsContract
+    );
+
+    const results = [];
+    let contractsWithoutSales = 0;
+
+    for (const c of contracts) {
+      const isbnNorm = normalizeIsbn(c.book_isbn);
+      if (!isbnNorm) continue;
+
+      let cumulativeUnits = 0;
+      if (threshold_mode === 'cumulative') {
+        const [[cumRow]] = await dolibarrPool.query(
+          `SELECT COALESCE(SUM(fd.qty), 0) AS units
+           FROM llx_facturedet fd
+           JOIN llx_facture f ON f.rowid = fd.fk_facture
+           JOIN llx_product p ON p.rowid = fd.fk_product
+           WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
+             AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
+             AND f.datef <= ?`,
+          [isbnNorm, date_to]
+        );
+        cumulativeUnits = Number(cumRow.units);
+      }
+
+      const [[periodRow]] = await dolibarrPool.query(
+        `SELECT COALESCE(SUM(fd.qty), 0) AS units_sold,
+                COALESCE(SUM(fd.total_ht), 0) AS gross_ht,
+                COUNT(DISTINCT f.rowid) AS invoice_count
+         FROM llx_facturedet fd
+         JOIN llx_facture f ON f.rowid = fd.fk_facture
+         JOIN llx_product p ON p.rowid = fd.fk_product
+         WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
+           AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
+           AND f.datef BETWEEN ? AND ?`,
+        [isbnNorm, date_from, date_to]
+      );
+
+      const unitsSold = Number(periodRow.units_sold);
+      const grossHt = Number(periodRow.gross_ht);
+      if (unitsSold === 0) { contractsWithoutSales += 1; continue; }
+
+      const threshold = Number(c.royalty_threshold) || 0;
+      const freeCopies = Number(c.free_author_copies) || 0;
+      const rate = Number(c.royalty_rate_print) || 0;
+      const royalty = computeRoyaltyBreakdown({
+        contractType: c.contract_type,
+        unitsSold,
+        grossHt,
+        cumulativeUnits,
+        threshold,
+        rate,
+        thresholdMode: threshold_mode,
+      });
+
+      results.push({
+        contract_id: c.contract_id,
+        contract_ref: c.ref,
+        author_id: c.author_id,
+        author_name: c.author_name,
+        author_email: c.author_email,
+        author_supplier_code: c.code_fournisseur,
+        author_is_supplier: Number(c.fournisseur) >= 1,
+        book_title: c.book_title,
+        book_isbn: c.book_isbn,
+        contract_type: c.contract_type,
+        royalty_rate: rate,
+        royalty_rate_label: royalty.royaltyRateLabel,
+        royalty_breakdown: royalty.breakdown.map(b => ({
+          ...b,
+          units: Math.round(Number(b.units) * 100) / 100,
+          amount: Math.round(Number(b.amount)),
+        })),
+        threshold,
+        free_copies: freeCopies,
+        units_sold: unitsSold,
+        units_cumulative: cumulativeUnits,
+        units_over_threshold: Math.round(royalty.unitsOver * 100) / 100,
+        gross_ht: Math.round(grossHt),
+        avg_ht_per_unit: Math.round(royalty.avgHtPerUnit),
+        royalty_base: Math.round(royalty.royaltyBase),
+        royalty_due: Math.round(royalty.royaltyDue),
+        invoice_count: Number(periodRow.invoice_count),
+      });
+    }
+
+    let whereNoIsbn = `WHERE c.statut >= 1 AND (ce.book_isbn IS NULL OR ce.book_isbn = '')`;
+    const paramsNoIsbn = [];
+    if (contract_type) { whereNoIsbn += ' AND ce.contract_type = ?'; paramsNoIsbn.push(contract_type); }
+    if (author) { whereNoIsbn += ' AND s.nom LIKE ?'; paramsNoIsbn.push(`%${String(author).replace(/[%_]/g, '')}%`); }
+    const [[noIsbn]] = await dolibarrPool.query(
+      `SELECT COUNT(*) AS nb FROM llx_contrat c
+       JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+       JOIN llx_societe s ON s.rowid = c.fk_soc
+       ${whereNoIsbn}`,
+      paramsNoIsbn
+    );
+
+    const sorted = results.sort((a, b) => b.royalty_due - a.royalty_due);
+    return {
+      period: { from: date_from, to: date_to, year: yearInt, month: monthInt },
+      threshold_mode,
+      summary: {
+        nb_contracts: sorted.length,
+        nb_authors: new Set(sorted.map(r => r.author_id)).size,
+        nb_contracts_without_sales: contractsWithoutSales,
+        nb_contracts_without_isbn: Number(noIsbn.nb),
+        total_units_sold: sorted.reduce((s, r) => s + r.units_sold, 0),
+        total_royalties_due: Math.round(sorted.reduce((s, r) => s + r.royalty_due, 0)),
+      },
+      royalties: sorted,
+    };
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -626,168 +900,104 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
 
   router.get('/royalties', auth, async (req, res) => {
     try {
-      const { year = new Date().getFullYear(), month, threshold_mode = 'cumulative', contract_type, author } = req.query;
-
-      // Période
-      let date_from, date_to;
-      if (month) {
-        const m = parseInt(month);
-        date_from = `${year}-${String(m).padStart(2, '0')}-01`;
-        const endDate = new Date(year, m, 0);
-        date_to = endDate.toISOString().split('T')[0];
-      } else {
-        date_from = `${year}-01-01`;
-        date_to = `${year}-12-31`;
-      }
-
-      // Liste des contrats actifs avec ISBN
-      let whereContract = `WHERE c.statut >= 1 AND ce.book_isbn IS NOT NULL AND ce.book_isbn <> ''`;
-      const paramsContract = [];
-      if (contract_type) { whereContract += ' AND ce.contract_type = ?'; paramsContract.push(contract_type); }
-      if (author) { whereContract += ' AND s.nom LIKE ?'; paramsContract.push(`%${String(author).replace(/[%_]/g, '')}%`); }
-
-      const [contracts] = await dolibarrPool.query(
-        `SELECT c.rowid AS contract_id, c.ref, c.statut, c.date_contrat,
-                s.rowid AS author_id, s.nom AS author_name, s.email AS author_email,
-                ce.book_title, ce.book_isbn, ce.contract_type,
-                ce.royalty_rate_print, ce.royalty_rate_digital,
-                ce.royalty_threshold, ce.free_author_copies
-         FROM llx_contrat c
-         JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
-         JOIN llx_societe s ON s.rowid = c.fk_soc
-         ${whereContract}
-         ORDER BY s.nom ASC, ce.book_title ASC`,
-        paramsContract
-      );
-
-      // Calcul pour chaque contrat
-      const results = [];
-      let contractsWithoutSales = 0;
-
-      for (const c of contracts) {
-        const isbnNorm = normalizeIsbn(c.book_isbn);
-        if (!isbnNorm) continue;
-
-        // Période de ventes
-        let periodClause = 'f.datef BETWEEN ? AND ?';
-        let periodParams = [date_from, date_to];
-
-        // Ventes cumulées depuis publication (pour seuil cumulatif)
-        let cumulativeUnits = 0;
-        if (threshold_mode === 'cumulative') {
-          const [[cumRow]] = await dolibarrPool.query(
-            `SELECT COALESCE(SUM(fd.qty), 0) AS units
-             FROM llx_facturedet fd
-             JOIN llx_facture f ON f.rowid = fd.fk_facture
-             JOIN llx_product p ON p.rowid = fd.fk_product
-             WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
-               AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
-               AND f.datef <= ?`,
-            [isbnNorm, date_to]
-          );
-          cumulativeUnits = Number(cumRow.units);
-        }
-
-        // Ventes sur la période.
-        // fd.total_ht > 0 : exclut les exemplaires facturés à 0 F (service de
-        // presse, dons) — ils décrémentent le stock mais ne sont pas des ventes,
-        // donc ni comptés en unités ni dans l'assiette des royalties.
-        const [[periodRow]] = await dolibarrPool.query(
-          `SELECT COALESCE(SUM(fd.qty), 0) AS units_sold,
-                  COALESCE(SUM(fd.total_ht), 0) AS gross_ht,
-                  COUNT(DISTINCT f.rowid) AS invoice_count
-           FROM llx_facturedet fd
-           JOIN llx_facture f ON f.rowid = fd.fk_facture
-           JOIN llx_product p ON p.rowid = fd.fk_product
-           WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
-             AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
-             AND ${periodClause}`,
-          [isbnNorm, ...periodParams]
-        );
-
-        const unitsSold = Number(periodRow.units_sold);
-        const grossHt = Number(periodRow.gross_ht);
-
-        if (unitsSold === 0) { contractsWithoutSales += 1; continue; }
-
-        const threshold = Number(c.royalty_threshold) || 0;
-        const freeCopies = Number(c.free_author_copies) || 0;
-        const rate = Number(c.royalty_rate_print) || 0;
-
-        // Assiette des royalties = unités VENDUES au-dessus du seuil de versement.
-        // IMPORTANT : on NE retranche PAS les exemplaires gratuits (free_author_copies).
-        // Ces exemplaires sont remis gratuitement à l'auteur et ne sont jamais facturés
-        // (absents de llx_facturedet), donc déjà exclus de `unitsSold`. Les soustraire
-        // une seconde fois sous-estimait les droits dus (cf. contrat Art. 4 : « les droits
-        // ne portent pas sur les exemplaires remis gratuitement » — exclusion, pas seuil).
-        let unitsOver = 0;
-        if (threshold_mode === 'cumulative') {
-          const cumBefore = cumulativeUnits - unitsSold; // cumulative avant cette période
-          if (cumulativeUnits > threshold) {
-            if (cumBefore >= threshold) {
-              unitsOver = unitsSold;
-            } else {
-              unitsOver = cumulativeUnits - threshold;
-            }
-          }
-        } else {
-          unitsOver = Math.max(0, unitsSold - threshold);
-        }
-
-        const avgHtPerUnit = unitsSold > 0 ? grossHt / unitsSold : 0;
-        const royaltyBase = unitsOver * avgHtPerUnit;
-        const royaltyDue = royaltyBase * (rate / 100);
-
-        results.push({
-          contract_id: c.contract_id,
-          contract_ref: c.ref,
-          author_id: c.author_id,
-          author_name: c.author_name,
-          author_email: c.author_email,
-          book_title: c.book_title,
-          book_isbn: c.book_isbn,
-          contract_type: c.contract_type,
-          royalty_rate: rate,
-          threshold,
-          free_copies: freeCopies,
-          units_sold: unitsSold,
-          units_cumulative: cumulativeUnits,
-          units_over_threshold: Math.round(unitsOver * 100) / 100,
-          gross_ht: Math.round(grossHt),
-          avg_ht_per_unit: Math.round(avgHtPerUnit),
-          royalty_base: Math.round(royaltyBase),
-          royalty_due: Math.round(royaltyDue),
-          invoice_count: Number(periodRow.invoice_count),
-        });
-      }
-
-      // Contrats sans ISBN (avertissement)
-      const [[noIsbn]] = await dolibarrPool.query(
-        `SELECT COUNT(*) AS nb FROM llx_contrat c
-         JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
-         WHERE c.statut >= 1 AND (ce.book_isbn IS NULL OR ce.book_isbn = '')`
-      );
-
-      const totalRoyalties = results.reduce((s, r) => s + r.royalty_due, 0);
-      const totalUnits = results.reduce((s, r) => s + r.units_sold, 0);
-      const uniqueAuthors = new Set(results.map(r => r.author_id)).size;
-
-      res.json({
-        period: { from: date_from, to: date_to, year: parseInt(year), month: month ? parseInt(month) : null },
-        threshold_mode,
-        summary: {
-          nb_contracts: results.length,
-          nb_authors: uniqueAuthors,
-          nb_contracts_without_sales: contractsWithoutSales,
-          nb_contracts_without_isbn: Number(noIsbn.nb),
-          total_units_sold: totalUnits,
-          total_royalties_due: Math.round(totalRoyalties),
-        },
-        royalties: results.sort((a, b) => b.royalty_due - a.royalty_due),
-      });
+      res.json(await calculateRoyaltyRows(req.query));
     } catch (err) {
       console.error('[ACCOUNTING] Royalties error:', err.message);
       res.status(500).json({ error: 'Erreur calcul royalties' });
+    }
+  });
+
+  router.post('/royalties/supplier-invoices', auth, noCsrf, async (req, res) => {
+    try {
+      const calc = await calculateRoyaltyRows(req.body || {});
+      const periodEnd = calc.period.to;
+      if (await isDateLockedAsync(periodEnd)) {
+        return res.status(409).json({
+          error: `Date dans un exercice clôturé (${periodEnd}) : impossible de créer les factures de royalties.`,
+          code: 'LOCKED_PERIOD',
+        });
+      }
+
+      const created = [];
+      const skipped = [];
+      const errors = [];
+      const suffix = calc.period.month ? `${calc.period.year}${String(calc.period.month).padStart(2, '0')}` : String(calc.period.year);
+
+      for (const r of calc.royalties.filter(row => Number(row.royalty_due) > 0)) {
+        const refSupplier = `DA-${suffix}-${r.contract_ref}`;
+        const [[existing]] = await dolibarrPool.query(
+          `SELECT rowid, ref FROM llx_facture_fourn WHERE fk_soc = ? AND ref_supplier = ? LIMIT 1`,
+          [r.author_id, refSupplier]
+        );
+        if (existing) {
+          skipped.push({ contract_id: r.contract_id, contract_ref: r.contract_ref, reason: 'exists', ref: existing.ref });
+          continue;
+        }
+
+        let invoiceId = null;
+        try {
+          if (!r.author_is_supplier) {
+            await adminApi.put(`/thirdparties/${r.author_id}`, {
+              fournisseur: 1,
+              code_fournisseur: -1,
+            });
+          }
+
+          const label = `Droits d'auteur - ${r.book_title || r.contract_ref} - ${calc.period.month ? `${String(calc.period.month).padStart(2, '0')}/` : ''}${calc.period.year}`;
+          const createRes = await adminApi.post('/supplierinvoices', {
+            socid: Number(r.author_id),
+            type: 0,
+            date: periodEnd,
+            date_echeance: periodEnd,
+            ref_supplier: refSupplier,
+            libelle: label.slice(0, 250),
+            note_public: `Contrat: ${r.contract_ref}\nPériode: ${calc.period.from} au ${calc.period.to}\nVentes: ${r.units_sold} ex. | CA HT: ${r.gross_ht} XOF\nCalcul: ${r.royalty_rate_label} sur ${r.units_over_threshold} ex. rémunérables`,
+          });
+          invoiceId = createRes.data;
+
+          await adminApi.post(`/supplierinvoices/${invoiceId}/lines`, {
+            description: label.slice(0, 250),
+            pu_ht: Math.round(Number(r.royalty_due)),
+            tva_tx: 0,
+            qty: 1,
+            product_type: 1,
+            remise_percent: 0,
+          });
+
+          await adminApi.post(`/supplierinvoices/${invoiceId}/validate`, {});
+
+          let ref = `#${invoiceId}`;
+          try {
+            const detail = await adminApi.get(`/supplierinvoices/${invoiceId}`);
+            ref = detail.data?.ref || ref;
+          } catch { /* ref de repli */ }
+
+          created.push({ contract_id: r.contract_id, contract_ref: r.contract_ref, author: r.author_name, amount: Math.round(Number(r.royalty_due)), id: invoiceId, ref, ref_supplier: refSupplier });
+        } catch (err) {
+          if (invoiceId) {
+            try { await adminApi.delete(`/supplierinvoices/${invoiceId}`); }
+            catch (cleanupErr) { console.warn('[ACCOUNTING] Nettoyage facture royalty échoué:', cleanupErr.message); }
+          }
+          errors.push({
+            contract_id: r.contract_id,
+            contract_ref: r.contract_ref,
+            author: r.author_name,
+            error: err.response?.data?.error?.message || err.response?.data?.error || err.message,
+          });
+        }
+      }
+
+      invalidateAccountingCache();
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.admin.username, 'royalty_supplier_invoices',
+            `${created.length} facture(s) royalties créée(s), ${skipped.length} déjà existante(s), ${errors.length} erreur(s) — ${calc.period.from} → ${calc.period.to}`);
+      } catch { /* ignore */ }
+
+      res.json({ ok: errors.length === 0, period: calc.period, created, skipped, errors });
+    } catch (err) {
+      console.error('[ACCOUNTING] Royalty supplier invoices error:', err.message);
+      res.status(500).json({ error: 'Erreur création factures fournisseur royalties : ' + err.message });
     }
   });
 
@@ -939,50 +1149,13 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
         filename = `balance-agee-${today()}.csv`;
       }
       else if (journal === 'royalties') {
-        // Re-calcul via la même logique que /royalties
-        const year = parseInt(req.query.year) || new Date().getFullYear();
-        const month = req.query.month ? parseInt(req.query.month) : null;
-        const d_from = month ? `${year}-${String(month).padStart(2, '0')}-01` : `${year}-01-01`;
-        const d_to = month ? new Date(year, month, 0).toISOString().split('T')[0] : `${year}-12-31`;
-
-        const [contracts] = await dolibarrPool.query(
-          `SELECT c.rowid AS contract_id, c.ref, s.nom AS author, s.email,
-                  ce.book_title, ce.book_isbn,
-                  ce.royalty_rate_print, ce.royalty_threshold, ce.free_author_copies
-           FROM llx_contrat c
-           JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
-           JOIN llx_societe s ON s.rowid = c.fk_soc
-           WHERE c.statut >= 1 AND ce.book_isbn IS NOT NULL AND ce.book_isbn <> ''
-           ORDER BY s.nom ASC`
-        );
-
-        const rows = [];
-        for (const c of contracts) {
-          const isbnNorm = normalizeIsbn(c.book_isbn);
-          const [[sales]] = await dolibarrPool.query(
-            `SELECT COALESCE(SUM(fd.qty), 0) AS units, COALESCE(SUM(fd.total_ht), 0) AS gross_ht
-             FROM llx_facturedet fd
-             JOIN llx_facture f ON f.rowid = fd.fk_facture
-             JOIN llx_product p ON p.rowid = fd.fk_product
-             WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
-               AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
-               AND f.datef BETWEEN ? AND ?`,
-            [isbnNorm, d_from, d_to]
-          );
-          const units = Number(sales.units);
-          if (units === 0) continue;
-          const gross = Number(sales.gross_ht);
-          const rate = Number(c.royalty_rate_print) || 0;
-          // Pas de soustraction des ex. gratuits : non facturés, déjà hors `units`.
-          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0));
-          const royalty = (gross / units) * unitsOver * (rate / 100);
-          rows.push({
-            ref: c.ref, author: c.author, email: c.email, book: c.book_title, isbn: c.book_isbn,
-            rate, threshold: c.royalty_threshold, free: c.free_author_copies,
-            units, unitsOver: Math.round(unitsOver * 100) / 100, gross: Math.round(gross),
-            royalty: Math.round(royalty),
-          });
-        }
+        const calc = await calculateRoyaltyRows(req.query);
+        const rows = calc.royalties.map(r => ({
+          ref: r.contract_ref, author: r.author_name, email: r.author_email, book: r.book_title, isbn: r.book_isbn,
+          rate: r.royalty_rate_label, threshold: r.threshold, free: r.free_copies,
+          units: r.units_sold, unitsOver: r.units_over_threshold, gross: r.gross_ht,
+          royalty: r.royalty_due,
+        }));
 
         csv = toCsv([
           { label: 'Référence contrat', key: 'ref' },
@@ -998,7 +1171,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           { label: 'CA HT', key: 'gross' },
           { label: 'Royalty due', key: 'royalty' },
         ], rows);
-        filename = `royalties-${d_from}-${d_to}.csv`;
+        filename = `royalties-${calc.period.from}-${calc.period.to}.csv`;
       }
       else if (journal === 'royalties_od') {
         // Génère un fichier d'écritures de journal OD prêt à importer dans Dolibarr
@@ -1006,48 +1179,16 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
         //   DEBIT  6512 (Redevances pour brevets, licences, marques) — charge royalties
         //   CREDIT 401  (Fournisseurs)                              — dette envers l'auteur
         // Une écriture (2 lignes) par contrat avec royalty > 0 sur la période.
-        const year = parseInt(req.query.year) || new Date().getFullYear();
-        const month = req.query.month ? parseInt(req.query.month) : null;
-        const d_from = month ? `${year}-${String(month).padStart(2, '0')}-01` : `${year}-01-01`;
-        const d_to = month ? new Date(year, month, 0).toISOString().split('T')[0] : `${year}-12-31`;
-        const docDate = d_to;
-
-        const [contracts] = await dolibarrPool.query(
-          `SELECT c.rowid AS contract_id, c.ref, s.rowid AS soc_id, s.nom AS author,
-                  s.code_fournisseur, ce.book_title, ce.book_isbn,
-                  ce.royalty_rate_print, ce.royalty_threshold, ce.free_author_copies
-           FROM llx_contrat c
-           JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
-           JOIN llx_societe s ON s.rowid = c.fk_soc
-           WHERE c.statut >= 1 AND ce.book_isbn IS NOT NULL AND ce.book_isbn <> ''
-           ORDER BY s.nom ASC`
-        );
-
+        const calc = await calculateRoyaltyRows(req.query);
+        const docDate = calc.period.to;
         const odRows = [];
-        for (const c of contracts) {
-          const isbnNorm = normalizeIsbn(c.book_isbn);
-          const [[sales]] = await dolibarrPool.query(
-            `SELECT COALESCE(SUM(fd.qty), 0) AS units, COALESCE(SUM(fd.total_ht), 0) AS gross_ht
-             FROM llx_facturedet fd
-             JOIN llx_facture f ON f.rowid = fd.fk_facture
-             JOIN llx_product p ON p.rowid = fd.fk_product
-             WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
-               AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
-               AND f.datef BETWEEN ? AND ?`,
-            [isbnNorm, d_from, d_to]
-          );
-          const units = Number(sales.units);
-          if (units === 0) continue;
-          const gross = Number(sales.gross_ht);
-          const rate = Number(c.royalty_rate_print) || 0;
-          // Pas de soustraction des ex. gratuits : non facturés, déjà hors `units`.
-          const unitsOver = Math.max(0, units - Number(c.royalty_threshold || 0));
-          const royalty = Math.round((gross / units) * unitsOver * (rate / 100));
+        for (const r of calc.royalties) {
+          const royalty = Math.round(Number(r.royalty_due));
           if (royalty <= 0) continue;
 
-          const piece = `ROY-${c.ref}-${month ? String(month).padStart(2, '0') : 'AN'}-${year}`;
-          const authorSubledger = c.code_fournisseur || `AUT${c.soc_id}`;
-          const label = `Royalties ${c.book_title || c.ref} — ${c.author} (${month ? `${String(month).padStart(2, '0')}/` : ''}${year})`;
+          const piece = `ROY-${r.contract_ref}-${calc.period.month ? String(calc.period.month).padStart(2, '0') : 'AN'}-${calc.period.year}`;
+          const authorSubledger = r.author_supplier_code || `AUT${r.author_id}`;
+          const label = `Royalties ${r.book_title || r.contract_ref} — ${r.author_name} (${calc.period.month ? `${String(calc.period.month).padStart(2, '0')}/` : ''}${calc.period.year})`;
 
           // DEBIT charge
           odRows.push({
@@ -1073,34 +1214,63 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           { label: 'Débit', key: 'debit' },
           { label: 'Crédit', key: 'credit' },
         ], odRows);
-        filename = `royalties-OD-${d_from}-${d_to}.csv`;
+        filename = `royalties-OD-${calc.period.from}-${calc.period.to}.csv`;
       }
       else if (journal === 'fec') {
-        // Fichier des Écritures Comptables — format normalisé expert-comptable
-        const [rows] = await dolibarrPool.query(
-          `SELECT piece_num, doc_date, doc_ref, code_journal, journal_label,
-                  numero_compte, label_compte, subledger_account, subledger_label,
-                  label_operation, debit, credit, lettering_code, date_lettering,
-                  date_validated
-           FROM llx_accounting_bookkeeping
-           WHERE entity = 1 AND doc_date BETWEEN ? AND ?
-           ORDER BY piece_num, rowid`,
-          [date_from, date_to]
-        );
-        const fecDate = (d) => d ? (d instanceof Date ? d : new Date(d)).toISOString().split('T')[0].replace(/-/g, '') : '';
-        const fecAmt = (v) => String(Math.round(Number(v || 0) * 100) / 100).replace('.', ',');
-        const header = ['JournalCode', 'JournalLib', 'EcritureNum', 'EcritureDate', 'CompteNum',
-          'CompteLib', 'CompAuxNum', 'CompAuxLib', 'PieceRef', 'PieceDate', 'EcritureLib',
-          'Debit', 'Credit', 'EcritureLet', 'DateLet', 'ValidDate', 'Montantdevise', 'Idevise'];
-        const lines = rows.map(r => [
-          r.code_journal || 'OD', r.journal_label || '', r.piece_num, fecDate(r.doc_date),
-          r.numero_compte, r.label_compte || '', r.subledger_account || '', r.subledger_label || '',
-          r.doc_ref || '', fecDate(r.doc_date), (r.label_operation || '').replace(/[\t\n\r]/g, ' '),
-          fecAmt(r.debit), fecAmt(r.credit), r.lettering_code || '', fecDate(r.date_lettering),
-          fecDate(r.date_validated), '', '',
-        ].join('\t'));
-        csv = '﻿' + header.join('\t') + '\n' + lines.join('\n');
-        filename = `FEC-${date_from}-${date_to}.txt`;
+        // Fichier des Écritures Comptables (DGFiP) — tab-separated, .txt.
+        // On délègue à Dolibarr natif (AccountancyExport, format FEC=1000) : le plus
+        // conforme (21 colonnes, ValidDate/NumFacture/FichierFacture gérés nativement).
+        // notnotifiedasexport=1 → aucune mutation (pas de date_export) ;
+        // alreadyexport=1 → exporte toujours, même des écritures déjà exportées.
+        const fecName = `FEC-${date_from}-${date_to}.txt`;
+        let fec = null;
+        try {
+          const r = await adminApi.get('/accountancy/exportdata', {
+            params: { period: 'custom', date_min: date_from, date_max: date_to, format: 1000, alreadyexport: 1, notnotifiedasexport: 1 },
+            responseType: 'text', transformResponse: (x) => x,
+          });
+          fec = String(r.data || '');
+        } catch (e) {
+          console.warn('[ACCOUNTING] FEC natif indisponible, repli local:', e.response?.status || e.message);
+        }
+
+        if (fec === null) {
+          // Repli : génération locale conforme (tab-separated, CRLF, BOM, centimes).
+          const [rows] = await dolibarrPool.query(
+            `SELECT piece_num, doc_date, doc_ref, code_journal, journal_label,
+                    numero_compte, label_compte, subledger_account, subledger_label,
+                    label_operation, debit, credit, lettering_code, date_lettering,
+                    date_validated, date_lim_reglement, date_creation
+             FROM llx_accounting_bookkeeping
+             WHERE entity = 1 AND doc_date BETWEEN ? AND ?
+             ORDER BY piece_num, rowid`,
+            [date_from, date_to]
+          );
+          const fecDate = (d) => d ? (d instanceof Date ? d : new Date(d)).toISOString().split('T')[0].replace(/-/g, '') : '';
+          const fecAmt = (v) => String(Math.round(Number(v || 0) * 100) / 100).replace('.', ',');
+          const clean = (s) => String(s || '').replace(/[\t\n\r]/g, ' ');
+          const header = ['JournalCode', 'JournalLib', 'EcritureNum', 'EcritureDate', 'CompteNum',
+            'CompteLib', 'CompAuxNum', 'CompAuxLib', 'PieceRef', 'PieceDate', 'EcritureLib',
+            'Debit', 'Credit', 'EcritureLet', 'DateLet', 'ValidDate', 'Montantdevise', 'Idevise',
+            'DateLimitReglmt', 'NumFacture', 'FichierFacture'];
+          const lines = rows.map(r => [
+            r.code_journal || 'OD', clean(r.journal_label), r.piece_num, fecDate(r.date_creation || r.doc_date),
+            r.numero_compte, clean(r.label_compte), r.subledger_account || '', clean(r.subledger_label),
+            clean(r.doc_ref), fecDate(r.doc_date), clean(r.label_operation),
+            fecAmt(r.debit), fecAmt(r.credit), r.lettering_code || '', fecDate(r.date_lettering),
+            fecDate(r.date_validated), '', '', fecDate(r.date_lim_reglement), clean(r.doc_ref), '',
+          ].join('\t'));
+          fec = '﻿' + [header.join('\t'), ...lines].join('\r\n') + '\r\n';
+        }
+
+        try {
+          db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+            .run(req.admin.username, 'export_accounting_fec', `Export FEC ${date_from} → ${date_to}`);
+        } catch { /* ignore */ }
+
+        res.setHeader('Content-Type', 'text/tab-separated-values; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${fecName}"`);
+        return res.send(fec);
       }
       else if (journal === 'ledger') {
         const [rows] = await dolibarrPool.query(
@@ -1210,10 +1380,114 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
 
   router.get('/transfer/status', auth, async (req, res) => {
     try {
-      res.json(await getTransferSummary(dolibarrPool));
+      const summary = await getTransferSummary(dolibarrPool);
+      const [[v]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS n FROM llx_accounting_bookkeeping WHERE entity = 1 AND date_validated IS NOT NULL`
+      );
+      res.json({ ...summary, closed_until: await getClosedUntil(), validated_lines: Number(v.n || 0) });
     } catch (err) {
       console.error('[ACCOUNTING] Transfer status error:', err.message);
       res.status(500).json({ error: 'Erreur état du grand livre' });
+    }
+  });
+
+  // ─── EXERCICES FISCAUX ──────────────────────────────────────
+  // Liste des exercices avec nb de lignes au grand livre sur leur période.
+  router.get('/fiscal-years', auth, async (req, res) => {
+    try {
+      const [rows] = await dolibarrPool.query(
+        `SELECT fy.rowid AS id, fy.label, DATE(fy.date_start) AS date_start, DATE(fy.date_end) AS date_end,
+                fy.statut,
+                (SELECT COUNT(*) FROM llx_accounting_bookkeeping b
+                  WHERE b.entity = 1 AND b.doc_date BETWEEN fy.date_start AND fy.date_end) AS lines
+           FROM llx_accounting_fiscalyear fy
+          WHERE fy.entity = 1
+          ORDER BY fy.date_start DESC`
+      );
+      res.json({ fiscal_years: rows.map(r => ({
+        id: r.id, label: r.label, date_start: r.date_start, date_end: r.date_end,
+        closed: Number(r.statut) === 1, lines: Number(r.lines),
+      })) });
+    } catch (err) {
+      console.error('[ACCOUNTING] Fiscal years list error:', err.message);
+      res.status(500).json({ error: 'Erreur exercices fiscaux' });
+    }
+  });
+
+  // Création d'un exercice (ouvert). Refuse tout chevauchement avec un exercice existant.
+  router.post('/fiscal-years', auth, noCsrf, async (req, res) => {
+    try {
+      const { date_start, date_end, label } = req.body || {};
+      if (!date_start || !/^\d{4}-\d{2}-\d{2}$/.test(date_start) || !date_end || !/^\d{4}-\d{2}-\d{2}$/.test(date_end)) {
+        return res.status(400).json({ error: 'Dates invalides' });
+      }
+      if (date_end <= date_start) return res.status(400).json({ error: 'La date de fin doit être postérieure au début' });
+      const [[overlap]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS n FROM llx_accounting_fiscalyear
+          WHERE entity = 1 AND date_start <= ? AND date_end >= ?`,
+        [date_end, date_start]
+      );
+      if (Number(overlap.n) > 0) return res.status(409).json({ error: 'Un exercice chevauche déjà cette période' });
+      const lbl = (label || `Exercice ${date_start.slice(0, 4)}`).slice(0, 128);
+      const userId = req.admin?.dolibarr_user_id || 0;
+      const [ins] = await dolibarrPool.query(
+        `INSERT INTO llx_accounting_fiscalyear (label, date_start, date_end, statut, entity, datec, fk_user_author)
+         VALUES (?, ?, ?, 0, 1, NOW(), ?)`,
+        [lbl, date_start, date_end, userId]
+      );
+      try {
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(req.admin.username, 'fiscal_year_create', `Exercice « ${lbl} » ${date_start} → ${date_end}`);
+      } catch { /* ignore */ }
+      res.json({ ok: true, id: ins.insertId });
+    } catch (err) {
+      console.error('[ACCOUNTING] Fiscal year create error:', err.message);
+      res.status(500).json({ error: 'Erreur création exercice' });
+    }
+  });
+
+  // Clôture d'un exercice : fige (date_validated) ses écritures et passe statut=1.
+  // Irréversible via l'API (immuabilité comptable).
+  router.post('/fiscal-years/:id/close', auth, noCsrf, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Exercice invalide' });
+      const [[fy]] = await dolibarrPool.query(
+        `SELECT rowid, label, DATE(date_start) AS date_start, DATE(date_end) AS date_end, statut
+           FROM llx_accounting_fiscalyear WHERE rowid = ? AND entity = 1`, [id]
+      );
+      if (!fy) return res.status(404).json({ error: 'Exercice introuvable' });
+      if (Number(fy.statut) === 1) return res.status(400).json({ error: 'Exercice déjà clôturé' });
+
+      const conn = await dolibarrPool.getConnection();
+      try {
+        await conn.beginTransaction();
+        // Fige les écritures de la période (idempotent : seules les non figées sont touchées).
+        const [r] = await conn.query(
+          `UPDATE llx_accounting_bookkeeping SET date_validated = NOW()
+            WHERE entity = 1 AND doc_date BETWEEN ? AND ? AND date_validated IS NULL`,
+          [fy.date_start, fy.date_end]
+        );
+        await conn.query(
+          `UPDATE llx_accounting_fiscalyear SET statut = 1, fk_user_modif = ? WHERE rowid = ?`,
+          [req.admin?.dolibarr_user_id || 0, id]
+        );
+        await conn.commit();
+        invalidateAccountingCache();
+        try {
+          db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+            .run(req.admin.username, 'fiscal_year_close', `Clôture exercice « ${fy.label} » (${fy.date_start} → ${fy.date_end}) : ${r.affectedRows || 0} écriture(s) figée(s)`);
+        } catch { /* ignore */ }
+        res.json({ ok: true, frozen: r.affectedRows || 0 });
+      } catch (e) {
+        await conn.rollback();
+        throw e;
+      } finally {
+        conn.release();
+      }
+    } catch (err) {
+      console.error('[ACCOUNTING] Fiscal year close error:', err.message);
+      res.status(500).json({ error: 'Erreur clôture exercice : ' + err.message });
     }
   });
 
@@ -1225,14 +1499,28 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date_from) || !/^\d{4}-\d{2}-\d{2}$/.test(date_to)) {
         return res.status(400).json({ error: 'Dates invalides' });
       }
-      const result = await runTransfer(dolibarrPool, { date_from, date_to, userId: req.admin?.dolibarr_user_id || 0 });
+      const closedHit = await rangeOverlapsClosed(date_from, date_to);
+      if (closedHit) {
+        return res.status(409).json({
+          error: `Exercice clôturé sur ${closedHit.start} → ${closedHit.end} : impossible de régénérer des écritures sur une période verrouillée.`,
+          code: 'LOCKED_PERIOD',
+        });
+      }
+      const force = req.body?.force === true;
+      const result = await runTransfer(dolibarrPool, { date_from, date_to, userId: req.admin?.dolibarr_user_id || 0, force });
       invalidateAccountingCache();
       try {
         db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-          .run(req.admin.username, 'accounting_transfer', `Transfert ${date_from} → ${date_to} : ${result.inserted} lignes`);
+          .run(req.admin.username, 'accounting_transfer', `Transfert ${date_from} → ${date_to}${force ? ' (forcé)' : ''} : ${result.inserted} lignes`);
       } catch { /* ignore */ }
       res.json(result);
     } catch (err) {
+      if (err.code === 'NATIVE_CONFLICT') {
+        return res.status(409).json({ error: err.message, code: 'NATIVE_CONFLICT', canForce: true });
+      }
+      if (err.code === 'LOCKED_PERIOD') {
+        return res.status(409).json({ error: err.message, code: 'LOCKED_PERIOD' });
+      }
       console.error('[ACCOUNTING] Transfer error:', err.message);
       res.status(500).json({ error: 'Erreur transfert en comptabilité : ' + err.message });
     }
@@ -1509,6 +1797,9 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
     try {
       const { date, ref, label, lines } = req.body || {};
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date invalide' });
+      if (await isDateLockedAsync(date)) {
+        return res.status(409).json({ error: `Date dans un exercice clôturé : impossible de saisir une écriture à cette date.`, code: 'LOCKED_PERIOD' });
+      }
       if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'Au moins 2 lignes requises' });
 
       let totalDebit = 0;
@@ -1533,12 +1824,12 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
       const accountNums = [...new Set(clean.map(l => l.account))];
       const [accRows] = await dolibarrPool.query(
         `SELECT account_number, label FROM llx_accounting_account
-         WHERE entity = 1 AND account_number IN (${accountNums.map(() => '?').join(',')})`,
+         WHERE entity = 1 AND active = 1 AND account_number IN (${accountNums.map(() => '?').join(',')})`,
         accountNums
       );
       const accMap = new Map(accRows.map(a => [String(a.account_number), a.label]));
       for (const num of accountNums) {
-        if (!accMap.has(num)) return res.status(400).json({ error: `Compte inconnu : ${num}` });
+        if (!accMap.has(num)) return res.status(400).json({ error: `Compte inconnu ou désactivé : ${num}` });
       }
 
       const [[mx]] = await dolibarrPool.query(
@@ -1662,59 +1953,77 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
   });
 
   router.post('/supplier-invoices', auth, noCsrf, async (req, res) => {
+    // Remédiation comptable Phase 1 : création via l'API REST Dolibarr
+    // (FactureFournisseur create → addline → validate). On hérite de la numérotation
+    // légale (getNextNumRef), des triggers (BILL_SUPPLIER_VALIDATE) et des règles métier.
+    // L'INSERT SQL direct (qui contournait tout cela) est abandonné.
+    const { supplier_id, date, ref_supplier, label, total_ht, date_due } = req.body || {};
+    if (!supplier_id) return res.status(400).json({ error: 'Fournisseur requis' });
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date invalide' });
+    const ht = Math.round(Number(total_ht) || 0);
+    if (ht <= 0) return res.status(400).json({ error: 'Montant invalide' });
+    // L'Harmattan Sénégal ne facture pas la TVA : taux 0, TTC = HT.
+    const dueDate = date_due && /^\d{4}-\d{2}-\d{2}$/.test(date_due) ? date_due : date;
+
+    // Lecture du fournisseur (nom pour le log, code compta pour avertir avant validation).
+    const [[soc]] = await dolibarrPool.query(
+      `SELECT rowid, nom, code_compta_fournisseur FROM llx_societe WHERE rowid = ? AND entity = 1`, [supplier_id]
+    );
+    if (!soc) return res.status(400).json({ error: 'Fournisseur introuvable' });
+
+    let invoiceId = null;
     try {
-      const { supplier_id, date, ref_supplier, label, total_ht, vat_rate = 0, date_due } = req.body || {};
-      if (!supplier_id) return res.status(400).json({ error: 'Fournisseur requis' });
-      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date invalide' });
-      const ht = Math.round(Number(total_ht) || 0);
-      if (ht <= 0) return res.status(400).json({ error: 'Montant HT invalide' });
-      const rate = Number(vat_rate) || 0;
-      const tva = Math.round(ht * rate / 100);
-      const ttc = ht + tva;
+      // 1. Création du brouillon (ref provisoire PROV ; la vraie numérotation se fait à la validation).
+      const createRes = await adminApi.post('/supplierinvoices', {
+        socid: Number(supplier_id),
+        type: 0,
+        date,
+        date_echeance: dueDate,
+        ref_supplier: ref_supplier || '',
+        libelle: (label || '').slice(0, 250),
+      });
+      invoiceId = createRes.data;
 
-      const [[soc]] = await dolibarrPool.query(
-        `SELECT rowid, nom FROM llx_societe WHERE rowid = ? AND entity = 1`, [supplier_id]
-      );
-      if (!soc) return res.status(400).json({ error: 'Fournisseur introuvable' });
+      // 2. Ligne unique (charge), taux de TVA 0.
+      await adminApi.post(`/supplierinvoices/${invoiceId}/lines`, {
+        description: (label || 'Charge').slice(0, 250),
+        pu_ht: ht,
+        tva_tx: 0,
+        qty: 1,
+        product_type: 0,
+        remise_percent: 0,
+      });
 
-      // Référence interne : FA + année + séquence
-      const year = date.slice(0, 4);
-      const [[seq]] = await dolibarrPool.query(
-        `SELECT COUNT(*) + 1 AS n FROM llx_facture_fourn WHERE entity = 1 AND YEAR(datec) = ?`, [year]
-      );
-      const ref = `FA${year}-${String(seq.n).padStart(5, '0')}`;
-      const userId = req.admin?.dolibarr_user_id || 0;
-      const dueDate = date_due && /^\d{4}-\d{2}-\d{2}$/.test(date_due) ? date_due : date;
+      // 3. Validation → numérotation légale + triggers.
+      await adminApi.post(`/supplierinvoices/${invoiceId}/validate`, {});
 
-      const [ins] = await dolibarrPool.query(
-        `INSERT INTO llx_facture_fourn
-         (ref, entity, ref_supplier, type, fk_soc, datec, datef, date_lim_reglement,
-          libelle, total_ht, total_tva, total_ttc, fk_statut, paye, fk_user_author)
-         VALUES (?, 1, ?, 0, ?, NOW(), ?, ?, ?, ?, ?, ?, 1, 0, ?)`,
-        [ref, ref_supplier || '', supplier_id, date, dueDate,
-         (label || '').slice(0, 250), ht, tva, ttc, userId]
-      );
-      const invoiceId = ins.insertId;
-
-      // Ligne de détail
+      // 4. Relecture de la référence définitive.
+      let ref = `#${invoiceId}`;
       try {
-        await dolibarrPool.query(
-          `INSERT INTO llx_facture_fourn_det
-           (fk_facture_fourn, description, qty, tva_tx, total_ht, tva, total_ttc, rang)
-           VALUES (?, ?, 1, ?, ?, ?, ?, 1)`,
-          [invoiceId, (label || 'Charge').slice(0, 250), rate, ht, tva, ttc]
-        );
-      } catch (e) { console.warn('[ACCOUNTING] facture_fourn_det:', e.message); }
+        const detail = await adminApi.get(`/supplierinvoices/${invoiceId}`);
+        ref = detail.data?.ref || ref;
+      } catch { /* ref de repli */ }
 
       invalidateAccountingCache();
       try {
         db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-          .run(req.admin.username, 'supplier_invoice_create', `Facture fournisseur ${ref} — ${soc.nom} : ${ttc}`);
+          .run(req.admin.username, 'supplier_invoice_create', `Facture fournisseur ${ref} — ${soc.nom} : ${ht}`);
       } catch { /* ignore */ }
       res.json({ ok: true, id: invoiceId, ref });
     } catch (err) {
-      console.error('[ACCOUNTING] Supplier invoice create error:', err.message);
-      res.status(500).json({ error: 'Erreur création facture fournisseur' });
+      // Nettoyage : si le brouillon a été créé mais qu'une étape ultérieure a échoué,
+      // on le supprime pour ne pas laisser de facture orpheline non validée.
+      if (invoiceId) {
+        try { await adminApi.delete(`/supplierinvoices/${invoiceId}`); }
+        catch (e) { console.warn('[ACCOUNTING] Nettoyage brouillon fourn. échoué:', e.message); }
+      }
+      const apiMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
+      console.error('[ACCOUNTING] Supplier invoice create error:', apiMsg);
+      // Cause fréquente : code comptable fournisseur obligatoire et absent sur le tiers.
+      const hint = !soc.code_compta_fournisseur
+        ? ` (le fournisseur « ${soc.nom} » n'a pas de code comptable fournisseur — renseignez-le dans Dolibarr)`
+        : '';
+      res.status(502).json({ error: `Erreur création facture fournisseur${hint} : ${apiMsg}` });
     }
   });
 

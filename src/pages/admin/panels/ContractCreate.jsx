@@ -17,7 +17,7 @@ const CONTRACT_MODELS = [
   {
     value: 'harmattan_dll',
     label: 'Harmattan · DLL',
-    desc: 'Subventionné par la Direction du Livre',
+    desc: 'DLL : 15 % sur les 1 000 premiers ex., puis 10 % au-delà',
     icon: FiLayers,
     color: '#0284c7',
     defaults: { royalty_rate_print: 15, royalty_rate_digital: 10, royalty_threshold: 1000, free_author_copies: 55 },
@@ -505,7 +505,9 @@ export default function ContractCreate() {
                     </div>
                     <div className="ct-type-option-desc">{t.desc}</div>
                     <div className="ct-type-option-desc">
-                      {t.defaults.royalty_rate_print} % · seuil {t.defaults.royalty_threshold} ex. · {t.defaults.free_author_copies} ex. auteur
+                      {t.value === 'harmattan_dll'
+                        ? '15 % jusqu’à 1 000 ex. · 10 % au-delà · 55 ex. auteur'
+                        : `${t.defaults.royalty_rate_print} % · seuil ${t.defaults.royalty_threshold} ex. · ${t.defaults.free_author_copies} ex. auteur`}
                     </div>
                   </button>
                 );
@@ -599,7 +601,11 @@ export default function ContractCreate() {
               <input type="number" value={form.royalty_rate_digital} onChange={e => set('royalty_rate_digital', e.target.value)}
                 onBlur={() => handleBlur('royalty_rate_digital')} min={0} max={50} step={0.5} />
             </Field>
-            <Field label="Seuil de versement" error={errors.royalty_threshold} hint="Exemplaires vendus">
+            <Field
+              label={form.contract_model === 'harmattan_dll' ? 'Palier DLL' : 'Seuil de versement'}
+              error={errors.royalty_threshold}
+              hint={form.contract_model === 'harmattan_dll' ? '15 % jusqu’à ce palier, puis 10 %' : 'Exemplaires vendus'}
+            >
               <input type="number" value={form.royalty_threshold} onChange={e => set('royalty_threshold', e.target.value)}
                 onBlur={() => handleBlur('royalty_threshold')} min={0} />
             </Field>

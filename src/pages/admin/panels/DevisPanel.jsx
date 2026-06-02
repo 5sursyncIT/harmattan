@@ -90,12 +90,8 @@ function PropalDetailModal({ id, onClose }) {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 24, fontSize: '0.88rem', marginBottom: 12 }}>
-              <div style={{ textAlign: 'right', color: '#64748b' }}><div>Total HT</div><div>TVA</div><div style={{ fontWeight: 800, color: '#0f172a', fontSize: '1rem' }}>Total TTC</div></div>
-              <div style={{ textAlign: 'right' }}>
-                <div>{formatPrice(data.propal.total_ht)}</div>
-                <div>{formatPrice(data.propal.total_tva)}</div>
-                <div style={{ fontWeight: 800, color: '#10531a', fontSize: '1rem' }}>{formatPrice(data.propal.total_ttc)}</div>
-              </div>
+              <div style={{ textAlign: 'right', fontWeight: 800, color: '#0f172a', fontSize: '1rem' }}>Total</div>
+              <div style={{ textAlign: 'right', fontWeight: 800, color: '#10531a', fontSize: '1rem' }}>{formatPrice(data.propal.total_ttc)}</div>
             </div>
 
             {data.propal.note_public && (
@@ -183,7 +179,7 @@ export default function DevisPanel() {
         <>
           <div className="admin-table-container">
             <table className="admin-table">
-              <thead><tr><th>N°</th><th>Client</th><th style={{ textAlign: 'right' }}>Montant TTC</th><th>Statut</th><th>Date</th><th>Validité</th><th></th></tr></thead>
+              <thead><tr><th>N°</th><th>Client</th><th style={{ textAlign: 'right' }}>Montant</th><th>Statut</th><th>Date</th><th>Validité</th><th></th></tr></thead>
               <tbody>
                 {data.propals.map(p => {
                   const b = STATUS_BADGE[p.status] || { label: p.statusLabel, bg: '#f1f5f9', color: '#475569' };

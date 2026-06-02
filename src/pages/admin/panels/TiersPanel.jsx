@@ -29,13 +29,14 @@ export default function TiersPanel() {
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
   const [type, setType] = useState('');
+  const [statut, setStatut] = useState('active'); // active | archived | all
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [editing, setEditing] = useState(null); // null = caché, {} = nouveau, {id, ...} = édition
 
   const load = useCallback(() => {
     setLoading(true);
-    getAdminSocietes({ q, type, page, limit: 30 })
+    getAdminSocietes({ q, type, statut, page, limit: 30 })
       .then(r => {
         setSocietes(r.data.societes);
         setTotal(r.data.total);
@@ -43,7 +44,7 @@ export default function TiersPanel() {
       })
       .catch(() => toast.error('Erreur de chargement'))
       .finally(() => setLoading(false));
-  }, [q, type, page]);
+  }, [q, type, statut, page]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -102,6 +103,23 @@ export default function TiersPanel() {
               </button>
             ))}
           </div>
+          <div className="tiers-segment" role="tablist" aria-label="Filtrer par statut">
+            {[
+              { v: 'active',   l: 'Actifs' },
+              { v: 'archived', l: 'Archivés' },
+              { v: 'all',      l: 'Tous' },
+            ].map(f => (
+              <button
+                key={f.v}
+                role="tab"
+                aria-selected={statut === f.v}
+                className={'tiers-segment-btn ' + (statut === f.v ? 'is-active' : '')}
+                onClick={() => { setPage(1); setStatut(f.v); }}
+              >
+                <span>{f.l}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -129,9 +147,12 @@ export default function TiersPanel() {
               societes.map(s => (
                 <tr key={s.id}>
                   <td>
-                    <Link to={`/admin/tiers/${s.id}`} style={{ color: '#10531a', fontWeight: 600, textDecoration: 'none' }}>
+                    <Link to={`/admin/tiers/${s.id}`} style={{ color: s.status === 0 ? '#9ca3af' : '#10531a', fontWeight: 600, textDecoration: 'none' }}>
                       {s.nom}
                     </Link>
+                    {s.status === 0 && (
+                      <span style={{ marginLeft: 8, background: '#f1f5f9', color: '#64748b', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 700 }}>Archivé</span>
+                    )}
                   </td>
                   <td>{s.name_alias || '—'}</td>
                   <td>{s.code_client || '—'}</td>

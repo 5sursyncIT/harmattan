@@ -16,6 +16,7 @@ export const getTreasury = (params = {}) => api.get('/admin/accounting/treasury'
 // Royalties
 export const getRoyalties = (params = {}) => api.get('/admin/accounting/royalties', { params });
 export const getRoyaltyDetails = (contractId, params = {}) => api.get(`/admin/accounting/royalties/${contractId}/details`, { params });
+export const createRoyaltySupplierInvoices = (data = {}) => api.post('/admin/accounting/royalties/supplier-invoices', data);
 
 // Plan comptable
 export const getChartOfAccounts = (params = {}) => api.get('/admin/accounting/chart-of-accounts', { params });
@@ -23,6 +24,10 @@ export const getChartOfAccounts = (params = {}) => api.get('/admin/accounting/ch
 // Transfert en comptabilité
 export const getTransferStatus = () => api.get('/admin/accounting/transfer/status');
 export const runTransfer = (data = {}) => api.post('/admin/accounting/transfer', data);
+// Exercices fiscaux (verrouillage natif par clôture d'exercice)
+export const getFiscalYears = () => api.get('/admin/accounting/fiscal-years');
+export const createFiscalYear = (data) => api.post('/admin/accounting/fiscal-years', data);
+export const closeFiscalYear = (id) => api.post(`/admin/accounting/fiscal-years/${id}/close`);
 
 // Grand livre
 export const getLedger = (params = {}) => api.get('/admin/accounting/ledger', { params });

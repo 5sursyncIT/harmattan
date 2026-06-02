@@ -1,25 +1,22 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { FiArrowLeft, FiBook, FiDownload, FiInfo, FiX } from 'react-icons/fi';
-import { getRoyalties, getRoyaltyDetails, exportAccounting } from '../../../api/accounting';
+import { FiArrowLeft, FiBook, FiDownload, FiFilePlus, FiInfo, FiX } from 'react-icons/fi';
+import { getRoyalties, getRoyaltyDetails, exportAccounting, createRoyaltySupplierInvoices } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
 import DolibarrLink from '../../../components/admin/DolibarrLink';
 import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import './Accounting.css';
+import { CONTRACT_TYPE_FILTER_GROUPS } from '../../../utils/contractTypes';
 
 const MONTH_NAMES = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
-const CONTRACT_TYPES = {
-  harmattan_2024: 'Harmattan 2024',
-  harmattan_dll: 'Harmattan DLL',
-  tamarinier: 'Le Tamarinier',
-};
 
 export default function AccountingRoyalties() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [invoicing, setInvoicing] = useState(false);
   const [filters, setFilters] = useState({
     year: new Date().getFullYear(),
     month: '',
@@ -45,17 +42,44 @@ export default function AccountingRoyalties() {
   const handleExport = async (journalType = 'royalties') => {
     setExporting(true);
     try {
-      const r = await exportAccounting(journalType, { year: filters.year, month: filters.month });
+      const r = await exportAccounting(journalType, filters);
       const url = URL.createObjectURL(r.data);
       const a = document.createElement('a'); a.href = url;
       const prefix = journalType === 'royalties_od' ? 'royalties-OD' : 'royalties';
       a.download = `${prefix}-${filters.year}${filters.month ? '-' + filters.month : ''}.csv`; a.click();
       URL.revokeObjectURL(url);
       toast.success(journalType === 'royalties_od'
-        ? 'Écritures OD téléchargées — importez-les dans Dolibarr (Comptabilité → Transfert)'
+        ? 'Export OD téléchargé — à utiliser seulement si aucune facture fournisseur n’est créée'
         : 'Export téléchargé');
     } catch { toast.error('Erreur export'); }
     finally { setExporting(false); }
+  };
+
+  const handleCreateSupplierInvoices = async () => {
+    const total = data?.summary?.total_royalties_due || 0;
+    if (!data?.royalties?.length || total <= 0) {
+      toast.error('Aucune royalty à facturer sur la sélection');
+      return;
+    }
+    const ok = window.confirm(
+      `Créer les factures fournisseur auteur pour les royalties affichées (${formatPrice(total)}) ?\n\nLes factures déjà existantes seront ignorées. N'importez pas ensuite l'OD pour les mêmes montants.`
+    );
+    if (!ok) return;
+
+    setInvoicing(true);
+    try {
+      const r = await createRoyaltySupplierInvoices(filters);
+      const { created = [], skipped = [], errors = [] } = r.data || {};
+      if (errors.length > 0) {
+        toast.error(`${created.length} créée(s), ${skipped.length} déjà existante(s), ${errors.length} erreur(s)`);
+      } else {
+        toast.success(`${created.length} facture(s) créée(s), ${skipped.length} déjà existante(s)`);
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erreur création factures royalties');
+    } finally {
+      setInvoicing(false);
+    }
   };
 
   const openDetail = async (row) => {
@@ -82,8 +106,11 @@ export default function AccountingRoyalties() {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <DolibarrLink href={dolibarrUrls.miscJournal()} title="Journal d'opérations diverses (OD)">Journal OD</DolibarrLink>
           <DolibarrLink href={dolibarrUrls.importAccounting()} variant="ghost" title="Importer un fichier d'écritures">Importer écritures</DolibarrLink>
-          <button onClick={() => handleExport('royalties_od')} disabled={exporting} className="btn btn-primary" title="Génère un CSV d'écritures OD (D 6512 / C 401) prêt à importer dans Dolibarr">
-            <FiDownload size={14} /> {exporting ? 'Préparation...' : 'Écritures OD pour Dolibarr'}
+          <button onClick={handleCreateSupplierInvoices} disabled={invoicing || loading || !data?.royalties?.length} className="btn btn-primary" title="Crée une facture fournisseur auteur par contrat, avec déduplication par référence fournisseur">
+            <FiFilePlus size={14} /> {invoicing ? 'Création...' : 'Créer factures fournisseur'}
+          </button>
+          <button onClick={() => handleExport('royalties_od')} disabled={exporting} className="btn btn-outline" title="Export de contrôle / solution exceptionnelle. Ne pas importer si les factures fournisseur sont créées.">
+            <FiDownload size={14} /> {exporting ? 'Préparation...' : 'Export OD'}
           </button>
           <button onClick={() => handleExport('royalties')} disabled={exporting} className="btn btn-outline">
             <FiDownload size={14} /> Export détaillé CSV
@@ -94,7 +121,9 @@ export default function AccountingRoyalties() {
       <div className="ac-info-box">
         <FiInfo size={14} style={{ verticalAlign: -2, marginRight: 6 }} />
         <strong>Formule : </strong>
-        royalty = (unités vendues − seuil − exemplaires gratuits) × prix moyen HT × taux % — chiffres indicatifs pour règlement trimestriel, à valider.
+        contrats classiques : droits sur les ventes au-delà du seuil. Contrats DLL : 15 % sur les
+        1 000 premiers exemplaires subventionnés, puis 10 % au-delà. Les exemplaires gratuits et
+        le service de presse ne sont jamais facturés : ils sont déjà hors du décompte des ventes.
       </div>
 
       {/* Filtres période */}
@@ -116,7 +145,11 @@ export default function AccountingRoyalties() {
           <label className="ac-filter-label">Type contrat</label>
           <select className="ac-filter-select" value={filters.contract_type} onChange={e => update('contract_type', e.target.value)}>
             <option value="">Tous</option>
-            {Object.entries(CONTRACT_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            {CONTRACT_TYPE_FILTER_GROUPS.map(g => (
+              <optgroup key={g.model} label={g.label}>
+                {g.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </optgroup>
+            ))}
           </select>
         </div>
         <div className="ac-filter-group">
@@ -193,7 +226,7 @@ export default function AccountingRoyalties() {
                     </td>
                     <td style={{ fontWeight: 600 }}>{r.author_name}</td>
                     <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>{r.book_title}</td>
-                    <td className="ac-amount">{r.royalty_rate}%</td>
+                    <td className="ac-amount">{r.royalty_rate_label || `${r.royalty_rate}%`}</td>
                     <td className="ac-amount" style={{ color: '#64748b' }}>{r.threshold}</td>
                     <td className="ac-amount">{r.units_sold}</td>
                     <td className="ac-amount" style={{ fontWeight: 700, color: r.units_over_threshold > 0 ? '#10531a' : '#94a3b8' }}>{r.units_over_threshold}</td>

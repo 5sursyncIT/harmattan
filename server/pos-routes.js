@@ -958,9 +958,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         }
       }
 
-      // Séparation : items référencés (lookup prix serveur, vérif stock) vs items libres.
+      // Items référencés : lookup prix serveur + vérif stock. Les items libres
+      // (is_free) sont traités directement plus bas sans cette étape.
       const productItems = items.filter((i) => !i.is_free);
-      const freeItems = items.filter((i) => i.is_free === true);
 
       // Idempotence : une vente déjà finalisée pour ce client_sale_id est
       // rejouée à l'identique (double soumission, resynchro offline) au lieu

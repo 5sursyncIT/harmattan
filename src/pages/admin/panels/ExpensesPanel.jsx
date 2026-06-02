@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import {
   FiTrendingDown, FiX, FiRefreshCw, FiCalendar, FiSearch, FiList,
@@ -289,7 +289,10 @@ function ReportModal({ kind, onClose }) {
   const [loading, setLoading] = useState(false);
 
   const period = kind === 'daily' ? { kind, dateIso } : { kind, yearMonth };
-  const range = kind === 'daily' ? dailyRange(dateIso) : monthlyRange(yearMonth);
+  const range = useMemo(
+    () => (kind === 'daily' ? dailyRange(dateIso) : monthlyRange(yearMonth)),
+    [kind, dateIso, yearMonth]
+  );
   const periodLabel = formatPeriodLabel(period);
 
   const load = useCallback(() => {
@@ -297,7 +300,7 @@ function ReportModal({ kind, onClose }) {
     getCashReport(range)
       .then(r => { setReport(r.data); setLoading(false); })
       .catch(() => { toast.error('Erreur génération du rapport'); setLoading(false); });
-  }, [range.date_from, range.date_to]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [range]);
 
   useEffect(() => { load(); }, [load]);
 
