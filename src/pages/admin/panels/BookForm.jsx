@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { FiSave, FiTrash2, FiX, FiCheck, FiAlertCircle, FiLoader, FiRefreshCw } from 'react-icons/fi';
+import { FiSave, FiTrash2, FiX, FiCheck, FiAlertCircle, FiLoader, FiRefreshCw, FiPlus } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { validateBook } from '../../../utils/bookValidation.js';
-import { createBook, updateBook, deleteBook, checkIsbn } from '../../../api/admin';
+import { createBook, updateBook, deleteBook, checkIsbn, createGenre } from '../../../api/admin';
 import { getCategories } from '../../../api/dolibarr';
 import { listTags, getBookTags, setBookTags } from '../../../api/tags';
 import { EXCLUDED_CATEGORIES_SET } from '../../../utils/excludedCategories.js';
@@ -18,6 +18,9 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
   const [errors, setErrors] = useState({});
   const [genres, setGenres] = useState([]);
   const [genresLoaded, setGenresLoaded] = useState(false);
+  const [addingGenre, setAddingGenre] = useState(false); // formulaire d'ajout ouvert
+  const [newGenre, setNewGenre] = useState('');
+  const [creatingGenre, setCreatingGenre] = useState(false);
   const [isbnCheck, setIsbnCheck] = useState({ state: 'idle', message: '' });
   const [saving, setSaving] = useState(false);
   const [showConfirm, setShowConfirm] = useState(null);
@@ -115,6 +118,41 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
       delete n.genre_id;
       return n;
     });
+  };
+
+  const handleCreateGenre = async () => {
+    const label = newGenre.trim();
+    if (!label) return;
+    setCreatingGenre(true);
+    try {
+      const res = await createGenre(label);
+      const created = { id: parseInt(res.data.id, 10), label: decodeEntities(res.data.label) };
+      // Ajoute (s'il n'y est pas déjà) en gardant le tri alphabétique FR, puis sélectionne
+      setGenres((prev) => {
+        if (prev.some((g) => g.id === created.id)) return prev;
+        return [...prev, created].sort((a, b) => a.label.localeCompare(b.label, 'fr'));
+      });
+      if (!form.genre_ids.includes(created.id)) toggleGenre(created.id);
+      setNewGenre('');
+      setAddingGenre(false);
+      toast.success(`Genre « ${created.label} » ajouté`);
+    } catch (err) {
+      const status = err?.response?.status;
+      const existing = err?.response?.data?.genre;
+      if (status === 409 && existing) {
+        // Doublon : on récupère le genre existant et on le sélectionne
+        const g = { id: parseInt(existing.id, 10), label: decodeEntities(existing.label) };
+        setGenres((prev) => (prev.some((x) => x.id === g.id) ? prev : [...prev, g].sort((a, b) => a.label.localeCompare(b.label, 'fr'))));
+        if (!form.genre_ids.includes(g.id)) toggleGenre(g.id);
+        setNewGenre('');
+        setAddingGenre(false);
+        toast(`Ce genre existait déjà — « ${g.label} » sélectionné`, { icon: 'ℹ️' });
+      } else {
+        toast.error(err?.response?.data?.error || "Impossible de créer le genre");
+      }
+    } finally {
+      setCreatingGenre(false);
+    }
   };
 
   const handleIsbnBlur = useCallback(async () => {
@@ -360,6 +398,54 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
                   </button>
                 );
               })
+            )}
+
+            {genresLoaded && (
+              addingGenre ? (
+                <span className="genre-add-form">
+                  <input
+                    type="text"
+                    className="genre-add-input"
+                    value={newGenre}
+                    onChange={(e) => setNewGenre(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); handleCreateGenre(); }
+                      if (e.key === 'Escape') { setAddingGenre(false); setNewGenre(''); }
+                    }}
+                    placeholder="Nouveau genre…"
+                    maxLength={80}
+                    autoFocus
+                    disabled={creatingGenre}
+                    aria-label="Nom du nouveau genre"
+                  />
+                  <button
+                    type="button"
+                    className="genre-add-confirm"
+                    onClick={handleCreateGenre}
+                    disabled={creatingGenre || !newGenre.trim()}
+                    aria-label="Valider le nouveau genre"
+                  >
+                    {creatingGenre ? <FiLoader className="spin" size={12} /> : <FiCheck size={12} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="genre-add-cancel"
+                    onClick={() => { setAddingGenre(false); setNewGenre(''); }}
+                    disabled={creatingGenre}
+                    aria-label="Annuler"
+                  >
+                    <FiX size={12} />
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="genre-chip genre-chip-add"
+                  onClick={() => setAddingGenre(true)}
+                >
+                  <FiPlus size={11} aria-hidden="true" /> Ajouter
+                </button>
+              )
             )}
           </div>
         </Field>

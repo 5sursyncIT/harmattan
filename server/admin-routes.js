@@ -14,6 +14,7 @@ import {
   validRoles,
   FULL_ACCESS_ROLES,
   ROLE_ALLOWED_PATHS,
+  DEPRECATED_ACTOR_ROLES,
   serializeRolesForClient,
 } from './roles-config.js';
 import { generateBase32Secret, verifyTotp, buildOtpAuthUrl } from './totp.js';
@@ -316,6 +317,12 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_corrector ON manuscripts(assigned_corrector_id)'); } catch (e) { void e; }
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_infographist ON manuscripts(assigned_infographist_id)'); } catch (e) { void e; }
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_printer ON manuscripts(assigned_printer_id)'); } catch (e) { void e; }
+  // Workflow « semi-automatique » : affectation des acteurs externes via le carnet
+  // d'intervenants (colonnes *_contact_id). Les anciennes colonnes *_id (admin_users)
+  // sont conservées pour l'historique. L'éditeur reste sur assigned_editor_id.
+  for (const c of ['assigned_evaluator_contact_id', 'assigned_corrector_contact_id', 'assigned_infographist_contact_id', 'assigned_printer_contact_id']) {
+    try { db.exec(`ALTER TABLE manuscripts ADD COLUMN ${c} INTEGER`); } catch (e) { void e; }
+  }
 
   db.exec(`CREATE TABLE IF NOT EXISTS manuscript_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1097,6 +1104,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères, une majuscule et un chiffre' });
       }
       const safeRole = validRoles.includes(role) ? role : 'admin';
+      if (DEPRECATED_ACTOR_ROLES.includes(safeRole)) {
+        return res.status(400).json({ error: 'Ce rôle n\'est plus attribuable : les intervenants (évaluateur, correcteur, infographiste, imprimeur) se gèrent désormais via le carnet d\'intervenants.' });
+      }
       const cleanEmail = email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? email.trim() : null;
       const existing = db.prepare('SELECT id FROM admin_users WHERE username = ?').get(username);
       if (existing) return res.status(400).json({ error: 'Ce nom d\'utilisateur existe déjà' });
@@ -1144,6 +1154,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       if (role) {
         if (!validRoles.includes(role)) {
           return res.status(400).json({ error: 'Rôle invalide' });
+        }
+        if (DEPRECATED_ACTOR_ROLES.includes(role)) {
+          return res.status(400).json({ error: 'Ce rôle n\'est plus attribuable : les intervenants se gèrent désormais via le carnet d\'intervenants.' });
         }
         updates.push('role = ?');
         values.push(role);

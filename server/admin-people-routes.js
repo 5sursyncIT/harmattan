@@ -9,6 +9,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { buildSocieteReportPdf } from './societe-report.js';
 
 // Convertit un buffer ODT en PDF via LibreOffice headless. Le modèle de devis
 // (module custom devislibrairie) génère de l'ODT, pas du PDF — sans conversion,
@@ -658,12 +659,20 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       const [invoices] = await dolibarrPool.query(
         `SELECT f.rowid AS id, f.ref, f.datef AS date, f.total_ht, f.total_ttc, f.paye, f.fk_statut, f.type,
                 COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
-         FROM llx_facture f WHERE f.fk_soc = ? ORDER BY f.rowid DESC LIMIT 50`, [id]
+         FROM llx_facture f WHERE f.fk_soc = ? ORDER BY f.rowid DESC LIMIT 25`, [id]
       );
       const [[invoiceTotals]] = await dolibarrPool.query(
-        `SELECT COUNT(*) AS count, COALESCE(SUM(total_ht), 0) AS total_ht,
-                COALESCE(SUM(total_ttc), 0) AS total_ttc
-         FROM llx_facture WHERE fk_soc = ?`, [id]
+        `SELECT COUNT(*) AS count,
+                COALESCE(SUM(total_ht), 0) AS total_ht,
+                COALESCE(SUM(total_ttc), 0) AS total_ttc,
+                COALESCE(SUM(CASE WHEN type <> 2 THEN paid_amount ELSE 0 END), 0) AS total_paid,
+                COALESCE(SUM(CASE WHEN fk_statut = 1 AND type <> 2
+                                  THEN GREATEST(total_ttc - paid_amount, 0) ELSE 0 END), 0) AS total_unpaid
+         FROM (
+           SELECT f.total_ht, f.total_ttc, f.fk_statut, f.type,
+                  COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+           FROM llx_facture f WHERE f.fk_soc = ?
+         ) t`, [id]
       );
 
       const [quotes] = await dolibarrPool.query(
@@ -688,6 +697,93 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     } catch (err) {
       console.error('Societe detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement tiers' });
+    }
+  });
+
+  // Factures d'un tiers, paginées (un tiers peut en avoir des milliers)
+  router.get('/societes/:id/invoices', auth, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Id invalide' });
+      const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
+      const page = Math.max(parseInt(req.query.page) || 0, 0);
+      const offset = page * limit;
+
+      const [invoices] = await dolibarrPool.query(
+        `SELECT f.rowid AS id, f.ref, f.datef AS date, f.total_ht, f.total_ttc, f.paye, f.fk_statut, f.type,
+                COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+         FROM llx_facture f WHERE f.fk_soc = ? ORDER BY f.rowid DESC LIMIT ${limit} OFFSET ${offset}`, [id]
+      );
+      const [[{ total }]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS total FROM llx_facture WHERE fk_soc = ?`, [id]
+      );
+      res.json({ invoices, total, page, limit });
+    } catch (err) {
+      console.error('Societe invoices error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement factures' });
+    }
+  });
+
+  // État de compte du tiers (PDF natif : synthèse + graphes)
+  router.get('/societes/:id/report.pdf', auth, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Id invalide' });
+
+      const [[societe]] = await dolibarrPool.query(
+        `SELECT rowid AS id, nom, code_client, phone, email, town, zip, address
+         FROM llx_societe WHERE rowid = ?`, [id]
+      );
+      if (!societe) return res.status(404).json({ error: 'Tiers introuvable' });
+
+      const [[totals]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS count,
+                COALESCE(SUM(total_ht), 0) AS total_ht,
+                COALESCE(SUM(total_ttc), 0) AS total_ttc,
+                COALESCE(SUM(CASE WHEN type <> 2 THEN paid_amount ELSE 0 END), 0) AS total_paid,
+                COALESCE(SUM(CASE WHEN fk_statut = 1 AND type <> 2
+                                  THEN GREATEST(total_ttc - paid_amount, 0) ELSE 0 END), 0) AS total_unpaid
+         FROM (
+           SELECT f.total_ht, f.total_ttc, f.fk_statut, f.type,
+                  COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+           FROM llx_facture f WHERE f.fk_soc = ?
+         ) t`, [id]
+      );
+
+      const [byStatus] = await dolibarrPool.query(
+        `SELECT fk_statut AS statut, COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS ttc
+         FROM llx_facture WHERE fk_soc = ? GROUP BY fk_statut`, [id]
+      );
+
+      const [monthlyRows] = await dolibarrPool.query(
+        `SELECT DATE_FORMAT(datef, '%Y-%m') AS ym, COALESCE(SUM(total_ttc), 0) AS ttc, COUNT(*) AS cnt
+         FROM llx_facture
+         WHERE fk_soc = ? AND type <> 2 AND fk_statut IN (1, 2)
+           AND datef >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 11 MONTH), '%Y-%m-01')
+         GROUP BY ym ORDER BY ym`, [id]
+      );
+
+      // Complète les 12 derniers mois (zéros inclus) pour un graphe continu.
+      const byYm = new Map(monthlyRows.map(r => [r.ym, r]));
+      const now = new Date();
+      const monthly = [];
+      for (let i = 11; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        const r = byYm.get(ym);
+        monthly.push({ ym, ttc: r ? Number(r.ttc) : 0, cnt: r ? Number(r.cnt) : 0 });
+      }
+
+      const pdf = buildSocieteReportPdf({ societe, totals, byStatus, monthly, generatedAt: new Date() });
+      const safe = String(societe.nom || `tiers-${id}`).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 60);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="etat-compte-${safe}.pdf"`);
+      res.send(pdf);
+    } catch (err) {
+      console.error('Societe report error:', err.message);
+      res.status(500).json({ error: 'Erreur génération du rapport' });
     }
   });
 
@@ -722,7 +818,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     return data;
   }
 
-  router.post('/societes', auth, requireRoles('super_admin', 'admin', 'editor', 'librarian'), csrfProtection, async (req, res) => {
+  router.post('/societes', auth, requireRoles('super_admin', 'admin', 'editor', 'librarian', 'comptable', 'gestionnaire_stock'), csrfProtection, async (req, res) => {
     try {
       const data = sanitizeSocieteInput(req.body);
       const firstname = String(req.body.firstname || '').trim();
@@ -766,7 +862,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     }
   });
 
-  router.put('/societes/:id', auth, requireRoles('super_admin', 'admin', 'editor', 'librarian'), csrfProtection, async (req, res) => {
+  router.put('/societes/:id', auth, requireRoles('super_admin', 'admin', 'editor', 'librarian', 'comptable', 'gestionnaire_stock'), csrfProtection, async (req, res) => {
     // NOTE : on n'utilise PAS la REST API Dolibarr (PUT /thirdparties/{id})
     // car la base contient des code_fournisseur legacy ("SU001439") qui ne
     // respectent pas la syntaxe du module configuré (mod_codeclient_monkey,

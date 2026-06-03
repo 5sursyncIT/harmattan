@@ -5,6 +5,7 @@ import { FiFileText, FiPlus, FiAlertTriangle, FiCheckCircle, FiClock, FiBookOpen
 import Loader from '../../../components/common/Loader';
 import './Contracts.css';
 import { contractTypeColor } from '../../../utils/contractTypes';
+import useAdminRole, { CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
 
 const STATUS_COLORS = { 0: '#f59e0b', 1: '#10b981', 2: '#6b7280' };
 
@@ -27,6 +28,8 @@ export default function ContractsPanel() {
   const [expiring, setExpiring] = useState([]);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+  const role = useAdminRole();
+  const canCreate = CONTRACT_WRITE_ROLES.includes(role);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,7 +69,7 @@ export default function ContractsPanel() {
         <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}><FiBookOpen /> Gestion des contrats</h3>
         <div style={{ display: 'flex', gap: 8 }}>
           <Link to="/admin/contracts/list" className="btn btn-outline">Voir tous les contrats</Link>
-          <Link to="/admin/contracts/new" className="ct-new-btn"><FiPlus /> Nouveau contrat</Link>
+          {canCreate && <Link to="/admin/contracts/new" className="ct-new-btn"><FiPlus /> Nouveau contrat</Link>}
         </div>
       </div>
 

@@ -46,7 +46,7 @@ export class Receipt {
     // Largeur en caractères selon papier (Epson Font A 12cpi)
     this.cols = width === 58 ? 32 : 48;
     this.buf = [];
-    this.init().charset();
+    this.init().charset().density();
   }
 
   write(...bytes) { bytes.forEach((b) => this.buf.push(b)); return this; }
@@ -57,6 +57,16 @@ export class Receipt {
   // ─── Commandes ESC/POS de base ─────────────────────────────
   init() { return this.write(ESC, 0x40); }                 // Réinitialise
   charset() { return this.write(ESC, 0x74, 0x13); }        // CP858 (Latin 1 + €)
+  // Renforce la noirceur d'impression (imprimante thermique générique 80mm pâle).
+  // 1) Double-frappe : chaque ligne de points est imprimée 2× → texte plus noir.
+  // 2) Paramètres de chauffe ESC 7 n1 n2 n3 : n1=points max chauffés,
+  //    n2=temps de chauffe (↑ = plus foncé), n3=intervalle (↑ = plus net, moins de bavure).
+  //    Défaut usine ~ (7, 80, 2) ; on monte n2 pour foncer sans bavure.
+  density() {
+    this.write(ESC, 0x47, 0x01);            // ESC G 1 : double-frappe ON
+    this.write(ESC, 0x37, 0x0F, 0x96, 0x14); // ESC 7 : 128 dots, 1500µs chauffe, 200µs intervalle
+    return this;
+  }
   alignLeft() { return this.write(ESC, 0x61, 0x00); }
   alignCenter() { return this.write(ESC, 0x61, 0x01); }
   alignRight() { return this.write(ESC, 0x61, 0x02); }

@@ -59,3 +59,20 @@ export const manuscriptsApi = {
   markPrinted: (manuscriptId, note) =>
     api.post(`/admin/printing/${manuscriptId}/mark-printed`, { note }),
 };
+
+// Carnet d'intervenants (acteurs externes du workflow, notifiés par email, sans compte)
+export const intervenantsApi = {
+  list: (params = {}) => api.get('/admin/intervenants', { params }),
+  get: (id) => api.get(`/admin/intervenants/${id}`),
+  create: (payload) => api.post('/admin/intervenants', payload),
+  update: (id, payload) => api.put(`/admin/intervenants/${id}`, payload),
+  setActive: (id, isActive) => api.patch(`/admin/intervenants/${id}/active`, { is_active: isActive }),
+  remove: (id) => api.delete(`/admin/intervenants/${id}`),
+};
+
+export const INTERVENANT_METIERS = [
+  { value: 'evaluateur', label: 'Évaluateur / lecteur' },
+  { value: 'correcteur', label: 'Correcteur' },
+  { value: 'infographiste', label: 'Infographiste' },
+  { value: 'imprimeur', label: 'Imprimeur' },
+];

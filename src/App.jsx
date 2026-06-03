@@ -65,6 +65,7 @@ const AdminFAQPanel = lazy(() => import('./pages/admin/panels/FAQPanel'));
 const AdminContactPanel = lazy(() => import('./pages/admin/panels/ContactPanel'));
 const AdminManuscriptsPanel = lazy(() => import('./pages/admin/panels/ManuscriptsPanelV2'));
 const AdminManuscriptDetail = lazy(() => import('./pages/admin/panels/ManuscriptDetailPanel'));
+const AdminIntervenantsPanel = lazy(() => import('./pages/admin/panels/IntervenantsPanel'));
 const AdminEvaluationsPanel = lazy(() => import('./pages/admin/panels/EvaluationsPanel'));
 const AdminCorrectionsPanel = lazy(() => import('./pages/admin/panels/CorrectionsPanel'));
 const AdminEditorialPanel = lazy(() => import('./pages/admin/panels/EditorialPanel'));
@@ -102,6 +103,7 @@ const ConsignmentPanel = lazy(() => import('./pages/admin/panels/ConsignmentPane
 const ExpensesPanel = lazy(() => import('./pages/admin/panels/ExpensesPanel'));
 const OrdersPanel = lazy(() => import('./pages/admin/panels/OrdersPanel'));
 const DevisPanel = lazy(() => import('./pages/admin/panels/DevisPanel'));
+const LegalDepositPanel = lazy(() => import('./pages/admin/panels/LegalDepositPanel'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
@@ -166,6 +168,7 @@ export default function App() {
             <Route path="contacts" element={<AdminContactPanel />} />
             <Route path="manuscripts" element={<AdminManuscriptsPanel />} />
             <Route path="manuscripts/:id" element={<AdminManuscriptDetail />} />
+            <Route path="intervenants" element={<AdminIntervenantsPanel />} />
             <Route path="evaluations" element={<AdminEvaluationsPanel />} />
             <Route path="corrections" element={<AdminCorrectionsPanel />} />
             <Route path="editorial" element={<AdminEditorialPanel />} />
@@ -196,6 +199,7 @@ export default function App() {
             <Route path="expenses" element={<ExpensesPanel />} />
             <Route path="orders" element={<OrdersPanel />} />
             <Route path="devis" element={<DevisPanel />} />
+            <Route path="legal-deposits" element={<LegalDepositPanel />} />
             <Route path="stock" element={<StockDashboardPanel />} />
             <Route path="stock/alerts" element={<StockAlertsPanel />} />
             <Route path="stock/products" element={<StockProductsPanel />} />

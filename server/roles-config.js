@@ -7,16 +7,27 @@ export const ROLES = {
   admin:         { label: 'Admin',         color: '#10531a', fullAccess: true,  manageUsers: false, description: "Accès total à tous les modules (sauf gestion des utilisateurs)." },
   editor:        { label: 'Éditeur',       color: '#0284c7', description: "Catalogue, manuscrits, contrats, bannières, statistiques." },
   librarian:     { label: 'Libraire & Support', color: '#0891b2', description: "Librairie (livres, stock, factures, BL, dépôt-vente, commandes) + support (messages, FAQ, newsletter, clients, actualités)." },
-  comptable:     { label: 'Comptable',     color: '#0d9488', description: "Comptabilité, paiements, statistiques." },
+  gestionnaire_stock: { label: 'Gestionnaire de stock', color: '#b45309', description: "Stock & réapprovisionnement, fournisseurs, catalogue livres, bons de livraison, dépôt-vente." },
+  comptable:     { label: 'Comptable',     color: '#0d9488', description: "Comptabilité, paiements, statistiques, devis." },
   vendeur:       { label: 'Vendeur POS',   color: '#dc2626', description: "Accès POS uniquement (via PIN dédié)." },
-  evaluateur:    { label: 'Évaluateur',    color: '#9333ea', description: "Évaluation des manuscrits soumis." },
-  correcteur:    { label: 'Correcteur',    color: '#14b8a6', description: "Correction des manuscrits validés." },
-  infographiste: { label: 'Infographiste', color: '#c026d3', description: "Création et gestion des couvertures." },
-  imprimeur:     { label: 'Imprimeur',     color: '#854d0e', description: "Suivi de l'impression et des bons à tirer." },
+  // ── Rôles d'acteurs DÉPRÉCIÉS (workflow « semi-automatique ») ──
+  // Ces acteurs n'ont plus de compte connecté : ils sont gérés via le carnet
+  // d'intervenants et notifiés par email. Les entrées sont conservées pour
+  // afficher l'historique d'affectation des anciens manuscrits (badges), mais
+  // on n'attribue plus ces rôles à de nouveaux comptes (voir DEPRECATED_ACTOR_ROLES).
+  evaluateur:    { label: 'Évaluateur',    color: '#9333ea', deprecated: true, description: "Évaluation des manuscrits soumis (intervenant externe, sans compte)." },
+  correcteur:    { label: 'Correcteur',    color: '#14b8a6', deprecated: true, description: "Correction des manuscrits validés (intervenant externe, sans compte)." },
+  infographiste: { label: 'Infographiste', color: '#c026d3', deprecated: true, description: "Création des couvertures (intervenant externe, sans compte)." },
+  imprimeur:     { label: 'Imprimeur',     color: '#854d0e', deprecated: true, description: "Suivi de l'impression (intervenant externe, sans compte)." },
 };
 
 export const validRoles = Object.keys(ROLES);
 export const FULL_ACCESS_ROLES = validRoles.filter((r) => ROLES[r].fullAccess);
+
+// Rôles d'acteurs métier dépréciés : plus attribuables à un compte connecté.
+// Le pilotage du workflow est assuré par l'éditeur ; ces intervenants sont gérés
+// via le carnet d'intervenants et notifiés par email.
+export const DEPRECATED_ACTOR_ROLES = validRoles.filter((r) => ROLES[r].deprecated);
 
 // ─── RBAC : whitelist de paths par rôle restreint ──────────────
 // super_admin / admin : aucune restriction (FULL_ACCESS_ROLES).
@@ -48,10 +59,15 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/stats(\/.*)?$/,
     /^\/api\/admin\/slides(\/.*)?$/,
     /^\/api\/admin\/manuscripts(\/.*)?$/,
+    /^\/api\/admin\/evaluations(\/.*)?$/,
+    /^\/api\/admin\/corrections(\/.*)?$/,
     /^\/api\/admin\/editorial(\/.*)?$/,
     /^\/api\/admin\/covers(\/.*)?$/,
+    /^\/api\/admin\/printing(\/.*)?$/,
+    /^\/api\/admin\/intervenants(\/.*)?$/,
     /^\/api\/admin\/authors(\/.*)?$/,
     /^\/api\/admin\/news(\/.*)?$/,
+    /^\/api\/admin\/legal-deposits(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
   // Profil fusionné « Libraire & Support » : union des accès librairie + support.
@@ -79,6 +95,22 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/customers(\/.*)?$/,
     /^\/api\/admin\/authors(\/.*)?$/,
     /^\/api\/admin\/news(\/.*)?$/,
+    /^\/api\/admin\/notifications(\/.*)?$/,
+  ],
+  // Profil « Gestionnaire de stock » : gestion complète du stock/réappro, des
+  // fournisseurs, du catalogue, des BL et du dépôt-vente.
+  gestionnaire_stock: [
+    ...COMMON_PATHS,
+    /^\/api\/admin\/books(\/.*)?$/,
+    /^\/api\/admin\/tags(\/.*)?$/,
+    /^\/api\/admin\/authors(\/.*)?$/,
+    /^\/api\/admin\/stock(\/.*)?$/,
+    /^\/api\/admin\/suppliers(\/.*)?$/,
+    /^\/api\/admin\/deliveries(\/.*)?$/,
+    /^\/api\/admin\/consignments(\/.*)?$/,
+    /^\/api\/admin\/societes(\/.*)?$/,
+    /^\/api\/admin\/legal-deposits(\/.*)?$/,
+    /^\/api\/admin\/stats(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
   comptable: [
@@ -118,6 +150,7 @@ export const ROLE_ALLOWED_PATHS = {
     ...COMMON_PATHS,
     ...WORKFLOW_READ_PATHS,
     /^\/api\/admin\/printing(\/.*)?$/,
+    /^\/api\/admin\/legal-deposits(\/.*)?$/,
   ],
 };
 
@@ -130,7 +163,7 @@ const M = (modules) => {
     manuscripts: '-', evaluations: '-', corrections: '-', editorial: '-', covers: '-',
     printing: '-', contracts: '-', pos: '-', payments: '-', accounting: '-',
     invoices: '-', deliveries: '-', consignments: '-', orders: '-', propals: '-',
-    expenses: '-',
+    expenses: '-', legal_deposits: '-',
     config: '-', slides: '-', news: '-', faq: '-', contacts: '-', newsletter: '-',
     customers: '-', users: '-', activity: '-', profile: 'rw',
   };
@@ -142,7 +175,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'r', expenses: 'crud',
+    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: 'crud', activity: 'r', profile: 'rw',
   }),
@@ -150,24 +183,29 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'r', expenses: 'crud',
+    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: '-', activity: 'r', profile: 'rw',
   }),
   editor: M({
     dashboard: 'r', books: 'crud', tags: 'crud', authors: 'crud', manuscripts: 'crud',
-    editorial: 'crud', covers: 'crud', contracts: 'crud', slides: 'crud', news: 'crud',
-    profile: 'rw',
+    evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud', printing: 'crud',
+    contracts: 'crud', slides: 'crud', news: 'crud',
+    legal_deposits: 'crud', profile: 'rw',
   }),
   // Profil fusionné « Libraire & Support » : union des permissions des deux anciens rôles.
   librarian: M({
     dashboard: 'r',
-    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'r', orders: 'r',
+    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'crud', orders: 'r',
     authors: 'r', contacts: 'crud', faq: 'crud', newsletter: 'crud', customers: 'rw', news: 'crud',
     profile: 'rw',
   }),
+  gestionnaire_stock: M({
+    dashboard: 'r', books: 'crud', tags: 'crud', authors: 'rw', stock: 'crud', suppliers: 'crud',
+    deliveries: 'crud', consignments: 'crud', legal_deposits: 'crud', profile: 'rw',
+  }),
   comptable: M({
-    dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'r', profile: 'rw',
+    dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', contracts: 'rw', profile: 'rw',
   }),
   vendeur: M({
     pos: 'crud', profile: 'rw',
@@ -182,7 +220,7 @@ export const MODULE_PERMISSIONS = {
     manuscripts: 'r', covers: 'crud', profile: 'rw',
   }),
   imprimeur: M({
-    manuscripts: 'r', printing: 'crud', profile: 'rw',
+    manuscripts: 'r', printing: 'crud', legal_deposits: 'crud', profile: 'rw',
   }),
 };
 
@@ -209,6 +247,7 @@ export const MODULE_LABELS = {
   expenses: "Sorties d'argent",
   orders: 'Commandes web',
   propals: 'Devis',
+  legal_deposits: 'Dépôt légal',
   config: 'Configuration',
   slides: 'Bannières',
   news: 'Actualités',
@@ -232,6 +271,7 @@ export function serializeRolesForClient() {
         description: r.description,
         fullAccess: !!r.fullAccess,
         manageUsers: !!r.manageUsers,
+        deprecated: !!r.deprecated,
       }])
     ),
     permissions: MODULE_PERMISSIONS,

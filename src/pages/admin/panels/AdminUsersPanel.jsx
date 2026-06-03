@@ -72,6 +72,11 @@ export default function AdminUsersPanel() {
     return Object.entries(roles.roles).map(([key, r]) => ({ value: key, ...r }));
   }, [roles]);
 
+  // Rôles attribuables à un compte : on exclut les rôles d'acteurs dépréciés
+  // (évaluateur, correcteur, infographiste, imprimeur) — désormais gérés via le
+  // carnet d'intervenants. Ils restent visibles en filtre/badge pour l'historique.
+  const assignableRoles = useMemo(() => rolesArray.filter((r) => !r.deprecated), [rolesArray]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     let list = users.filter((u) => {
@@ -308,7 +313,7 @@ export default function AdminUsersPanel() {
                 <div className="admin-field" style={{ minWidth: 160 }}>
                   <label>Rôle</label>
                   <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} style={{ padding: 8, borderRadius: 6, border: '1px solid #d1d5db' }} title={rolesArray.find(r => r.value === form.role)?.description || ''}>
-                    {rolesArray.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                    {assignableRoles.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
                   </select>
                 </div>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#374151', minWidth: 200 }}>
@@ -398,7 +403,11 @@ export default function AdminUsersPanel() {
                               onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
                               style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db' }}
                             >
-                              {rolesArray.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                              {/* Rôle déprécié actuel conservé en option (lecture) pour permettre d'en sortir. */}
+                              {rolesArray.find((r) => r.value === editForm.role)?.deprecated && (
+                                <option value={editForm.role}>{rolesArray.find((r) => r.value === editForm.role).label} (déprécié)</option>
+                              )}
+                              {assignableRoles.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
                             </select>
                           </td>
                           <td colSpan={3} style={{ color: '#6b7280', fontSize: 12 }}>—</td>

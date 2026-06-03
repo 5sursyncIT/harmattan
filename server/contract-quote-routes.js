@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const FCFA_PER_EUR = 655.957;
+const DEFAULT_AUTHOR_DISCOUNT = 30;  // remise auteur par défaut (%) si non renseignée au contrat
 
 function escapeXml(s) {
   return String(s ?? '')
@@ -81,7 +82,10 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contract_quotes_contract ON contract_quotes(contract_id)`);
 
-  const ALLOWED_ROLES = ['super_admin', 'admin', 'editor'];
+  // Le comptable peut créer/consulter les devis de contribution, mais pas les supprimer
+  // (la suppression reste réservée aux rôles éditoriaux — cf. route DELETE).
+  const ALLOWED_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
+  const QUOTE_DELETE_ROLES = ['super_admin', 'admin', 'editor'];
   function auth(req, res, next) {
     const session = req.cookies?.admin_session;
     if (!session) return res.status(401).json({ error: 'Non authentifié' });
@@ -300,6 +304,9 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
   // DELETE /api/quotes/:id — draft only
   router.delete('/quotes/:id', auth, csrfProtection, (req, res) => {
     try {
+      if (!QUOTE_DELETE_ROLES.includes(req.admin.role || 'admin')) {
+        return res.status(403).json({ error: 'Suppression non autorisée pour votre profil' });
+      }
       const quote = db.prepare('SELECT id, ref, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
       if (quote.status !== 'draft') return res.status(400).json({ error: 'Seuls les brouillons peuvent être supprimés' });
@@ -314,13 +321,18 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     }
   });
 
-  // GET /api/quotes/defaults?pages=70&price_eur=11&qty=50&color=0
+  // GET /api/quotes/defaults?pages=70&price_eur=11&qty=50&color=0&discount=30
   // Helper to compute suggested line items from contract data
   router.get('/quotes/defaults', auth, (req, res) => {
     const pages = Math.max(0, parseInt(req.query.pages) || 0);
     const priceEur = Math.max(0, parseFloat(req.query.price_eur) || 0);
     const qty = Math.max(0, parseInt(req.query.qty) || 50);
     const color = String(req.query.color) === '1';
+    // Remise auteur (%) issue du contrat ; repli sur le défaut si absente/invalide.
+    const rawDiscount = parseFloat(req.query.discount);
+    const discountPct = Number.isFinite(rawDiscount) && rawDiscount >= 0 && rawDiscount <= 100
+      ? rawDiscount
+      : DEFAULT_AUTHOR_DISCOUNT;
 
     const items = [];
     if (pages > 0) {
@@ -328,8 +340,8 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       items.push({ key: 'pao', label: '2 - Contribution à la mise en pages et réalisation du Prêt-à-clicher', price: pages * 1000 });
     }
     if (priceEur > 0 && qty > 0) {
-      // ~32 % de remise sur le prix public converti en FCFA
-      const achatPrice = Math.round(priceEur * qty * FCFA_PER_EUR * 0.68);
+      // L'auteur paie (100 − remise) % du prix public converti en FCFA.
+      const achatPrice = Math.round(priceEur * qty * FCFA_PER_EUR * (1 - discountPct / 100));
       items.push({ key: 'achat', label: `4 - Achat de ${qty} exemplaires contractuels`, price: achatPrice });
     }
     if (color) {

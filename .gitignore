@@ -33,3 +33,9 @@ dist-ssr
 data/
 manuscripts/
 public/uploads/
+
+.webhook-secret
+
+# Sauvegardes opérationnelles (dumps DB, rollbacks) — ne pas versionner
+backups/
+scripts/backups/

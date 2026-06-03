@@ -5,6 +5,7 @@ import { existsSync } from 'fs';
 import { transition, STAGE_LABELS, MANUSCRIPT_STAGES } from './manuscript-workflow.js';
 import { notifyTransition, sendAssignmentEmail } from './manuscript-emails.js';
 import { createManuscriptMulter } from './author-routes.js';
+import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS } from './intervenants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
@@ -42,7 +43,111 @@ function roleCanAccessManuscript(admin, manuscript) {
 
 export function createManuscriptRouter({ db, csrfProtection, adminAuth, transporter, siteUrl, hooks = {} }) {
   const router = Router();
+
+  // Carnet d'intervenants (workflow semi-automatique) : acteurs externes notifiés
+  // par email, sans compte. Création du schéma + seed idempotent depuis les
+  // données héritées (liste correcteurs + anciens admin_users métier).
+  try {
+    ensureIntervenantsSchema(db);
+    seedIntervenants(db);
+  } catch (err) { console.warn('[INTERVENANTS] init warning:', err.message); }
   const auth = adminAuth;
+
+  // Garde-fou : routes carnet/affectation réservées au pilote éditorial.
+  const editorOnly = (req, res, next) => {
+    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Action réservée à l\'éditeur' });
+    }
+    next();
+  };
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  // ─── CARNET D'INTERVENANTS ───────────────────────────────
+  router.get('/intervenants', auth, editorOnly, (req, res) => {
+    const { metier, active } = req.query || {};
+    let sql = 'SELECT * FROM intervenants WHERE 1=1';
+    const params = [];
+    if (metier && INTERVENANT_METIERS.includes(metier)) { sql += ' AND metier = ?'; params.push(metier); }
+    if (active === '1') sql += ' AND is_active = 1';
+    else if (active === '0') sql += ' AND is_active = 0';
+    sql += ' ORDER BY metier ASC, nom ASC';
+    res.json(db.prepare(sql).all(...params));
+  });
+
+  router.get('/intervenants/:id', auth, editorOnly, (req, res) => {
+    const row = db.prepare('SELECT * FROM intervenants WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Intervenant introuvable' });
+    res.json(row);
+  });
+
+  router.post('/intervenants', auth, editorOnly, csrfProtection, (req, res) => {
+    const nom = (req.body?.nom || '').trim();
+    const email = (req.body?.email || '').trim();
+    const metier = (req.body?.metier || '').trim();
+    const notes = (req.body?.notes || '').trim() || null;
+    if (!nom) return res.status(400).json({ error: 'Nom requis' });
+    if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Email invalide' });
+    if (!INTERVENANT_METIERS.includes(metier)) return res.status(400).json({ error: 'Métier invalide' });
+    const info = db.prepare(
+      'INSERT INTO intervenants (nom, email, metier, notes) VALUES (?, ?, ?, ?)'
+    ).run(nom, email, metier, notes);
+    res.json(db.prepare('SELECT * FROM intervenants WHERE id = ?').get(info.lastInsertRowid));
+  });
+
+  router.put('/intervenants/:id', auth, editorOnly, csrfProtection, (req, res) => {
+    const current = db.prepare('SELECT * FROM intervenants WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Intervenant introuvable' });
+    const updates = [];
+    const values = [];
+    if (req.body?.nom !== undefined) {
+      const nom = (req.body.nom || '').trim();
+      if (!nom) return res.status(400).json({ error: 'Nom requis' });
+      updates.push('nom = ?'); values.push(nom);
+    }
+    if (req.body?.email !== undefined) {
+      const email = (req.body.email || '').trim();
+      if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Email invalide' });
+      updates.push('email = ?'); values.push(email);
+    }
+    if (req.body?.metier !== undefined) {
+      const metier = (req.body.metier || '').trim();
+      if (!INTERVENANT_METIERS.includes(metier)) return res.status(400).json({ error: 'Métier invalide' });
+      updates.push('metier = ?'); values.push(metier);
+    }
+    if (req.body?.notes !== undefined) { updates.push('notes = ?'); values.push((req.body.notes || '').trim() || null); }
+    if (!updates.length) return res.json(current);
+    updates.push("updated_at = datetime('now')");
+    values.push(req.params.id);
+    db.prepare(`UPDATE intervenants SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    res.json(db.prepare('SELECT * FROM intervenants WHERE id = ?').get(req.params.id));
+  });
+
+  router.patch('/intervenants/:id/active', auth, editorOnly, csrfProtection, (req, res) => {
+    const current = db.prepare('SELECT id FROM intervenants WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Intervenant introuvable' });
+    const active = req.body?.is_active ? 1 : 0;
+    db.prepare("UPDATE intervenants SET is_active = ?, updated_at = datetime('now') WHERE id = ?").run(active, req.params.id);
+    res.json(db.prepare('SELECT * FROM intervenants WHERE id = ?').get(req.params.id));
+  });
+
+  router.delete('/intervenants/:id', auth, editorOnly, csrfProtection, (req, res) => {
+    const current = db.prepare('SELECT id FROM intervenants WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Intervenant introuvable' });
+    // Soft delete si référencé par un manuscrit (préserve l'affichage de l'historique).
+    const refCols = ['assigned_evaluator_contact_id', 'assigned_corrector_contact_id', 'assigned_infographist_contact_id', 'assigned_printer_contact_id'];
+    let referenced = false;
+    try {
+      const where = refCols.map((c) => `${c} = ?`).join(' OR ');
+      const hit = db.prepare(`SELECT 1 FROM manuscripts WHERE ${where} LIMIT 1`).get(...refCols.map(() => req.params.id));
+      referenced = !!hit;
+    } catch (e) { void e; }
+    if (referenced) {
+      db.prepare("UPDATE intervenants SET is_active = 0, updated_at = datetime('now') WHERE id = ?").run(req.params.id);
+      return res.json({ success: true, softDeleted: true });
+    }
+    db.prepare('DELETE FROM intervenants WHERE id = ?').run(req.params.id);
+    res.json({ success: true, softDeleted: false });
+  });
 
   // ─── LISTE GLOBALE ────────────────────────────────────────
   router.get('/manuscripts/v2', auth, (req, res) => {
@@ -72,6 +177,29 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     ).get(req.params.id);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
     if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+
+    // Résout les ids d'assignation en noms lisibles (pour l'affichage du panneau).
+    //  - colonnes *_id          → admin_users (éditeur interne + historique)
+    //  - colonnes *_contact_id  → carnet d'intervenants (acteurs externes)
+    const adminCols = ['assigned_evaluator_id', 'assigned_corrector_id', 'assigned_editor_id', 'assigned_infographist_id', 'assigned_printer_id'];
+    const adminIds = [...new Set(adminCols.map((c) => manuscript[c]).filter(Boolean))];
+    if (adminIds.length) {
+      const rows = db.prepare(`SELECT id, username FROM admin_users WHERE id IN (${adminIds.map(() => '?').join(',')})`).all(...adminIds);
+      const byId = Object.fromEntries(rows.map((r) => [r.id, r.username]));
+      for (const c of adminCols) {
+        manuscript[`${c}_name`] = manuscript[c] ? (byId[manuscript[c]] || `#${manuscript[c]}`) : null;
+      }
+    }
+    const contactCols = ['assigned_evaluator_contact_id', 'assigned_corrector_contact_id', 'assigned_infographist_contact_id', 'assigned_printer_contact_id'];
+    const contactIds = [...new Set(contactCols.map((c) => manuscript[c]).filter(Boolean))];
+    if (contactIds.length) {
+      const rows = db.prepare(`SELECT id, nom FROM intervenants WHERE id IN (${contactIds.map(() => '?').join(',')})`).all(...contactIds);
+      const byId = Object.fromEntries(rows.map((r) => [r.id, r.nom]));
+      for (const c of contactCols) {
+        manuscript[`${c}_name`] = manuscript[c] ? (byId[manuscript[c]] || `#${manuscript[c]}`) : null;
+      }
+    }
+
     const files = db.prepare('SELECT * FROM manuscript_files WHERE manuscript_id = ? ORDER BY uploaded_at ASC').all(manuscript.id);
     const stages = db.prepare('SELECT * FROM manuscript_stages WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     const evaluations = db.prepare('SELECT * FROM manuscript_evaluations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
@@ -116,64 +244,75 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   });
 
   // ─── ASSIGNATION ─────────────────────────────────────────
-  router.post('/manuscripts/v2/:id/assign', auth, csrfProtection, (req, res) => {
-    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
-      return res.status(403).json({ error: 'Action réservée à l\'éditeur' });
-    }
+  // Les 4 acteurs externes sont affectés depuis le carnet d'intervenants
+  // (colonnes *_contact_id) ; l'éditeur interne reste un compte admin_users.
+  router.post('/manuscripts/v2/:id/assign', auth, editorOnly, csrfProtection, (req, res) => {
     const { role, user_id } = req.body;
-    const colMap = {
-      evaluateur: 'assigned_evaluator_id',
-      correcteur: 'assigned_corrector_id',
-      editor: 'assigned_editor_id',
-      infographiste: 'assigned_infographist_id',
-      imprimeur: 'assigned_printer_id',
+    const contactColMap = {
+      evaluateur: 'assigned_evaluator_contact_id',
+      correcteur: 'assigned_corrector_contact_id',
+      infographiste: 'assigned_infographist_contact_id',
+      imprimeur: 'assigned_printer_contact_id',
     };
-    const col = colMap[role];
+    const isContactRole = !!contactColMap[role];
+    const col = isContactRole ? contactColMap[role] : (role === 'editor' ? 'assigned_editor_id' : null);
     if (!col) return res.status(400).json({ error: 'Rôle invalide' });
+
+    // Validation de la cible selon la source (carnet d'intervenants ou comptes internes).
     if (user_id) {
-      const target = db.prepare('SELECT id, role FROM admin_users WHERE id = ?').get(user_id);
-      if (!target) return res.status(404).json({ error: 'Utilisateur introuvable' });
-      // Accepter que super_admin/admin soient assignables à tous rôles
-      if (!['super_admin', 'admin', role, 'editor'].includes(target.role)) {
-        return res.status(400).json({ error: `Utilisateur n'a pas le rôle ${role}` });
+      if (isContactRole) {
+        const target = db.prepare('SELECT id, metier, is_active FROM intervenants WHERE id = ?').get(user_id);
+        if (!target) return res.status(404).json({ error: 'Intervenant introuvable' });
+        if (target.metier !== role) return res.status(400).json({ error: `Cet intervenant n'est pas un ${role}` });
+        if (!target.is_active) return res.status(400).json({ error: 'Intervenant désactivé' });
+      } else {
+        const target = db.prepare('SELECT id, role FROM admin_users WHERE id = ?').get(user_id);
+        if (!target) return res.status(404).json({ error: 'Utilisateur introuvable' });
+        if (!['super_admin', 'admin', 'editor'].includes(target.role)) {
+          return res.status(400).json({ error: 'Utilisateur invalide pour le rôle éditeur' });
+        }
       }
     }
 
-    // Capter l'assigné précédent pour pouvoir le notifier de la désassignation
+    // Capter l'assigné précédent pour pouvoir le notifier de la désassignation.
     const before = db.prepare(`SELECT ${col} AS prev_id FROM manuscripts WHERE id = ?`).get(req.params.id);
     db.prepare(`UPDATE manuscripts SET ${col} = ?, updated_at = datetime('now') WHERE id = ?`)
       .run(user_id || null, req.params.id);
-
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
 
-    // Notifier l'ancien assigné qu'il est retiré (si changement)
+    // Résout {email,label} d'un id selon la source (carnet ou admin_users).
+    const resolveRecipient = (id) => {
+      if (!id) return null;
+      if (isContactRole) {
+        const r = db.prepare('SELECT nom, email FROM intervenants WHERE id = ?').get(id);
+        return r?.email ? { email: r.email, label: r.nom } : null;
+      }
+      const r = db.prepare('SELECT username, email FROM admin_users WHERE id = ?').get(id);
+      return r?.email ? { email: r.email, label: r.username } : null;
+    };
+
+    // Notifier l'ancien assigné de son retrait (si changement).
     if (before?.prev_id && before.prev_id !== user_id) {
       try {
-        const prev = db.prepare('SELECT username, email FROM admin_users WHERE id = ?').get(before.prev_id);
-        if (prev?.email) {
-          sendAssignmentEmail(transporter, manuscript, role,
-            { email: prev.email, label: prev.username }, siteUrl, 'unassigned');
-        }
+        const prev = resolveRecipient(before.prev_id);
+        if (prev) sendAssignmentEmail(transporter, manuscript, role, prev, siteUrl, 'unassigned');
       } catch (err) { console.warn('[WORKFLOW] previous assignee notify error:', err.message); }
     }
 
-    // Notifier le nouvel assigné (sauf cas géré ci-dessous par notifyTransition lors du in_evaluation auto)
+    // L'évaluateur affecté sur un manuscrit « submitted » déclenche la transition
+    // auto vers in_evaluation : l'email de tâche (avec lien) part alors via notifyTransition.
     const willAutoTransition = role === 'evaluateur' && user_id && manuscript.current_stage === 'submitted';
     if (user_id && before?.prev_id !== user_id && !willAutoTransition) {
       try {
-        const next = db.prepare('SELECT username, email FROM admin_users WHERE id = ?').get(user_id);
-        if (next?.email) {
-          sendAssignmentEmail(transporter, manuscript, role,
-            { email: next.email, label: next.username }, siteUrl, 'assigned');
-        }
+        const next = resolveRecipient(user_id);
+        if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
       } catch (err) { console.warn('[WORKFLOW] new assignee notify error:', err.message); }
     }
 
-    // Si on assigne un évaluateur et que le stage est 'submitted', transition auto vers 'in_evaluation'
     if (willAutoTransition) {
       const updated = transition(db, manuscript.id, 'in_evaluation',
         { role: req.admin.role, id: req.admin.id, label: req.admin.username },
-        { note: `Assignation évaluateur: admin user ${user_id}` });
+        { note: `Assignation évaluateur (intervenant #${user_id})` });
       notifyTransition(db, transporter, updated, 'in_evaluation',
         { role: req.admin.role, id: req.admin.id, label: req.admin.username }, siteUrl);
       return res.json({ success: true, stage: 'in_evaluation' });
@@ -181,10 +320,10 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     res.json({ success: true });
   });
 
-  // Transition générique (admin/super_admin uniquement)
+  // Transition générique (éditeur / admin / super_admin)
   router.post('/manuscripts/v2/:id/transition', auth, csrfProtection, (req, res) => {
-    if (!['super_admin', 'admin'].includes(req.admin.role)) {
-      return res.status(403).json({ error: 'Réservé au super administrateur' });
+    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Réservé à l\'éditeur ou l\'administrateur' });
     }
     const { to_stage, note, force } = req.body;
     try {
@@ -203,7 +342,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
                FROM manuscripts m JOIN authors a ON a.id = m.author_id
                WHERE m.current_stage = 'in_evaluation'`;
     const params = [];
-    if (!['super_admin', 'admin'].includes(req.admin.role)) {
+    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
       sql += ' AND m.assigned_evaluator_id = ?';
       params.push(req.admin.id);
     }
@@ -263,7 +402,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
                FROM manuscripts m JOIN authors a ON a.id = m.author_id
                WHERE m.current_stage IN ('in_correction', 'correction_author_review')`;
     const params = [];
-    if (!['super_admin', 'admin'].includes(req.admin.role)) {
+    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
       sql += ' AND m.assigned_corrector_id = ?';
       params.push(req.admin.id);
     }
@@ -482,13 +621,20 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   });
 
   // ─── LISTE UTILISATEURS ASSIGNABLES (par rôle) ──────────
-  router.get('/admin-users/by-role', auth, (req, res) => {
-    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
-      return res.status(403).json({ error: 'Accès refusé' });
-    }
+  router.get('/admin-users/by-role', auth, editorOnly, (req, res) => {
     const { role } = req.query;
     if (!role) return res.status(400).json({ error: 'Paramètre role requis' });
-    const rows = db.prepare(`SELECT id, username, role FROM admin_users WHERE role = ? OR role IN ('super_admin','admin')`).all(role);
+    // Acteurs externes → carnet d'intervenants (forme {id, username, role} attendue par le modal).
+    if (INTERVENANT_METIERS.includes(role)) {
+      const rows = db.prepare(
+        'SELECT id, nom AS username, metier AS role FROM intervenants WHERE metier = ? AND is_active = 1 ORDER BY nom ASC'
+      ).all(role);
+      return res.json(rows);
+    }
+    // Éditeur interne → comptes admin_users actifs.
+    const rows = db.prepare(
+      `SELECT id, username, role FROM admin_users WHERE (role = ? OR role IN ('super_admin','admin')) AND is_active = 1`
+    ).all(role);
     res.json(rows);
   });
 

@@ -46,6 +46,44 @@ function detectImageFormat(buf) {
 
 const excludedListSql = `(${excludedCategoryPlaceholders()})`;
 
+// Décodage minimal des entités HTML : les libellés Dolibarr historiques sont
+// stockés encodés (« Po&eacute;sie », « Th&eacute;&acirc;tre »). Utilisé pour
+// un dédoublonnage fiable des genres, insensible à la casse et aux accents.
+const NAMED_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  eacute: 'é', egrave: 'è', ecirc: 'ê', euml: 'ë',
+  agrave: 'à', acirc: 'â', auml: 'ä', aring: 'å', atilde: 'ã',
+  ugrave: 'ù', ucirc: 'û', uuml: 'ü', uacute: 'ú',
+  icirc: 'î', iuml: 'ï', igrave: 'ì', iacute: 'í',
+  ocirc: 'ô', ouml: 'ö', ograve: 'ò', oacute: 'ó', otilde: 'õ',
+  ccedil: 'ç', ntilde: 'ñ', oelig: 'œ', aelig: 'æ',
+};
+
+function decodeEntitiesServer(str) {
+  if (!str) return '';
+  return String(str).replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, code) => {
+    if (code[0] === '#') {
+      const cp = (code[1] === 'x' || code[1] === 'X')
+        ? parseInt(code.slice(2), 16)
+        : parseInt(code.slice(1), 10);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+    }
+    const key = code.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, key) ? NAMED_ENTITIES[key] : m;
+  });
+}
+
+// Forme normalisée d'un libellé pour comparaison : décodé, sans accents,
+// minuscule, espaces compactés. « Po&eacute;sie » et « poesie » → « poesie ».
+function normalizeLabel(str) {
+  return decodeEntitiesServer(str)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Crée le router.
  * @param {Object} deps - { dolibarrPool, auth, csrfProtection, cache, db }
@@ -70,6 +108,23 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
       [productId, ...EXCLUDED_CATEGORY_LABELS]
     );
     return rows.map((r) => r.rowid);
+  }
+
+  // ── Helper: parent sous lequel rattacher un nouveau genre ──
+  // On choisit le parent qui regroupe déjà le plus de genres : la liste
+  // s'auto-corrige si l'arborescence Dolibarr évolue (pas d'ID en dur).
+  // Fallback racine (0) si aucun genre existant.
+  async function resolveGenreParentId() {
+    const [rows] = await dolibarrPool.query(
+      `SELECT fk_parent, COUNT(*) AS n
+         FROM llx_categorie
+        WHERE type = 0 AND label NOT IN ${excludedListSql}
+        GROUP BY fk_parent
+        ORDER BY n DESC, fk_parent ASC
+        LIMIT 1`,
+      EXCLUDED_CATEGORY_LABELS
+    );
+    return rows.length ? rows[0].fk_parent : 0;
   }
 
   // ── Helper: check ISBN uniqueness (exclude self for updates) ──
@@ -457,6 +512,67 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
     } catch (err) {
       console.error('[BOOKS] GET detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement du livre' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
+  // POST /api/admin/books/genres — Crée un nouveau genre
+  // (catégorie produit Dolibarr, rattachée au même parent que les genres existants)
+  // ══════════════════════════════════════════════════════
+  router.post('/genres', auth, csrfProtection, async (req, res) => {
+    try {
+      const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+      if (!label) {
+        return res.status(400).json({ error: 'Le nom du genre est obligatoire' });
+      }
+      if (label.length > 80) {
+        return res.status(400).json({ error: 'Nom de genre trop long (80 caractères maximum)' });
+      }
+      // Refuse les libellés techniques réservés (catégories système)
+      const target = normalizeLabel(label);
+      if (EXCLUDED_CATEGORY_LABELS.some((l) => normalizeLabel(l) === target)) {
+        return res.status(400).json({ error: 'Ce nom est réservé et ne peut pas être utilisé comme genre' });
+      }
+
+      // Anti-doublon insensible à la casse / aux accents / aux entités HTML,
+      // sur l'ensemble des genres existants (évite « Roman » vs « ROMAN »).
+      const [existing] = await dolibarrPool.query(
+        `SELECT rowid, label FROM llx_categorie WHERE type = 0 AND label NOT IN ${excludedListSql}`,
+        EXCLUDED_CATEGORY_LABELS
+      );
+      const dup = existing.find((c) => normalizeLabel(c.label) === target);
+      if (dup) {
+        return res.status(409).json({
+          error: `Le genre « ${decodeEntitiesServer(dup.label)} » existe déjà`,
+          genre: { id: dup.rowid, label: decodeEntitiesServer(dup.label) },
+        });
+      }
+
+      const fkParent = await resolveGenreParentId();
+      const createRes = await adminApi.post('/categories', {
+        label,
+        type: 'product',
+        fk_parent: fkParent,
+        visible: 1,
+      });
+      const newId = parseInt(createRes.data, 10);
+      if (!Number.isInteger(newId) || newId <= 0) {
+        throw new Error(`Réponse Dolibarr inattendue à la création de catégorie: ${JSON.stringify(createRes.data)}`);
+      }
+
+      // Relit le libellé canonique tel que stocké (Dolibarr peut ré-encoder les accents)
+      const [row] = await dolibarrPool.query(
+        'SELECT label FROM llx_categorie WHERE rowid = ? LIMIT 1', [newId]
+      );
+      const storedLabel = row.length ? decodeEntitiesServer(row[0].label) : label;
+
+      // Invalide le cache catégories partagé (/api/categories) pour rafraîchir partout
+      cache.del('categories:all');
+
+      res.status(201).json({ id: newId, label: storedLabel });
+    } catch (err) {
+      console.error('[BOOKS] POST /genres error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur lors de la création du genre' });
     }
   });
 

@@ -6,6 +6,7 @@ import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Contracts.css';
 import { contractTypeLabel, CONTRACT_TYPE_FILTER_GROUPS } from '../../../utils/contractTypes';
+import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
 // Couleur de pastille par modèle (le type stocké commence par la clé du modèle)
@@ -28,6 +29,9 @@ export default function ContractsList() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const role = useAdminRole();
+  const canEdit = CONTRACT_EDIT_ROLES.includes(role);   // export CSV (éditeurs/admin)
+  const canCreate = CONTRACT_WRITE_ROLES.includes(role); // création (inclut le comptable)
   const [filters, setFilters] = useState({
     status: '', type: '', author: '', date_from: '', date_to: '',
     sort: '', order: 'DESC', page: 1,
@@ -111,10 +115,12 @@ export default function ContractsList() {
             <FiFilter size={14} /> Filtres
             {activeFilterCount > 0 && <span className="ct-toggle-badge">{activeFilterCount}</span>}
           </button>
-          <button onClick={handleExport} disabled={exporting} className="ct-btn ct-btn-outline">
-            <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
-          </button>
-          <Link to="/admin/contracts/new" className="ct-new-btn"><FiPlus size={14} /> Nouveau contrat</Link>
+          {canEdit && (
+            <button onClick={handleExport} disabled={exporting} className="ct-btn ct-btn-outline">
+              <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
+            </button>
+          )}
+          {canCreate && <Link to="/admin/contracts/new" className="ct-new-btn"><FiPlus size={14} /> Nouveau contrat</Link>}
         </div>
       </div>
 

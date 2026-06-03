@@ -370,6 +370,15 @@ const manuscriptSubmitLimiter = rateLimit({
   message: { error: 'Trop de soumissions, réessayez dans une heure' },
 });
 
+// Téléchargement par lien tokenisé (intervenants externes) : 60 par 15 min / IP.
+const fileDownloadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de téléchargements, réessayez plus tard' },
+});
+
 // ─── CSRF PROTECTION ────────────────────────────────────────
 
 // Comparaison constant-time sûre : retourne false si longueurs différentes
@@ -802,7 +811,7 @@ app.use('/api/auth', createAuthRouter({ db, csrfProtection, sanitizeBody, authLi
 
 // ─── CONTRACTS MODULE ───────────────────────────────────
 import { createContractRouter } from './contract-routes.js';
-app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtection, sanitizeBody }));
+app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtection, sanitizeBody, transporter }));
 
 // ─── CONTRACT QUOTES (devis de contribution auteur) ─────
 import { createContractQuoteRouter } from './contract-quote-routes.js';
@@ -975,10 +984,17 @@ try {
 import { createManuscriptRouter } from './manuscript-routes.js';
 import { transition as wfTransition } from './manuscript-workflow.js';
 import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences } from './manuscript-emails.js';
+import { ensureFileTokensSchema, createPublicFileRouter } from './manuscript-file-tokens.js';
 
 // Initialise la table author_notifications (cloche in-app auteur)
 try { ensureNotificationsSchema(db); console.log('[NOTIF] Schéma author_notifications OK'); }
 catch (err) { console.error('[NOTIF] Init schéma:', err.message); }
+
+// Liens de téléchargement tokenisés pour les intervenants externes (sans compte).
+// Route PUBLIQUE montée hors /api/admin (pas de RBAC), rate-limitée.
+try { ensureFileTokensSchema(db); console.log('[FILES] Schéma manuscript_file_tokens OK'); }
+catch (err) { console.error('[FILES] Init schéma:', err.message); }
+app.use('/api/files', createPublicFileRouter({ db, limiter: fileDownloadLimiter }));
 
 // Expose la config site pour les emails admin (lecture seule, rafraîchie à chaque notif)
 // Utilisée par notifyTransition pour résoudre l'adresse admin de réception
@@ -1614,7 +1630,7 @@ try {
 // ─── DEVIS MODULE (propositions commerciales) ───────────────
 import { createPropalsRouter } from './propals-routes.js';
 try {
-  app.use('/api/admin/propals', adminAuth(db), createPropalsRouter({ dolibarrPool }));
+  app.use('/api/admin/propals', adminAuth(db), createPropalsRouter({ dolibarrPool, csrfProtection }));
   console.log('[PROPALS] Devis routes mounted');
 } catch (err) {
   console.error('[PROPALS] Failed to mount propals routes:', err);
@@ -1630,6 +1646,15 @@ try {
   console.log('[STOCK] Stock & suppliers routes mounted');
 } catch (err) {
   console.error('[STOCK] Failed to mount stock routes:', err);
+}
+
+// ─── DÉPÔT LÉGAL MODULE ─────────────────────────────────────
+import { createLegalDepositRouter } from './legal-deposit-routes.js';
+try {
+  app.use('/api/admin/legal-deposits', createLegalDepositRouter({ db, dolibarrPool, auth: adminAuth(db), csrfProtection }));
+  console.log('[LEGAL_DEPOSIT] Legal deposit routes mounted');
+} catch (err) {
+  console.error('[LEGAL_DEPOSIT] Failed to mount legal deposit routes:', err);
 }
 
 // ─── YOUTUBE VIDEOS ─────────────────────────────────────────
@@ -2719,6 +2744,41 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
     cache.keys().filter((k) => k.startsWith('products:')).forEach((k) => cache.del(k));
     cache.keys().filter((k) => k.startsWith('customer-orders:')).forEach((k) => cache.del(k));
     cache.keys().filter((k) => k.startsWith('customer-invoices:')).forEach((k) => cache.del(k));
+
+    // ── Notifier l'équipe (best-effort) qu'une nouvelle commande web est arrivée ──
+    // PayTech a sa propre notification « payée » via l'IPN (paytech-routes.js) ; ici
+    // on couvre les paiements manuels (Wave, Orange Money, espèces, virement) qui
+    // exigent un suivi humain pour confirmer le paiement — sinon l'équipe n'est
+    // jamais alertée et ne voit la commande qu'en ouvrant /admin/orders.
+    if (payment_method !== 'paytech') {
+      try {
+        let adminEmails = [];
+        try {
+          const cfg = JSON.parse(readFileSync(join(__dirname, 'site-config.json'), 'utf-8'));
+          adminEmails = Array.isArray(cfg.admin_emails) ? cfg.admin_emails : [];
+        } catch { /* config absente → notification ignorée */ }
+        emailService.sendNewOrderNotificationToAdmin({
+          transporter,
+          order: {
+            ref: orderDetail.data.ref,
+            total: orderDetail.data.total_ttc,
+            items: items.map((it) => ({ label: it.title || it.label, quantity: it.quantity, price_ttc: it.price_ttc || it.price })),
+            customer: {
+              email: customer.email,
+              firstname: customer.firstname,
+              lastname: customer.lastname,
+              phone: customer.phone,
+            },
+          },
+          adminEmails,
+          siteUrl: SITE_URL,
+          status: 'pending',
+          paymentInfo: { method: payment_method },
+        });
+      } catch (notifyErr) {
+        console.error('[ORDERS] admin notification failed:', notifyErr.message);
+      }
+    }
 
     // Si le client a choisi PayTech, initier le checkout hosted dans la foulée
     let paytechRedirectUrl = null;

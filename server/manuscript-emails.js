@@ -11,6 +11,7 @@
  */
 
 import { STAGE_LABELS } from './manuscript-workflow.js';
+import { createFileToken, pickFileForActor } from './manuscript-file-tokens.js';
 
 // Stages dits "terminaux" pour l'auteur — on ne génère pas de notification car
 // l'utilisateur n'a plus d'action à mener ou ce sont des états techniques internes.
@@ -457,6 +458,47 @@ export function sendAssignmentEmail(transporter, manuscript, role, recipient, si
 }
 
 /**
+ * Email de tâche à un intervenant externe (sans compte). Décrit le travail
+ * attendu et fournit un lien de téléchargement sécurisé du fichier à traiter.
+ * Le retour du travail se fait par réponse email à l'équipe éditoriale.
+ * recipient = { nom, email, metier }
+ */
+export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recipient, downloadUrl, siteUrl) {
+  if (!transporter || !recipient?.email) return Promise.resolve();
+  void siteUrl;
+  const roleInfo = ROLE_LABELS[recipient.metier] || { label: recipient.metier || 'intervenant' };
+  const msTitle = escapeHtml(manuscript?.title || 'un manuscrit');
+  const msRef = escapeHtml(manuscript?.ref || '');
+  const greeting = `<p>Bonjour ${escapeHtml(recipient.nom || 'cher collègue')},</p>`;
+
+  const TASK_COPY = {
+    in_evaluation: { subject: 'Manuscrit à évaluer', intro: `Nous sollicitons votre évaluation du manuscrit <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le manuscrit' },
+    in_correction: { subject: 'Manuscrit à corriger', intro: `Le manuscrit <strong>« ${msTitle} »</strong> vous est confié pour correction`, fileLabel: 'Télécharger le fichier à corriger' },
+    cover_design: { subject: 'Couverture à concevoir', intro: `Merci de concevoir la couverture du manuscrit <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le texte final' },
+    printing: { subject: "Ouvrage à imprimer", intro: `L'ouvrage <strong>« ${msTitle} »</strong> est prêt pour l'impression`, fileLabel: "Télécharger le fichier d'impression" },
+  };
+  const copy = TASK_COPY[toStage] || { subject: 'Nouvelle tâche', intro: `Une tâche vous est confiée pour <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le fichier' };
+
+  let body = header(copy.subject)
+    + greeting
+    + `<p>${copy.intro} (référence ${msRef}).</p>`;
+  if (downloadUrl) {
+    body += `<p>Le fichier à traiter est disponible via ce lien sécurisé (valable 7 jours) :</p>`
+      + btn(copy.fileLabel, downloadUrl);
+  } else {
+    body += `<p>L'éditeur vous transmettra le fichier à traiter.</p>`;
+  }
+  body += `<p style="color:#555">Une fois votre travail terminé, merci de le renvoyer par retour d'email à l'équipe éditoriale.</p>`;
+
+  return transporter.sendMail({
+    from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+    to: recipient.email,
+    subject: `[${roleInfo.label}] ${manuscript?.title || 'Manuscrit'}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+  }).catch((err) => console.error('[WORKFLOW] Intervenant email error:', err.message));
+}
+
+/**
  * Résout la liste des destinataires pour une transition, envoie les mails
  * et crée une notification in-app pour l'auteur.
  */
@@ -479,33 +521,68 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
 
   if (!transporter) return;
 
-  // 2. Prochain acteur métier : email si une adresse est connue dans admin_users
-  const roleToColumn = {
+  // 2. Prochain acteur métier EXTERNE : email + lien de téléchargement sécurisé,
+  //    résolu depuis le carnet d'intervenants (plus de compte connecté).
+  const roleToContact = {
+    in_evaluation: 'assigned_evaluator_contact_id',
+    in_correction: 'assigned_corrector_contact_id',
+    cover_design: 'assigned_infographist_contact_id',
+    printing: 'assigned_printer_contact_id',
+  };
+  const contactCol = roleToContact[toStage];
+  let notifiedContact = false;
+  if (contactCol && manuscript[contactCol]) {
+    try {
+      const intervenant = db.prepare(
+        'SELECT id, nom, email, metier FROM intervenants WHERE id = ? AND is_active = 1'
+      ).get(manuscript[contactCol]);
+      if (intervenant?.email) {
+        let downloadUrl = null;
+        const file = pickFileForActor(db, manuscript.id, toStage);
+        if (file) {
+          const token = createFileToken(db, { manuscriptId: manuscript.id, fileId: file.id, intervenantId: intervenant.id });
+          downloadUrl = `${siteUrl || ''}/api/files/manuscript/${token}/download`;
+        }
+        sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl);
+        notifiedContact = true;
+      }
+    } catch (err) {
+      console.warn('[WORKFLOW] intervenant notify error:', err.message);
+    }
+  }
+
+  // 2b. Éditeur interne (validation éditoriale) : reste un compte admin_users.
+  if (toStage === 'in_editorial' && manuscript.assigned_editor_id) {
+    try {
+      const admin = db.prepare('SELECT username, role, email FROM admin_users WHERE id = ?').get(manuscript.assigned_editor_id);
+      if (admin?.email) {
+        sendTransitionEmail(transporter, manuscript, toStage, {
+          type: 'admin', email: admin.email, role: admin.role, label: admin.username,
+        }, siteUrl);
+      }
+    } catch (err) { console.warn('[WORKFLOW] editor notify error:', err.message); }
+  }
+
+  // 2c. Repli historique : manuscrits affectés via l'ancien système (admin_users)
+  //     avant la migration. On notifie l'ancien assigné uniquement si aucun
+  //     intervenant du carnet n'a déjà été notifié pour cette étape.
+  const legacyRoleToColumn = {
     in_evaluation: 'assigned_evaluator_id',
     in_correction: 'assigned_corrector_id',
-    in_editorial: 'assigned_editor_id',
     cover_design: 'assigned_infographist_id',
     print_preparation: 'assigned_printer_id',
     printing: 'assigned_printer_id',
   };
-  const col = roleToColumn[toStage];
-  if (col && manuscript[col]) {
+  const legacyCol = legacyRoleToColumn[toStage];
+  if (!notifiedContact && legacyCol && manuscript[legacyCol]) {
     try {
-      const admin = db.prepare('SELECT username, role, email FROM admin_users WHERE id = ?').get(manuscript[col]);
+      const admin = db.prepare('SELECT username, role, email FROM admin_users WHERE id = ?').get(manuscript[legacyCol]);
       if (admin?.email) {
         sendTransitionEmail(transporter, manuscript, toStage, {
-          type: 'admin',
-          email: admin.email,
-          role: admin.role,
-          label: admin.username,
+          type: 'admin', email: admin.email, role: admin.role, label: admin.username,
         }, siteUrl);
-      } else if (admin?.username) {
-        console.log(`[WORKFLOW] ${admin.username} (${admin.role}) assigné à ${manuscript.ref} → ${toStage} — aucun email enregistré`);
       }
-    } catch (err) {
-      // La colonne email peut ne pas exister sur les très vieilles bases. On loggue et on continue.
-      console.warn('[WORKFLOW] admin_users.email lookup error:', err.message);
-    }
+    } catch (err) { console.warn('[WORKFLOW] legacy assignee notify error:', err.message); }
   }
 
   // 3. Admins généraux sur transitions clés (nouvelle soumission, paiement attendu,

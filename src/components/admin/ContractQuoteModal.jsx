@@ -4,17 +4,20 @@ import toast from 'react-hot-toast';
 import { createContractQuote, openQuotePdf } from '../../api/quotes';
 
 const FCFA_PER_EUR = 655.957;
-const PURCHASE_REMISE = 0.68;        // ~32 % de remise sur le prix public (item 4)
+const DEFAULT_AUTHOR_DISCOUNT = 30;  // remise auteur par défaut (%) si non renseignée au contrat
 const COLOR_FLAT_PRICE = 852000;     // Prix fixe contribution impression couleur (item 6)
 
-function buildDefaultItems({ pages, priceEur, qty, color }) {
+function buildDefaultItems({ pages, priceEur, qty, color, discountPct }) {
   const items = [];
   if (pages > 0) {
     items.push({ id: 1, label: '1 - Contribution au frais de relecture et au report de correction', price: pages * 1500 });
     items.push({ id: 2, label: '2 - Contribution à la mise en pages et réalisation du Prêt-à-clicher', price: pages * 1000 });
   }
   if (priceEur > 0 && qty > 0) {
-    items.push({ id: 4, label: `4 - Achat de ${qty} exemplaires contractuels`, price: Math.round(priceEur * qty * FCFA_PER_EUR * PURCHASE_REMISE) });
+    // L'auteur paie (100 − remise) % du prix public, converti en FCFA.
+    // La remise provient du contrat (champ « Remise auteur (%) »), pas d'une valeur figée.
+    const remise = Math.min(100, Math.max(0, Number(discountPct) || 0)) / 100;
+    items.push({ id: 4, label: `4 - Achat de ${qty} exemplaires contractuels`, price: Math.round(priceEur * qty * FCFA_PER_EUR * (1 - remise)) });
   }
   if (color) {
     items.push({ id: 6, label: '6 - Contribution à l\'impression Couleur', price: COLOR_FLAT_PRICE });
@@ -44,6 +47,12 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
   const purchaseEnabled = parseInt(ef.authorPurchaseEnabled) === 1;
   const purchaseQty = parseInt(ef.authorPurchaseQty) || 0;
   const initialQty = purchaseEnabled && purchaseQty > 0 ? purchaseQty : 50;
+  // Remise auteur réelle du contrat (item 4). Repli sur le défaut pour les
+  // anciens contrats sans ce champ. C'EST cette valeur qui pilote le prix d'achat.
+  const rawDiscount = parseFloat(ef.authorPurchaseDiscount);
+  const purchaseDiscount = Number.isFinite(rawDiscount) && rawDiscount >= 0 && rawDiscount <= 100
+    ? rawDiscount
+    : DEFAULT_AUTHOR_DISCOUNT;
 
   const [form, setForm] = useState({
     recipient_title: inferredTitle,
@@ -63,6 +72,7 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     priceEur: parseFloat(form.book_price_eur) || 0,
     qty: initialQty,
     color: false,
+    discountPct: purchaseDiscount,
   }));
 
   const [submitting, setSubmitting] = useState(false);
@@ -87,10 +97,10 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     const priceEur = parseFloat(form.book_price_eur) || 0;
     setItems(prev => {
       const customs = prev.filter(i => i.id >= 100);
-      const next = buildDefaultItems({ pages, priceEur, qty: initialQty, color: form.color });
+      const next = buildDefaultItems({ pages, priceEur, qty: initialQty, color: form.color, discountPct: purchaseDiscount });
       return [...next, ...customs];
     });
-  }, [form.book_pages, form.book_price_eur, form.color, initialQty]);
+  }, [form.book_pages, form.book_price_eur, form.color, initialQty, purchaseDiscount]);
 
   const updateItem = (idx, patch) => {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));

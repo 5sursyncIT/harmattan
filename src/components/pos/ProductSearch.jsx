@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { posSearchProducts, posLookupBarcode } from '../../api/pos';
 import usePosCartStore from '../../store/posCartStore';
 import { FiSearch } from 'react-icons/fi';
+import toast from 'react-hot-toast';
 import './ProductSearch.css';
 
 // Quand le scanner code-barre est configuré en QWERTY mais l'OS en FR AZERTY,
@@ -49,7 +50,22 @@ export default function ProductSearch() {
   const handleBarcodeScan = useCallback(async (code) => {
     try {
       const res = await posLookupBarcode(code);
-      addItem(res.data);
+      const product = res.data;
+      addItem(product);
+      // Info discrète : stock restant après ajout au panier
+      const inCart = usePosCartStore.getState().items.find((i) => i.product_id === product.id)?.qty || 0;
+      const remaining = Math.max(0, (Number(product.stock_reel) || 0) - inCart);
+      toast(`${product.label} · ${remaining} en stock`, {
+        icon: '📚',
+        duration: 2000,
+        style: {
+          background: remaining > 0 ? '#f1f5f9' : '#fef2f2',
+          color: remaining > 0 ? '#334155' : '#b91c1c',
+          fontSize: 13,
+          fontWeight: 500,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        },
+      });
       setQuery('');
       setShowResults(false);
       inputRef.current?.focus();

@@ -362,6 +362,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   padding: 12px 16px;
   border-top: 1px solid var(--color-border, #e5e7eb);
   background: #f9fafb;
@@ -369,18 +371,75 @@
   color: var(--color-text-light, #6b7280);
 }
 
+.books-pagination-pages {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .books-pagination button {
-  padding: 6px 14px;
+  padding: 6px 12px;
   background: #fff;
   border: 1px solid #d1d5db;
   border-radius: 6px;
   cursor: pointer;
   font-size: 0.82rem;
+  color: inherit;
+}
+
+.books-pagination button:hover:not(:disabled) {
+  background: #f3f4f6;
 }
 
 .books-pagination button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.books-pagination-num {
+  min-width: 34px;
+  text-align: center;
+  padding: 6px 8px;
+}
+
+.books-pagination-num.is-current {
+  background: var(--color-green-deep, #10531a);
+  border-color: var(--color-green-deep, #10531a);
+  color: #fff;
+  font-weight: 600;
+  cursor: default;
+}
+
+.books-pagination-num.is-current:hover {
+  background: var(--color-green-deep, #10531a);
+}
+
+.books-pagination-gap {
+  padding: 0 4px;
+  color: #9ca3af;
+  user-select: none;
+}
+
+.books-pagination-goto {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.books-pagination-goto input {
+  width: 64px;
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  text-align: center;
+  color: inherit;
+}
+
+.books-pagination-goto button {
+  padding: 6px 12px;
 }
 
 /* ─── Detail pane ──────────────────────── */
@@ -807,6 +866,73 @@
   color: var(--color-text-light, #6b7280);
   font-size: 0.82rem;
   font-style: italic;
+}
+
+/* Chip « + Ajouter » : style discret, en pointillés, pour le distinguer des genres */
+.genre-chip-add {
+  border-style: dashed;
+  color: var(--color-green-deep, #10531a);
+  border-color: #9ca3af;
+}
+
+.genre-chip-add:hover {
+  border-style: dashed;
+  background: #f0fdf4;
+}
+
+/* Mini-formulaire inline d'ajout d'un genre */
+.genre-add-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.genre-add-input {
+  padding: 4px 10px;
+  border: 1px solid var(--color-green-deep, #10531a);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  width: 150px;
+  outline: none;
+  background: #fff;
+}
+
+.genre-add-input:focus {
+  box-shadow: 0 0 0 2px rgba(16, 83, 26, 0.15);
+}
+
+.genre-add-confirm,
+.genre-add-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.genre-add-confirm {
+  background: var(--color-green-deep, #10531a);
+  border-color: var(--color-green-deep, #10531a);
+  color: #fff;
+}
+
+.genre-add-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.genre-add-cancel {
+  background: #fff;
+  color: var(--color-text-light, #6b7280);
+}
+
+.genre-add-cancel:hover {
+  border-color: #ef4444;
+  color: #ef4444;
 }
 
 .isbn-retry {

@@ -217,13 +217,25 @@ function CreateModal({ warehouses, onClose, onCreated }) {
           )}
         </div>
         <div style={{ marginTop: 4 }}>
+          {lines.length > 0 && (
+            <div className="dl-line dl-line-head">
+              <span>Désignation</span>
+              <span style={{ textAlign: 'center' }}>Qté</span>
+              <span />
+            </div>
+          )}
           {lines.map((l, idx) => (
             <div key={l._k} className="dl-line">
               <div>
                 <input value={l.label} onChange={e => updateLine(idx, { label: e.target.value })} placeholder="Désignation" style={{ width: '100%' }} />
                 {(l.ref || l.product_id) && <span className="dl-line-sub">{l.ref}{l.product_id ? ' · stock suivi' : ''}</span>}
               </div>
-              <input type="number" min={1} value={l.qty} onChange={e => updateLine(idx, { qty: e.target.value })} />
+              <input
+                type="number" min={1} step={1} value={l.qty}
+                aria-label="Quantité" title="Quantité" placeholder="Qté"
+                onChange={e => updateLine(idx, { qty: e.target.value })}
+                style={{ textAlign: 'center' }}
+              />
               <button className="dl-icon-btn" onClick={() => removeLine(idx)} aria-label="Retirer"><FiTrash2 size={16} /></button>
             </div>
           ))}

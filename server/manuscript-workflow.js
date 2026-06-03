@@ -74,8 +74,8 @@ export const ALLOWED_TRANSITIONS = {
     { to: 'in_evaluation', roles: ['super_admin', 'admin', 'editor'] },
   ],
   in_evaluation: [
-    { to: 'evaluation_positive', roles: ['evaluateur', 'super_admin', 'admin'] },
-    { to: 'evaluation_negative', roles: ['evaluateur', 'super_admin', 'admin'] },
+    { to: 'evaluation_positive', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
+    { to: 'evaluation_negative', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
   ],
   evaluation_negative: [],
   evaluation_positive: [
@@ -91,7 +91,7 @@ export const ALLOWED_TRANSITIONS = {
     { to: 'in_correction', roles: ['super_admin', 'admin', 'comptable', 'system'] },
   ],
   in_correction: [
-    { to: 'correction_author_review', roles: ['correcteur', 'super_admin', 'admin'] },
+    { to: 'correction_author_review', roles: ['correcteur', 'editor', 'super_admin', 'admin'] },
   ],
   correction_author_review: [
     { to: 'in_correction', roles: ['author', 'super_admin', 'admin'] },
@@ -105,17 +105,17 @@ export const ALLOWED_TRANSITIONS = {
     { to: 'cover_design', roles: ['editor', 'super_admin', 'admin'] },
   ],
   cover_design: [
-    { to: 'bat_author_review', roles: ['infographiste', 'super_admin', 'admin'] },
+    { to: 'bat_author_review', roles: ['infographiste', 'editor', 'super_admin', 'admin'] },
   ],
   bat_author_review: [
     { to: 'cover_design', roles: ['author', 'super_admin', 'admin'] },
     { to: 'print_preparation', roles: ['author', 'super_admin', 'admin'] },
   ],
   print_preparation: [
-    { to: 'printing', roles: ['imprimeur', 'super_admin', 'admin'] },
+    { to: 'printing', roles: ['imprimeur', 'editor', 'super_admin', 'admin'] },
   ],
   printing: [
-    { to: 'printed', roles: ['imprimeur', 'super_admin', 'admin'] },
+    { to: 'printed', roles: ['imprimeur', 'editor', 'super_admin', 'admin'] },
   ],
   printed: [],
 };

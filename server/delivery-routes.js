@@ -172,10 +172,12 @@ export function createDeliveryRouter({ db, dolibarrPool, auth, csrfProtection })
   // Entrepôts Dolibarr (source du stock)
   router.get('/warehouses', auth, async (req, res) => {
     try {
+      // Note : depuis Dolibarr 7.0 la colonne `label` a été renommée `ref`
+      // (migration 6.0.0-7.0.0). Le nom de l'entrepôt est donc dans `ref`.
       const [rows] = await dolibarrPool.query(
-        `SELECT rowid AS id, ref, lieu, label FROM llx_entrepot WHERE statut = 1 ORDER BY label ASC`
+        `SELECT rowid AS id, ref, lieu FROM llx_entrepot WHERE statut = 1 ORDER BY ref ASC`
       );
-      res.json({ warehouses: rows.map(w => ({ id: w.id, name: w.label || w.ref, location: w.lieu })) });
+      res.json({ warehouses: rows.map(w => ({ id: w.id, name: w.ref || w.lieu || `Entrepôt ${w.id}`, location: w.lieu })) });
     } catch (err) {
       console.error('[DELIVERIES] warehouses error:', err.message);
       res.status(500).json({ error: 'Erreur chargement entrepôts' });

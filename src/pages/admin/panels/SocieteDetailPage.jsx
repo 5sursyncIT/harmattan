@@ -9,11 +9,14 @@ import Loader from '../../../components/common/Loader';
 import PdfViewerModal from '../../../components/admin/PdfViewerModal';
 import InvoicePayModal from '../../../components/admin/InvoicePayModal';
 import TiersFormModal from '../../../components/admin/TiersFormModal';
-import { getAdminSociete, deleteAdminSociete } from '../../../api/admin';
+import { getAdminSociete, getAdminSocieteInvoices, deleteAdminSociete } from '../../../api/admin';
+import { getPageItems } from '../../../utils/pagination';
+
+const INV_PAGE_SIZE = 25;
 
 const INVOICE_STATUS = {
   0: { label: 'Brouillon', color: '#6b7280' },
-  1: { label: 'Validée', color: '#0284c7' },
+  1: { label: 'Impayé', color: '#b91c1c' },
   2: { label: 'Payée', color: '#10531a' },
   3: { label: 'Abandonnée', color: '#9ca3af' },
 };
@@ -70,6 +73,10 @@ export default function SocieteDetailPage() {
   const [pdfView, setPdfView] = useState(null);
   const [payInvoice, setPayInvoice] = useState(null); // facture en cours de paiement
   const [editing, setEditing] = useState(false);
+  // Factures paginées (un tiers peut en avoir des milliers)
+  const [invoices, setInvoices] = useState([]);
+  const [invPage, setInvPage] = useState(0);
+  const [invLoading, setInvLoading] = useState(false);
 
   const handleDelete = async () => {
     if (!data?.societe) return;
@@ -85,17 +92,32 @@ export default function SocieteDetailPage() {
 
   const load = () => {
     setLoading(true);
+    setInvPage(0);
     getAdminSociete(id)
-      .then(r => setData(r.data))
+      .then(r => { setData(r.data); setInvoices(r.data.invoices || []); })
       .catch(() => toast.error('Erreur de chargement'))
       .finally(() => setLoading(false));
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
 
+  const loadInvoices = async (page) => {
+    setInvLoading(true);
+    try {
+      const r = await getAdminSocieteInvoices(id, { page, limit: INV_PAGE_SIZE });
+      setInvoices(r.data.invoices || []);
+      setInvPage(page);
+    } catch {
+      toast.error('Erreur chargement factures');
+    } finally {
+      setInvLoading(false);
+    }
+  };
+
   if (loading) return <Loader />;
   if (!data) return <div className="admin-panel">Tiers introuvable</div>;
 
-  const { societe, invoices, invoiceTotals, quotes, quoteTotals, webAccount } = data;
+  const { societe, invoiceTotals, quotes, quoteTotals, webAccount } = data;
+  const invTotalPages = Math.ceil((invoiceTotals?.count || 0) / INV_PAGE_SIZE);
 
   const tabs = [
     { id: 'invoices', label: 'Factures', icon: <FiFileText />,  count: invoiceTotals?.count || invoices?.length || 0 },
@@ -120,6 +142,12 @@ export default function SocieteDetailPage() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {invoiceTotals?.count > 0 && (
+            <button className="btn btn-primary"
+              onClick={() => setPdfView({ url: `/api/admin/societes/${societe.id}/report.pdf`, title: `État de compte — ${societe.nom}` })}>
+              <FiFileText /> Rapport PDF
+            </button>
+          )}
           <button className="btn btn-outline" onClick={load}><FiRefreshCw /> Actualiser</button>
           <button className="btn btn-outline" onClick={() => setEditing(true)}><FiEdit3 /> Modifier</button>
           <button className="btn btn-outline" onClick={handleDelete} style={{ color: '#dc2626', borderColor: '#fecaca' }}>
@@ -181,13 +209,21 @@ export default function SocieteDetailPage() {
 
         <div style={{ padding: 16 }}>
           {tab === 'invoices' && (
-            invoices?.length ? (
+            invoiceTotals?.count ? (
               <>
-                <div style={{ marginBottom: 12, color: '#6b7280', fontSize: 13 }}>
-                  Total : <strong>{formatMoney(invoiceTotals?.total_ttc)}</strong> TTC
-                  ({invoiceTotals?.count} facture{invoiceTotals?.count > 1 ? 's' : ''})
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                  <span style={{ background: '#f3f4f6', color: '#374151', padding: '4px 12px', borderRadius: 8, fontSize: 13 }}>
+                    Total : <strong>{formatMoney(invoiceTotals?.total_ttc)}</strong>
+                    <span style={{ color: '#9ca3af' }}> ({invoiceTotals?.count} facture{invoiceTotals?.count > 1 ? 's' : ''})</span>
+                  </span>
+                  <span style={{ background: '#10531a18', color: '#10531a', padding: '4px 12px', borderRadius: 8, fontSize: 13 }}>
+                    Payé : <strong>{formatMoney(invoiceTotals?.total_paid)}</strong>
+                  </span>
+                  <span style={{ background: '#b91c1c18', color: '#b91c1c', padding: '4px 12px', borderRadius: 8, fontSize: 13 }}>
+                    Impayé : <strong>{formatMoney(invoiceTotals?.total_unpaid)}</strong>
+                  </span>
                 </div>
-                <table className="admin-table">
+                <table className="admin-table" style={{ opacity: invLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
                   <thead>
                     <tr>
                       <th>Réf.</th><th>Date</th><th>Total HT</th><th>Total TTC</th>
@@ -224,6 +260,29 @@ export default function SocieteDetailPage() {
                     ))}
                   </tbody>
                 </table>
+
+                {invTotalPages > 1 && (
+                  <div className="societe-pagination">
+                    <button type="button" disabled={invPage === 0 || invLoading} onClick={() => loadInvoices(0)} title="Première page">«</button>
+                    <button type="button" disabled={invPage === 0 || invLoading} onClick={() => loadInvoices(invPage - 1)}>‹ Préc.</button>
+                    {getPageItems(invPage, invTotalPages).map((it, i) =>
+                      it === '…' ? (
+                        <span key={`gap-${i}`} className="societe-pagination-gap" aria-hidden="true">…</span>
+                      ) : (
+                        <button
+                          key={it}
+                          type="button"
+                          disabled={invLoading}
+                          className={`societe-pagination-num${it - 1 === invPage ? ' is-current' : ''}`}
+                          aria-current={it - 1 === invPage ? 'page' : undefined}
+                          onClick={() => loadInvoices(it - 1)}
+                        >{it}</button>
+                      )
+                    )}
+                    <button type="button" disabled={invPage >= invTotalPages - 1 || invLoading} onClick={() => loadInvoices(invPage + 1)}>Suiv. ›</button>
+                    <button type="button" disabled={invPage >= invTotalPages - 1 || invLoading} onClick={() => loadInvoices(invTotalPages - 1)} title="Dernière page">»</button>
+                  </div>
+                )}
               </>
             ) : <div style={{ textAlign: 'center', padding: 30, color: '#6b7280' }}>Aucune facture.</div>
           )}

@@ -8,6 +8,18 @@
 
 const SITE_NAME = "L'Harmattan Sénégal";
 
+// Libellés lisibles des moyens de paiement (clés alignées sur getPaymentModeId).
+const PAYMENT_LABELS = {
+  wave: 'Wave',
+  orange_money: 'Orange Money',
+  virement: 'Virement bancaire',
+  cb: 'Carte bancaire',
+  paytech: 'PayTech (en ligne)',
+  cash: 'Espèces',
+  especes: 'Espèces',
+  cod: 'Paiement à la livraison',
+};
+
 function fmtPrice(n) {
   const v = parseInt(n, 10) || 0;
   return v.toLocaleString('fr-FR') + ' FCFA';
@@ -119,42 +131,55 @@ export async function sendOrderConfirmationToCustomer({ transporter, order, invo
  * @param {Object} deps.order - structure identique
  * @param {string[]} deps.adminEmails - liste des destinataires (depuis site-config.json)
  * @param {string} [deps.siteUrl]
- * @param {Object} [deps.paymentInfo] - { provider, transaction_id, amount }
+ * @param {Object} [deps.paymentInfo] - { provider, transaction_id, amount, method }
+ * @param {('pending'|'paid')} [deps.status] - 'pending' (commande passée, paiement
+ *        à confirmer — ex. Wave/OM/virement) ou 'paid' (paiement déjà confirmé — ex. PayTech).
  */
-export async function sendNewOrderNotificationToAdmin({ transporter, order, adminEmails, siteUrl, paymentInfo }) {
+export async function sendNewOrderNotificationToAdmin({ transporter, order, adminEmails, siteUrl, paymentInfo, status = 'paid' }) {
   if (!transporter) return;
   if (!Array.isArray(adminEmails) || adminEmails.length === 0) {
     console.info('[MAIL] sendNewOrderNotificationToAdmin : aucun destinataire admin configuré');
     return;
   }
 
+  const isPending = status === 'pending';
   const fullName = [order.customer?.firstname, order.customer?.lastname].filter(Boolean).join(' ').trim() || '—';
-  const adminUrl = siteUrl ? `${siteUrl}/admin/payments` : null;
+  // Commande à traiter → /admin/orders ; paiement déjà encaissé → /admin/payments.
+  const adminUrl = siteUrl ? `${siteUrl}/admin/${isPending ? 'orders' : 'payments'}` : null;
+  const methodLabel = paymentInfo?.method ? (PAYMENT_LABELS[paymentInfo.method] || paymentInfo.method) : null;
+  const intro = isPending
+    ? "Une nouvelle commande web vient d'être passée. Le paiement est en attente de confirmation."
+    : "Une nouvelle commande vient d'être confirmée.";
 
   const body = `
-    <p>Une nouvelle commande vient d'être confirmée.</p>
+    <p>${intro}</p>
     <table style="width:100%;border-collapse:collapse;margin:12px 0">
       <tr><td style="padding:6px 10px;color:#6b7280">Client</td><td style="padding:6px 10px;font-weight:600">${escapeHtml(fullName)}</td></tr>
       <tr><td style="padding:6px 10px;color:#6b7280">Email</td><td style="padding:6px 10px">${escapeHtml(order.customer?.email || '—')}</td></tr>
       <tr><td style="padding:6px 10px;color:#6b7280">Téléphone</td><td style="padding:6px 10px">${escapeHtml(order.customer?.phone || '—')}</td></tr>
       <tr><td style="padding:6px 10px;color:#6b7280">Référence</td><td style="padding:6px 10px"><strong>${escapeHtml(order.ref || '—')}</strong></td></tr>
+      ${methodLabel ? `<tr><td style="padding:6px 10px;color:#6b7280">Paiement</td><td style="padding:6px 10px">${escapeHtml(methodLabel)}</td></tr>` : ''}
       ${paymentInfo?.provider ? `<tr><td style="padding:6px 10px;color:#6b7280">Provider</td><td style="padding:6px 10px">${escapeHtml(paymentInfo.provider)}</td></tr>` : ''}
       ${paymentInfo?.transaction_id ? `<tr><td style="padding:6px 10px;color:#6b7280">Transaction</td><td style="padding:6px 10px;font-family:monospace;font-size:12px">${escapeHtml(paymentInfo.transaction_id)}</td></tr>` : ''}
     </table>
     ${itemsHtml(order.items)}
-    <p style="font-size:16px;font-weight:700;color:#111827">Total : ${fmtPrice(order.total)}</p>
+    <p style="font-size:16px;font-weight:700;color:#111827">${isPending ? 'Montant à encaisser' : 'Total'} : ${fmtPrice(order.total)}</p>
   `;
+
+  const subject = isPending
+    ? `🛒 Nouvelle commande ${order.ref || ''} à confirmer — ${fmtPrice(order.total)}`.trim()
+    : `Nouvelle commande ${order.ref || ''} — ${fmtPrice(order.total)}`.trim();
 
   try {
     await transporter.sendMail({
       from: `"${SITE_NAME} — Notifications" <commandes@senharmattan.com>`,
       to: adminEmails.join(','),
-      subject: `Nouvelle commande ${order.ref || ''} — ${fmtPrice(order.total)}`.trim(),
+      subject,
       html: shellHtml({
-        title: `Nouvelle commande — ${fmtPrice(order.total)}`,
+        title: isPending ? `Nouvelle commande à traiter — ${fmtPrice(order.total)}` : `Nouvelle commande — ${fmtPrice(order.total)}`,
         body,
         ctaUrl: adminUrl,
-        ctaLabel: "Ouvrir l'administration",
+        ctaLabel: isPending ? 'Voir les commandes' : "Ouvrir l'administration",
       }),
     });
   } catch (err) {

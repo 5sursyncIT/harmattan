@@ -48,6 +48,7 @@ export const updateBook = (id, data) => api.put(`/admin/books/${id}`, data);
 export const deleteBook = (id, hard = false) => api.delete(`/admin/books/${id}`, { params: { soft: hard ? '0' : '1' } });
 export const checkIsbn = (isbn, excludeId = null) =>
   api.get(`/admin/books/check-isbn/${encodeURIComponent(isbn)}`, { params: excludeId ? { exclude: excludeId } : {} });
+export const createGenre = (label) => api.post('/admin/books/genres', { label });
 export const searchAuthors = (q = '', limit = 10, config = {}) =>
   api.get('/admin/books/authors', { params: { q, limit }, ...config });
 export const getBookQualityStats = () => api.get('/admin/books/quality-stats');
@@ -180,6 +181,7 @@ export const resetCustomerPassword = (id) => api.post(`/admin/customers/${id}/re
 // Tiers Dolibarr (llx_societe)
 export const getAdminSocietes = (params = {}) => api.get('/admin/societes', { params });
 export const getAdminSociete = (id) => api.get(`/admin/societes/${id}`);
+export const getAdminSocieteInvoices = (id, params = {}) => api.get(`/admin/societes/${id}/invoices`, { params });
 export const createAdminSociete = (data) => api.post('/admin/societes', data);
 export const updateAdminSociete = (id, data) => api.put(`/admin/societes/${id}`, data);
 export const deleteAdminSociete = (id) => api.delete(`/admin/societes/${id}`);

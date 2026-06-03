@@ -63,6 +63,8 @@
 .dl-line { display: grid; grid-template-columns: 1fr 90px 36px; gap: 8px; align-items: center; margin-bottom: 8px; }
 .dl-line input { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 0.88rem; }
 .dl-line-sub { font-size: 0.72rem; color: #94a3b8; }
+.dl-line-head { margin-bottom: 4px; }
+.dl-line-head span { font-size: 0.72rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.02em; }
 
 .dl-info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
 .dl-info-row .lbl { color: #64748b; }

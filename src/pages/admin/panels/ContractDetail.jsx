@@ -14,6 +14,7 @@ import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import { listContractQuotes, deleteQuote, openQuotePdf } from '../../../api/quotes';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
+import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES, CONTRACT_VALIDATE_ROLES } from '../../../hooks/useAdminRole';
 import './Contracts.css';
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
@@ -112,6 +113,14 @@ export default function ContractDetail() {
   const [showQuoteModal, setShowQuoteModal] = useState(false);
   const [quotes, setQuotes] = useState([]);
   const [quotesError, setQuotesError] = useState(false);
+  const role = useAdminRole();
+  // canModify : créer/éditer les champs d'un brouillon (inclut le comptable).
+  // canValidateDownload : valider le contrat + télécharger son PDF (inclut le comptable).
+  // canManage : actions de cycle de vie sensibles réservées aux profils éditoriaux
+  // (clôture, suppression, envoi en signature).
+  const canModify = CONTRACT_WRITE_ROLES.includes(role);
+  const canValidateDownload = CONTRACT_VALIDATE_ROLES.includes(role);
+  const canManage = CONTRACT_EDIT_ROLES.includes(role);
 
   const loadQuotes = () => {
     if (!id) return;
@@ -279,28 +288,32 @@ export default function ContractDetail() {
           {ef.bookTitle && <p style={{ margin: '4px 0 0', fontSize: '1rem', color: '#475569' }}>{ef.bookTitle}</p>}
         </div>
 
-        <div className="ct-detail-actions">
-          {contract.status === 0 && (
-            isEditing ? (
-              <>
-                <button onClick={handleUpdate} disabled={actionLoading} className="ct-btn ct-btn-blue"><FiSave size={14} /> {actionLoading ? 'Enregistrement…' : 'Enregistrer'}</button>
-                <button onClick={() => { setIsEditing(false); load(); }} disabled={actionLoading} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Annuler</button>
-              </>
-            ) : (
-              <>
-                <button onClick={() => setIsEditing(true)} className="ct-btn ct-btn-blue"><FiEdit3 size={14} /> Modifier</button>
-                <button onClick={() => setConfirmAction('validate')} className="ct-btn ct-btn-success"><FiCheckCircle size={14} /> Valider</button>
-              </>
-            )
-          )}
-          {contract.status === 1 && (
-            <button onClick={() => setConfirmAction('close')} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Clôturer</button>
-          )}
-          <button onClick={handleDownload} className="ct-btn ct-btn-dark"><FiDownload size={14} /> Télécharger PDF</button>
-          {contract.status === 0 && (
-            <button onClick={() => setConfirmAction('delete')} className="ct-btn ct-btn-danger"><FiXCircle size={14} /> Supprimer</button>
-          )}
-        </div>
+        {canModify && (
+          <div className="ct-detail-actions">
+            {contract.status === 0 && (
+              isEditing ? (
+                <>
+                  <button onClick={handleUpdate} disabled={actionLoading} className="ct-btn ct-btn-blue"><FiSave size={14} /> {actionLoading ? 'Enregistrement…' : 'Enregistrer'}</button>
+                  <button onClick={() => { setIsEditing(false); load(); }} disabled={actionLoading} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Annuler</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => setIsEditing(true)} className="ct-btn ct-btn-blue"><FiEdit3 size={14} /> Modifier</button>
+                  {canValidateDownload && <button onClick={() => setConfirmAction('validate')} className="ct-btn ct-btn-success"><FiCheckCircle size={14} /> Valider</button>}
+                </>
+              )
+            )}
+            {canManage && contract.status === 1 && (
+              <button onClick={() => setConfirmAction('close')} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Clôturer</button>
+            )}
+            {canValidateDownload && (
+              <button onClick={handleDownload} className="ct-btn ct-btn-dark"><FiDownload size={14} /> Télécharger PDF</button>
+            )}
+            {canManage && contract.status === 0 && (
+              <button onClick={() => setConfirmAction('delete')} className="ct-btn ct-btn-danger"><FiXCircle size={14} /> Supprimer</button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Main grid */}
@@ -424,7 +437,7 @@ export default function ContractDetail() {
                       <button onClick={() => openQuotePdf(q.id)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Ouvrir le PDF">
                         <FiDownload size={12} /> PDF
                       </button>
-                      {q.status === 'draft' && (
+                      {canManage && q.status === 'draft' && (
                         <button onClick={() => handleDeleteQuote(q)} className="ct-btn-ghost" title="Supprimer le devis">
                           <FiTrash2 size={14} />
                         </button>
@@ -436,7 +449,8 @@ export default function ContractDetail() {
             )}
           </div>
 
-          {/* Documents */}
+          {/* Documents (téléchargement du PDF contrat — profils éditoriaux + comptable) */}
+          {canValidateDownload && (
           <div className="ct-section">
             <h3 className="ct-section-title"><FiFileText size={16} /> Documents</h3>
             {contract.documents?.length > 0 ? (
@@ -460,6 +474,7 @@ export default function ContractDetail() {
               <p style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Aucun document. Validez le contrat pour générer le PDF.</p>
             )}
           </div>
+          )}
 
           {/* Notes */}
           <div className="ct-section">
@@ -475,8 +490,8 @@ export default function ContractDetail() {
             )}
           </div>
 
-          {/* Signature */}
-          {contract.status >= 1 && (
+          {/* Signature (réservé aux profils éditoriaux) */}
+          {canManage && contract.status >= 1 && (
             <div className="ct-section">
               <h3 className="ct-section-title"><FiCheckCircle size={16} /> Signature en ligne</h3>
               <div className={`ct-sign-status ${signStatus?.status >= 2 ? 'signed' : 'pending'}`}>

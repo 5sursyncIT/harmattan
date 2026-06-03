@@ -5,7 +5,7 @@ import {
   FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck,
   FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiCheckSquare, FiLayers,
   FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss, FiArchive,
-  FiTrendingDown,
+  FiTrendingDown, FiBookmark,
 } from 'react-icons/fi';
 import { adminLogout, adminMe, getNotificationCounts, adminChangePassword } from '../../api/admin';
 import AdminLogin from './AdminLogin';
@@ -22,18 +22,18 @@ const NAV_GROUPS = [
     id: 'overview',
     label: null, // pas de titre pour le premier groupe
     items: [
-      { path: '', label: 'Tableau de bord', icon: <FiHome />, roles: ['super_admin', 'admin', 'editor', 'librarian', 'comptable'] },
+      { path: '', label: 'Tableau de bord', icon: <FiHome />, roles: ['super_admin', 'admin', 'editor', 'librarian', 'comptable', 'gestionnaire_stock'] },
     ],
   },
   {
     id: 'catalog',
     label: 'Catalogue',
     items: [
-      { path: 'books', label: 'Livres', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
-      { path: 'tags', label: 'Tags curation', icon: <FiTag />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'authors', label: 'Auteurs', icon: <FiPenTool />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
-      { path: 'stock', label: 'Stock', icon: <FiPackage />, roles: ['super_admin', 'admin', 'librarian'] },
-      { path: 'suppliers', label: 'Fournisseurs', icon: <FiTruck />, roles: ['super_admin', 'admin'] },
+      { path: 'books', label: 'Livres', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'librarian', 'gestionnaire_stock'] },
+      { path: 'tags', label: 'Tags curation', icon: <FiTag />, roles: ['super_admin', 'admin', 'editor', 'gestionnaire_stock'] },
+      { path: 'authors', label: 'Auteurs', icon: <FiPenTool />, roles: ['super_admin', 'admin', 'editor', 'librarian', 'gestionnaire_stock'] },
+      { path: 'stock', label: 'Stock', icon: <FiPackage />, roles: ['super_admin', 'admin', 'librarian', 'gestionnaire_stock'] },
+      { path: 'suppliers', label: 'Fournisseurs', icon: <FiTruck />, roles: ['super_admin', 'admin', 'gestionnaire_stock'] },
     ],
   },
   {
@@ -41,12 +41,14 @@ const NAV_GROUPS = [
     label: 'Édition',
     items: [
       { path: 'manuscripts', label: 'Manuscrits', icon: <FiFileText />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'evaluations', label: 'Évaluations', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'evaluateur'] },
-      { path: 'corrections', label: 'Corrections', icon: <FiEdit3 />, roles: ['super_admin', 'admin', 'correcteur'] },
+      { path: 'intervenants', label: 'Intervenants', icon: <FiUsers />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'evaluations', label: 'Évaluations', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'corrections', label: 'Corrections', icon: <FiEdit3 />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'editorial', label: 'Éditorial', icon: <FiCheckSquare />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'covers', label: 'Couvertures', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor', 'infographiste'] },
-      { path: 'printing', label: 'Impression', icon: <FiPrinter />, roles: ['super_admin', 'admin', 'imprimeur'] },
-      { path: 'contracts', label: 'Contrats', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'covers', label: 'Couvertures', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'printing', label: 'Impression', icon: <FiPrinter />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'legal-deposits', label: 'Dépôt légal', icon: <FiBookmark />, roles: ['super_admin', 'admin', 'editor', 'gestionnaire_stock'] },
+      { path: 'contracts', label: 'Contrats', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'comptable'] },
     ],
   },
   {
@@ -54,12 +56,12 @@ const NAV_GROUPS = [
     label: 'Ventes',
     items: [
       { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
-      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
+      { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'librarian', 'comptable', 'gestionnaire_stock'] },
       { path: 'orders', label: 'Commandes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'devis', label: 'Devis', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'invoices', label: 'Factures', icon: <FiFileText />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
-      { path: 'deliveries', label: 'Bons de livraison', icon: <FiTruck />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
-      { path: 'consignments', label: 'Dépôt-vente', icon: <FiArchive />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
+      { path: 'deliveries', label: 'Bons de livraison', icon: <FiTruck />, roles: ['super_admin', 'admin', 'librarian', 'comptable', 'gestionnaire_stock'] },
+      { path: 'consignments', label: 'Dépôt-vente', icon: <FiArchive />, roles: ['super_admin', 'admin', 'comptable', 'librarian', 'gestionnaire_stock'] },
       { path: 'payments', label: 'Paiements', icon: <FiDollarSign />, roles: ['super_admin', 'admin', 'comptable'] },
       { path: 'expenses', label: "Sorties d'argent", icon: <FiTrendingDown />, roles: ['super_admin', 'admin', 'comptable'] },
       { path: 'accounting', label: 'Comptabilité', icon: <FiBriefcase />, roles: ['super_admin', 'admin', 'comptable'] },

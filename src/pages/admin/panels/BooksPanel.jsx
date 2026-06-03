@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { FiPlus, FiSearch, FiBook, FiAlertCircle, FiImage } from 'react-icons/fi';
 import { listBooks, getBook, getBookQualityStats } from '../../../api/admin';
 import { getProductImageUrl } from '../../../api/dolibarr';
+import { getPageItems } from '../../../utils/pagination';
 import BookForm from './BookForm';
 import './BooksPanel.css';
 
@@ -14,6 +15,7 @@ export default function BooksPanel() {
   const [limit] = useState(20);
   const [qInput, setQInput] = useState('');
   const [q, setQ] = useState('');
+  const [gotoInput, setGotoInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [selectedBook, setSelectedBook] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -112,6 +114,15 @@ export default function BooksPanel() {
   }, []);
 
   const totalPages = Math.ceil(total / limit);
+
+  const handleGoto = (e) => {
+    e.preventDefault();
+    const n = parseInt(gotoInput, 10);
+    if (!Number.isFinite(n)) return;
+    const target = Math.min(Math.max(1, n), totalPages) - 1;
+    setPage(target);
+    setGotoInput('');
+  };
 
   return (
     <div className="books-panel">
@@ -234,9 +245,39 @@ export default function BooksPanel() {
 
               {totalPages > 1 && (
                 <div className="books-pagination">
-                  <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} type="button">‹ Précédent</button>
-                  <span>Page {page + 1} / {totalPages}</span>
-                  <button disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)} type="button">Suivant ›</button>
+                  <div className="books-pagination-pages">
+                    <button disabled={page === 0} onClick={() => setPage(0)} type="button" title="Première page" aria-label="Première page">«</button>
+                    <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} type="button">‹ Préc.</button>
+                    {getPageItems(page, totalPages).map((it, i) =>
+                      it === '…' ? (
+                        <span key={`gap-${i}`} className="books-pagination-gap" aria-hidden="true">…</span>
+                      ) : (
+                        <button
+                          key={it}
+                          type="button"
+                          className={`books-pagination-num${it - 1 === page ? ' is-current' : ''}`}
+                          aria-current={it - 1 === page ? 'page' : undefined}
+                          onClick={() => setPage(it - 1)}
+                        >{it}</button>
+                      )
+                    )}
+                    <button disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)} type="button">Suiv. ›</button>
+                    <button disabled={page >= totalPages - 1} onClick={() => setPage(totalPages - 1)} type="button" title="Dernière page" aria-label="Dernière page">»</button>
+                  </div>
+                  <form className="books-pagination-goto" onSubmit={handleGoto}>
+                    <span>Aller à</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={totalPages}
+                      value={gotoInput}
+                      onChange={(e) => setGotoInput(e.target.value)}
+                      placeholder={String(page + 1)}
+                      aria-label="Numéro de page"
+                    />
+                    <span>/ {totalPages}</span>
+                    <button type="submit">OK</button>
+                  </form>
                 </div>
               )}
             </>

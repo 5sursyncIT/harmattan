@@ -352,3 +352,22 @@
   .admin-modal-lg { max-width: 100%; }
   .admin-modal-body { padding: 16px 20px; }
 }
+
+/* ─── Pagination numérotée (fiche tiers, etc.) ─── */
+.societe-pagination {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  padding: 14px 4px 4px; font-size: 13px; color: #6b7280;
+}
+.societe-pagination button {
+  padding: 6px 12px; background: #fff; border: 1px solid #d1d5db;
+  border-radius: 6px; cursor: pointer; font-size: 13px; color: inherit;
+}
+.societe-pagination button:hover:not(:disabled) { background: #f3f4f6; }
+.societe-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+.societe-pagination-num { min-width: 34px; text-align: center; padding: 6px 8px; }
+.societe-pagination-num.is-current {
+  background: var(--color-green-deep, #10531a); border-color: var(--color-green-deep, #10531a);
+  color: #fff; font-weight: 600; cursor: default;
+}
+.societe-pagination-num.is-current:hover { background: var(--color-green-deep, #10531a); }
+.societe-pagination-gap { padding: 0 4px; color: #9ca3af; user-select: none; }

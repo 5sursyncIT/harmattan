@@ -61,6 +61,17 @@ Object.assign(TEMPLATE_MAP, {
   edition_complete: 'template_edition_complete',
 });
 
+// Répertoire des templates ODT de contrats (côté Dolibarr)
+const CONTRACT_TEMPLATE_DIR = '/var/www/html/dolibarr/documents/doctemplates/contracts';
+
+// Construit la valeur model_pdf attendue par Dolibarr pour un type de contrat.
+// Renvoie null si le type est inconnu (pas de template associé).
+function buildModelPdf(contractType) {
+  const templateFile = TEMPLATE_MAP[contractType];
+  if (!templateFile) return null;
+  return `generic_contract_odt:${CONTRACT_TEMPLATE_DIR}/${templateFile}.odt`;
+}
+
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
 const TYPE_LABELS = Object.fromEntries(
   Object.entries(COMBINED_CONTRACT_TYPES).map(([type, cfg]) => [
@@ -217,26 +228,41 @@ function validateContractData(data) {
   return errors;
 }
 
-export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
+export function createContractRouter({ db, dolibarrPool, csrfProtection, transporter }) {
   const router = Router();
 
   // Admin auth middleware — vérifie session + rôle autorisé pour les contrats
   const CONTRACT_ALLOWED_ROLES = ['super_admin', 'admin', 'editor'];
-  function auth(req, res, next) {
-    const session = req.cookies?.admin_session;
-    if (!session) return res.status(401).json({ error: 'Non authentifié' });
-    // Le token brut du cookie est haché avant lookup — la base stocke sha256(token).
-    const tokenHash = crypto.createHash('sha256').update(String(session)).digest('hex');
-    const admin = db.prepare(
-      "SELECT * FROM admin_users WHERE session_token = ? AND (session_expires_at IS NULL OR session_expires_at > datetime('now'))"
-    ).get(tokenHash);
-    if (!admin) return res.status(401).json({ error: 'Session invalide' });
-    if (!CONTRACT_ALLOWED_ROLES.includes(admin.role || 'admin')) {
-      return res.status(403).json({ error: 'Accès non autorisé pour votre profil' });
-    }
-    req.admin = admin;
-    next();
+  // Le comptable peut CRÉER et MODIFIER un contrat, ainsi que le VALIDER et
+  // TÉLÉCHARGER son PDF. Il n'a PAS les actions de cycle de vie sensibles
+  // (clôture, suppression, envoi en signature, export CSV) qui restent
+  // réservées aux profils éditoriaux via `auth`.
+  const CONTRACT_WRITE_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
+  // Validation + téléchargement du PDF : profils éditoriaux + comptable.
+  const CONTRACT_VALIDATE_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
+  // Lecture de navigation (fiches + devis de contribution) : inclut aussi le comptable.
+  const CONTRACT_READ_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
+  function makeAuth(allowedRoles) {
+    return function (req, res, next) {
+      const session = req.cookies?.admin_session;
+      if (!session) return res.status(401).json({ error: 'Non authentifié' });
+      // Le token brut du cookie est haché avant lookup — la base stocke sha256(token).
+      const tokenHash = crypto.createHash('sha256').update(String(session)).digest('hex');
+      const admin = db.prepare(
+        "SELECT * FROM admin_users WHERE session_token = ? AND (session_expires_at IS NULL OR session_expires_at > datetime('now'))"
+      ).get(tokenHash);
+      if (!admin) return res.status(401).json({ error: 'Session invalide' });
+      if (!allowedRoles.includes(admin.role || 'admin')) {
+        return res.status(403).json({ error: 'Accès non autorisé pour votre profil' });
+      }
+      req.admin = admin;
+      next();
+    };
   }
+  const auth = makeAuth(CONTRACT_ALLOWED_ROLES);    // cycle de vie sensible (clôture, suppression, signature, export)
+  const authWrite = makeAuth(CONTRACT_WRITE_ROLES); // création + modification (inclut le comptable)
+  const authValidate = makeAuth(CONTRACT_VALIDATE_ROLES); // validation + téléchargement PDF (inclut le comptable)
+  const authRead = makeAuth(CONTRACT_READ_ROLES);   // lecture de navigation (inclut le comptable)
 
   // SQL filter sanitizer
   function safeSql(value) {
@@ -244,11 +270,41 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
     return value.replace(/'/g, "''").replace(/[()]/g, '').slice(0, 200);
   }
 
+  // Liste les documents Dolibarr d'un contrat. Dolibarr renvoie une 404 quand
+  // aucun document n'existe encore — on la traite comme une liste vide plutôt
+  // que comme une erreur (un brouillon sans PDF n'est pas un cas d'erreur).
+  async function listContractDocuments(id) {
+    try {
+      const docsRes = await adminApi.get('/documents', { params: { modulepart: 'contract', id } });
+      return docsRes.data || [];
+    } catch (err) {
+      if (err.response?.status === 404) return [];
+      throw err;
+    }
+  }
+
+  // Garantit que model_pdf est renseigné en base (Dolibarr::create/update ne le
+  // persistent pas). Le déduit du contract_type si absent. Renvoie le model ou null.
+  async function ensureContractModel(id) {
+    const [rows] = await dolibarrPool.query(
+      `SELECT c.model_pdf, ce.contract_type
+         FROM llx_contrat c
+         LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+        WHERE c.rowid = ?`, [id]
+    );
+    if (!rows.length) return null;
+    if (rows[0].model_pdf) return rows[0].model_pdf;
+    const model = buildModelPdf(rows[0].contract_type);
+    if (!model) return null;
+    await dolibarrPool.query('UPDATE llx_contrat SET model_pdf = ? WHERE rowid = ?', [model, id]);
+    return model;
+  }
+
   // ═══════════════════════════════════════════════════════
   // DASHBOARD STATS
   // ═══════════════════════════════════════════════════════
 
-  router.get('/stats', auth, async (req, res) => {
+  router.get('/stats', authRead, async (req, res) => {
     try {
       const [[byStatus]] = await dolibarrPool.query(`
         SELECT
@@ -308,7 +364,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // LIST CONTRACTS
   // ═══════════════════════════════════════════════════════
 
-  router.get('/list', auth, async (req, res) => {
+  router.get('/list', authRead, async (req, res) => {
     try {
       const { status, type, author, ref, title, isbn, date_from, date_to, page = 1, limit = 20, sort, order } = req.query;
       const pageInt = Math.max(1, parseInt(page));
@@ -401,7 +457,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // EXPIRING CONTRACTS
   // ═══════════════════════════════════════════════════════
 
-  router.get('/expiring', auth, async (req, res) => {
+  router.get('/expiring', authRead, async (req, res) => {
     try {
       const days = Math.min(365, parseInt(req.query.days) || 90);
       const [rows] = await dolibarrPool.query(`
@@ -486,7 +542,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // CONTRACT DETAIL
   // ═══════════════════════════════════════════════════════
 
-  router.get('/:id', auth, async (req, res) => {
+  router.get('/:id', authRead, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
       if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
@@ -560,7 +616,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // CREATE CONTRACT
   // ═══════════════════════════════════════════════════════
 
-  router.post('/', auth, csrfProtection, async (req, res) => {
+  router.post('/', authWrite, csrfProtection, async (req, res) => {
     try {
       const data = req.body;
 
@@ -576,8 +632,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       }
 
       const defaults = getDefaultsForType(data.contract_type);
-      const templateFile = TEMPLATE_MAP[data.contract_type];
-      const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${templateFile}.odt`;
+      const modelPdf = buildModelPdf(data.contract_type);
 
       const arrayOptions = {
         options_contract_type: data.contract_type,
@@ -620,6 +675,17 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       });
 
       const contractId = contractRes.data;
+
+      // Dolibarr::Contrat::create() N'ENREGISTRE PAS le champ model_pdf (absent
+      // de son INSERT) — sans lui, la génération du document échoue ensuite
+      // (« contract has no model_pdf set »). On le persiste donc nous-mêmes.
+      if (modelPdf) {
+        try {
+          await dolibarrPool.query('UPDATE llx_contrat SET model_pdf = ? WHERE rowid = ?', [modelPdf, contractId]);
+        } catch (modelErr) {
+          console.warn('[CONTRACTS] Persist model_pdf warning:', modelErr.message);
+        }
+      }
 
       // Log activity
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
@@ -673,7 +739,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // UPDATE CONTRACT (draft only)
   // ═══════════════════════════════════════════════════════
 
-  router.put('/:id', auth, csrfProtection, async (req, res) => {
+  router.put('/:id', authWrite, csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
       if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
@@ -694,7 +760,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       const arrayOptions = {};
       if (data.contract_type && TEMPLATE_MAP[data.contract_type]) {
         arrayOptions.options_contract_type = data.contract_type;
-        updates.model_pdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${TEMPLATE_MAP[data.contract_type]}.odt`;
+        updates.model_pdf = buildModelPdf(data.contract_type);
       }
       if (data.book_title) arrayOptions.options_book_title = data.book_title.trim();
       if (data.book_subtitle !== undefined) arrayOptions.options_book_subtitle = (data.book_subtitle || '').trim();
@@ -733,6 +799,15 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
 
       await adminApi.put(`/contracts/${id}`, updates);
 
+      // Idem create : Dolibarr::update() n'enregistre pas model_pdf → on le persiste.
+      if (updates.model_pdf) {
+        try {
+          await dolibarrPool.query('UPDATE llx_contrat SET model_pdf = ? WHERE rowid = ?', [updates.model_pdf, id]);
+        } catch (modelErr) {
+          console.warn('[CONTRACTS] Persist model_pdf (update) warning:', modelErr.message);
+        }
+      }
+
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'update_contract', `Contrat #${id} modifié`);
 
@@ -748,7 +823,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // VALIDATE CONTRACT
   // ═══════════════════════════════════════════════════════
 
-  router.post('/:id/validate', auth, csrfProtection, async (req, res) => {
+  router.post('/:id/validate', authValidate, csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
       if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
@@ -862,10 +937,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       const url = generateSignatureUrl(ref);
       const bookTitle = contract.data.array_options?.options_book_title || '';
 
-      // Send email via the transporter passed via dolibarrPool context (use nodemailer from index.js)
-      // Since we don't have transporter here, use a direct approach
-      const nodemailer = (await import('nodemailer')).default;
-      const transporter = nodemailer.createTransport({ host: '127.0.0.1', port: 1025, ignoreTLS: true });
+      // Utilise le transporter SMTP partagé (configuré dans index.js, respecte MAIL_FROM).
+      if (!transporter) return res.status(503).json({ error: 'Service email indisponible' });
 
       await transporter.sendMail({
         from: '"L\'Harmattan Sénégal" <direction@senharmattan.com>',
@@ -948,7 +1021,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // DOWNLOAD DOCUMENT
   // ═══════════════════════════════════════════════════════
 
-  router.get('/:id/document', auth, async (req, res) => {
+  router.get('/:id/document', authValidate, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
       if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
@@ -970,9 +1043,29 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
         console.warn('Auto-regenerate warning:', autoErr.response?.data || autoErr.message);
       }
 
-      const docsRes = await adminApi.get('/documents', { params: { modulepart: 'contract', id } });
-      const docs = docsRes.data || [];
-      const doc = docs.find(d => d.name.endsWith('.pdf')) || docs.find(d => d.name.endsWith('.odt')) || docs[0];
+      const pickDoc = (docs) =>
+        docs.find(d => d.name.endsWith('.pdf')) || docs.find(d => d.name.endsWith('.odt')) || docs[0];
+
+      let docs = await listContractDocuments(id);
+      let doc = pickDoc(docs);
+
+      // Aucun document encore généré (cas d'un contrat dont le PDF n'a jamais été
+      // construit — Dolibarr::create n'enregistre pas model_pdf, donc la génération
+      // n'a jamais eu lieu). On le construit à la volée puis on relit la liste.
+      if (!doc) {
+        try {
+          const model = await ensureContractModel(id);
+          if (!model) {
+            return res.status(404).json({ error: 'Aucun modèle de document associé à ce contrat (type inconnu)' });
+          }
+          await rebuildContractDocument(id);
+          docs = await listContractDocuments(id);
+          doc = pickDoc(docs);
+        } catch (genErr) {
+          console.error('Contract document generation error:', genErr.response?.data || genErr.message);
+          return res.status(502).json({ error: 'Le document n\'a pas pu être généré' });
+        }
+      }
 
       if (!doc) return res.status(404).json({ error: 'Aucun document trouvé' });
 
@@ -1008,7 +1101,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   // SEARCH AUTHORS (thirdparties)
   // ═══════════════════════════════════════════════════════
 
-  router.get('/thirdparties/search', auth, async (req, res) => {
+  router.get('/thirdparties/search', authWrite, async (req, res) => {
     try {
       const q = safeSql(String(req.query.q || '').trim());
       if (q.length < 2) return res.json([]);
@@ -1028,7 +1121,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
   });
 
   // CREATE AUTHOR (Dolibarr thirdparty) — inline depuis le wizard de contrat
-  router.post('/thirdparties', auth, csrfProtection, async (req, res) => {
+  router.post('/thirdparties', authWrite, csrfProtection, async (req, res) => {
     try {
       const name = String(req.body.name || '').trim();
       const firstname = String(req.body.firstname || '').trim();
@@ -1036,7 +1129,9 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection }) {
       const phone = String(req.body.phone || '').trim();
       const address = String(req.body.address || '').trim();
 
-      // Un auteur est un particulier : nom + prénom + (téléphone OU email).
+      // Un auteur est un particulier : nom + prénom + email OBLIGATOIRE (nécessaire
+      // pour l'envoi du contrat à signer). Le téléphone reste optionnel.
+      if (!email) return res.status(400).json({ error: "L'adresse email est obligatoire pour créer un auteur" });
       const vErr = validateTierIdentity({ name, firstname, email, phone, isCompany: false });
       if (vErr) return res.status(400).json({ error: vErr });
 

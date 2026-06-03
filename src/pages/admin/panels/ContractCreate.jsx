@@ -4,6 +4,7 @@ import { createContract, searchAuthors, createAuthor } from '../../../api/contra
 import { FiArrowLeft, FiArrowRight, FiCheck, FiSearch, FiUser, FiAlertCircle, FiBookOpen, FiLayers, FiFilm, FiUserPlus, FiX, FiInfo, FiFileText } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import './Contracts.css';
+import useAdminRole, { CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
 
 const CONTRACT_MODELS = [
   {
@@ -121,6 +122,14 @@ function Field({ label, required, error, children, hint }) {
 
 export default function ContractCreate() {
   const navigate = useNavigate();
+  const role = useAdminRole();
+  // La création de contrat est réservée aux profils éditoriaux + comptable. Un rôle
+  // non autorisé qui arriverait ici par URL directe est redirigé vers la liste.
+  useEffect(() => {
+    if (role && !CONTRACT_WRITE_ROLES.includes(role)) {
+      navigate('/admin/contracts/list', { replace: true });
+    }
+  }, [role, navigate]);
   const [searchParams] = useSearchParams();
   const [step, setStep] = useState(1);
   const [submitting, setSubmitting] = useState(false);
@@ -228,13 +237,14 @@ export default function ContractCreate() {
     const errs = {};
     if (!data.name?.trim() || data.name.trim().length < 2) errs.name = 'Nom requis (2 caractères min.)';
     if (!data.firstname?.trim() || data.firstname.trim().length < 2) errs.firstname = 'Prénom requis (2 caractères min.)';
-    // Au moins un identifiant : téléphone OU email.
-    if (!data.phone?.trim() && !data.email?.trim()) {
-      errs.phone = 'Téléphone ou email requis';
-      errs.email = 'Téléphone ou email requis';
+    // Email obligatoire pour un nouvel auteur (envoi du contrat à signer).
+    if (!data.email?.trim()) {
+      errs.email = 'Email requis';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) {
+      errs.email = 'Email invalide';
     }
+    // Téléphone optionnel, mais validé s'il est renseigné.
     if (data.phone?.trim() && data.phone.trim().replace(/[\s.\-()]/g, '').length < 6) errs.phone = 'Téléphone invalide';
-    if (data.email?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) errs.email = 'Email invalide';
     return errs;
   };
 
@@ -405,12 +415,12 @@ export default function ContractCreate() {
                 </Field>
               </div>
               <div className="ct-form-row cols-2">
-                <Field label="Téléphone" error={newAuthorErrors.phone} hint="Téléphone ou email requis">
+                <Field label="Téléphone" error={newAuthorErrors.phone} hint="Optionnel">
                   <input type="tel" value={newAuthor.phone}
                     onChange={e => setNewAuthor(a => ({ ...a, phone: e.target.value }))}
                     placeholder="+221 ..." maxLength={30} />
                 </Field>
-                <Field label="Email" error={newAuthorErrors.email} hint="Pour l'envoi du contrat à signer">
+                <Field label="Email" required error={newAuthorErrors.email} hint="Pour l'envoi du contrat à signer">
                   <input type="email" value={newAuthor.email}
                     onChange={e => setNewAuthor(a => ({ ...a, email: e.target.value }))}
                     placeholder="auteur@exemple.com" maxLength={150} />

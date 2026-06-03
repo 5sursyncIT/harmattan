@@ -150,10 +150,10 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
               </div>
             )}
             {!isEdit && !form.is_company && (
-              <F label="Prénom" name="firstname" required />
+              F({ label: 'Prénom', name: 'firstname', required: true })
             )}
-            <F label={form.is_company ? 'Raison sociale' : 'Nom'} name="name" required full={isEdit || form.is_company} />
-            <F label="Nom alternatif" name="name_alias" />
+            {F({ label: form.is_company ? 'Raison sociale' : 'Nom', name: 'name', required: true, full: isEdit || form.is_company })}
+            {F({ label: 'Nom alternatif', name: 'name_alias' })}
             <div className="tiers-field">
               <label>Type</label>
               <select value={form.client} onChange={e => set('client', e.target.value)}>
@@ -179,17 +179,17 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
 
           <h5 className="tiers-section">Contact</h5>
           <div className="tiers-grid">
-            <F label="Email" name="email" type="email" />
-            <F label="Téléphone" name="phone" type="tel" />
-            <F label="Adresse" name="address" full />
-            <F label="Code postal" name="zip" />
-            <F label="Ville" name="town" />
+            {F({ label: 'Email', name: 'email', type: 'email' })}
+            {F({ label: 'Téléphone', name: 'phone', type: 'tel' })}
+            {F({ label: 'Adresse', name: 'address', full: true })}
+            {F({ label: 'Code postal', name: 'zip' })}
+            {F({ label: 'Ville', name: 'town' })}
           </div>
 
           <h5 className="tiers-section">Informations fiscales</h5>
           <div className="tiers-grid">
-            <F label="SIRET / NINEA" name="siret" />
-            <F label="TVA intracom." name="tva_intra" />
+            {F({ label: 'SIRET / NINEA', name: 'siret' })}
+            {F({ label: 'TVA intracom.', name: 'tva_intra' })}
           </div>
 
           <h5 className="tiers-section">Note interne</h5>
