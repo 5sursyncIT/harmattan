@@ -466,6 +466,37 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
         <textarea rows={4} {...bind('description')} maxLength={5000} />
       </Field>
 
+      {/* Section « Ouvrages à paraître » — pilote la home + la précommande */}
+      <Field
+        label="Mise en avant"
+        hint="Affiche ce livre dans la section « Ouvrages à paraître » de la page d'accueil et active la précommande sur sa fiche."
+      >
+        <label className="book-upcoming-check">
+          <input
+            type="checkbox"
+            checked={!!form.is_upcoming}
+            onChange={(e) => setForm((f) => ({ ...f, is_upcoming: e.target.checked }))}
+          />
+          <span>Ouvrage à paraître</span>
+        </label>
+      </Field>
+
+      {form.is_upcoming && (
+        <>
+          <div className="book-form-row">
+            <Field label="Date de parution prévue" hint="Affichée sur la carte (optionnelle).">
+              <input type="date" {...bind('release_date')} />
+            </Field>
+            <Field label="Remise précommande (%)" hint="0 = pas de remise.">
+              <input type="number" min="0" max="100" step="0.5" inputMode="numeric" {...bind('preorder_discount_pct')} />
+            </Field>
+          </div>
+          <Field label="Accroche « à paraître »" hint="Texte court sur la carte. Si vide, la description du livre est utilisée.">
+            <textarea rows={3} {...bind('upcoming_summary')} maxLength={2000} />
+          </Field>
+        </>
+      )}
+
       {/* Tags de curation */}
       {availableTags.length > 0 && (
         <Field label="Tags de curation" hint="Cochez les tags à afficher sur la home (ex: Notre sélection, Livres du mois…)">

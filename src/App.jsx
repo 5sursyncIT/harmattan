@@ -110,6 +110,8 @@ const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProducts
 const StockAdjustPanel = lazy(() => import('./pages/admin/panels/StockAdjustPanel'));
 const StockRecommendationsPanel = lazy(() => import('./pages/admin/panels/StockRecommendationsPanel'));
 const StockPurchaseOrdersPanel = lazy(() => import('./pages/admin/panels/StockPurchaseOrdersPanel'));
+const InventorySessionsPanel = lazy(() => import('./pages/admin/panels/InventorySessionsPanel'));
+const InventoryCountPanel = lazy(() => import('./pages/admin/panels/InventoryCountPanel'));
 const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'));
 const CustomersPanel = lazy(() => import('./pages/admin/panels/CustomersPanel'));
 const CustomerDetailPage = lazy(() => import('./pages/admin/panels/CustomerDetailPage'));
@@ -206,6 +208,8 @@ export default function App() {
             <Route path="stock/adjust" element={<StockAdjustPanel />} />
             <Route path="stock/recommendations" element={<StockRecommendationsPanel />} />
             <Route path="stock/purchase-orders" element={<StockPurchaseOrdersPanel />} />
+            <Route path="inventory" element={<InventorySessionsPanel />} />
+            <Route path="inventory/:id" element={<InventoryCountPanel />} />
             <Route path="suppliers" element={<SuppliersPanel />} />
             <Route path="contracts" element={<ContractsPanel />} />
             <Route path="contracts/list" element={<ContractsList />} />

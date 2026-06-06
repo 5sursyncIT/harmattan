@@ -23,14 +23,78 @@
 // ── 1. Authentification par secret partagé ─────────────────────────
 function readEnvSecret(): string
 {
+    // 1) Fichier dédié lisible par www-data (root:www-data 640) — principe du
+    //    moindre privilège : pas besoin de lire tout le .env de la boutique.
+    $secretFile = '/var/www/html/senharmattan-shop/.webhook-secret';
+    if (is_readable($secretFile)) {
+        $secret = trim((string) @file_get_contents($secretFile));
+        if ($secret !== '') return trim($secret, "\"'");
+    }
+    // 2) Repli : .env de la boutique, si www-data peut le lire.
     $envFile = '/var/www/html/senharmattan-shop/.env';
-    if (!file_exists($envFile)) return '';
-    foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-        if (strpos($line, 'DOLIBARR_WEBHOOK_SECRET=') === 0) {
-            return trim(substr($line, strlen('DOLIBARR_WEBHOOK_SECRET=')));
+    if (is_readable($envFile)) {
+        foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            if (strpos($line, 'DOLIBARR_WEBHOOK_SECRET=') === 0) {
+                return trim(trim(substr($line, strlen('DOLIBARR_WEBHOOK_SECRET='))), "\"'");
+            }
         }
     }
     return '';
+}
+
+/**
+ * Répare un model_pdf dont le chemin de template ODT pointe vers une
+ * arborescence serveur obsolète (ex. migration de /htdocs/gestion.senharmattan.com
+ * vers /var/www/html/dolibarr). Le model_pdf a la forme "module" ou
+ * "module:/chemin/absolu/template.odt" ; quand ce chemin n'existe plus, le
+ * template est relocalisé par son basename dans les répertoires que Dolibarr
+ * scanne réellement pour ce type de document.
+ *
+ * Sans effet si le chemin est déjà valide ou si le model n'a pas de composante
+ * chemin. En dernier recours, on renvoie le model inchangé et on laisse Dolibarr
+ * échouer proprement avec son erreur explicite.
+ *
+ * @param string $model         Valeur de model_pdf
+ * @param string $scandirConst  Constante listant les dossiers de templates
+ *                              (FACTURE_ADDON_PDF_ODT_PATH / PROPALE_ADDON_PDF_ODT_PATH)
+ * @param string $fallbackSub   Sous-dossier doctemplates de repli (invoices|proposals)
+ * @return string               Le model éventuellement corrigé
+ */
+function repairOdtTemplatePath(string $model, string $scandirConst, string $fallbackSub): string
+{
+    $tmp = explode(':', $model, 2);
+    if (count($tmp) < 2 || $tmp[1] === '') {
+        return $model; // pas de composante chemin → rien à réparer
+    }
+    $mod  = $tmp[0];
+    $path = $tmp[1];
+    if (@is_file($path)) {
+        return $model; // chemin déjà valide
+    }
+
+    $basename = basename($path);
+
+    // 1) Dossiers réellement scannés par Dolibarr pour ce type de document
+    $dirs = array();
+    $raw = getDolGlobalString($scandirConst);
+    if ($raw !== '') {
+        foreach (preg_split('/[,\r\n]+/', $raw) as $d) {
+            $d = trim($d);
+            if ($d === '') continue;
+            $dirs[] = str_replace('DOL_DATA_ROOT', DOL_DATA_ROOT, $d);
+        }
+    }
+    // 2) Repli robuste : arborescence standard doctemplates
+    $dirs[] = DOL_DATA_ROOT.'/doctemplates/'.$fallbackSub;
+
+    foreach ($dirs as $d) {
+        $candidate = rtrim($d, '/').'/'.$basename;
+        if (@is_file($candidate)) {
+            return $mod.':'.$candidate;
+        }
+    }
+
+    return $model; // introuvable → laisser Dolibarr remonter l'erreur
 }
 
 $providedSecret = $_SERVER['HTTP_X_DOLIBARR_SECRET'] ?? '';
@@ -99,6 +163,13 @@ $langs->load('companies');
 $langs->load('products');
 
 $model = !empty($obj->model_pdf) ? $obj->model_pdf : $defaultModel;
+
+// Réparer un éventuel chemin de template ODT obsolète (post-migration serveur) :
+// d'anciens model_pdf stockent un chemin absolu vers /htdocs/gestion.senharmattan.com
+// qui n'existe plus depuis le passage à /var/www/html/dolibarr.
+$scandirConst = ($type === 'invoice') ? 'FACTURE_ADDON_PDF_ODT_PATH' : 'PROPALE_ADDON_PDF_ODT_PATH';
+$fallbackSub  = ($type === 'invoice') ? 'invoices' : 'proposals';
+$model = repairOdtTemplatePath($model, $scandirConst, $fallbackSub);
 
 $generated = $obj->generateDocument($model, $langs, 0, 0, 0);
 

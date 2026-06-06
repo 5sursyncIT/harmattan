@@ -1,18 +1,8 @@
 import { useState, useEffect } from 'react';
-import { getFullSiteConfig, updateSiteConfig, uploadCoverImage } from '../../../api/admin';
-import { FiTrash2, FiPlus, FiUpload, FiImage } from 'react-icons/fi';
+import { Link } from 'react-router-dom';
+import { getFullSiteConfig, updateSiteConfig } from '../../../api/admin';
+import { FiTrash2, FiPlus } from 'react-icons/fi';
 import toast from 'react-hot-toast';
-
-const createUpcomingBook = () => ({
-  title: '',
-  author: '',
-  release_date: '',
-  summary: '',
-  cover: '',
-  product_id: '',
-  preorder_discount_pct: 0,
-  link: '/catalogue',
-});
 
 export default function ConfigPanel() {
   const [config, setConfig] = useState(null);
@@ -133,110 +123,14 @@ export default function ConfigPanel() {
 
       <section className="admin-section">
         <h2>Ouvrages à paraître</h2>
-        <p className="admin-hint">Cette liste alimente automatiquement la section publique affichée au-dessus de « Nos vidéos ».</p>
-        <div className="admin-dept-list">
-          {(config.upcoming_books || []).map((book, i) => (
-            <div key={i} style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '12px', marginBottom: '1rem', background: '#fff' }}>
-              <div className="admin-form-grid">
-                <div className="admin-field">
-                  <label>Titre</label>
-                  <input value={book.title || ''} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], title: e.target.value };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} />
-                </div>
-                <div className="admin-field">
-                  <label>Auteur</label>
-                  <input value={book.author || ''} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], author: e.target.value };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} />
-                </div>
-                <div className="admin-field">
-                  <label>Date de publication prévue</label>
-                  <input type="date" value={book.release_date || ''} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], release_date: e.target.value };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} />
-                </div>
-                <div className="admin-field">
-                  <label>ID produit</label>
-                  <input value={book.product_id || ''} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], product_id: e.target.value };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} placeholder="123" />
-                </div>
-                <div className="admin-field">
-                  <label>Lien de détail</label>
-                  <input value={book.link || '/catalogue'} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], link: e.target.value };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} placeholder="/catalogue ou /produit/123" />
-                </div>
-                <div className="admin-field">
-                  <label>Réduction précommande (%)</label>
-                  <input type="number" min="0" max="100" value={book.preorder_discount_pct ?? 0} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], preorder_discount_pct: Number(e.target.value) || 0 };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} />
-                </div>
-                <div className="admin-field" style={{ gridColumn: '1 / -1' }}>
-                  <label>Résumé succinct</label>
-                  <textarea rows={4} value={book.summary || ''} onChange={(e) => {
-                    const next = [...(config.upcoming_books || [])];
-                    next[i] = { ...next[i], summary: e.target.value };
-                    setConfig({ ...config, upcoming_books: next });
-                  }} />
-                </div>
-                <div className="admin-field" style={{ gridColumn: '1 / -1' }}>
-                  <label>Image de couverture</label>
-                  <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                    {book.cover && (
-                      <img src={book.cover} alt="Couverture" style={{ width: 80, height: 120, objectFit: 'cover', borderRadius: 8, border: '1px solid #e5e7eb' }} />
-                    )}
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 16px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-                      <FiUpload size={14} /> {book.cover ? 'Changer' : 'Uploader'}
-                      <input type="file" accept="image/jpeg,image/png,image/webp" style={{ display: 'none' }} onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        try {
-                          const res = await uploadCoverImage(file);
-                          const next = [...(config.upcoming_books || [])];
-                          next[i] = { ...next[i], cover: res.data.path };
-                          setConfig({ ...config, upcoming_books: next });
-                          toast.success('Image uploadée');
-                        } catch {
-                          toast.error('Erreur upload image');
-                        }
-                      }} />
-                    </label>
-                    {book.cover && (
-                      <span style={{ fontSize: 12, color: '#6b7280', fontFamily: 'monospace' }}>{book.cover}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.75rem' }}>
-                <button className="btn-icon danger" onClick={() => {
-                  const next = (config.upcoming_books || []).filter((_, j) => j !== i);
-                  setConfig({ ...config, upcoming_books: next });
-                }} aria-label={`Supprimer l'ouvrage ${book.title || i + 1}`}><FiTrash2 /></button>
-              </div>
-            </div>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem', flexWrap: 'wrap' }}>
-          <button className="btn btn-outline" onClick={() => {
-            setConfig({ ...config, upcoming_books: [...(config.upcoming_books || []), createUpcomingBook()] });
-          }}><FiPlus /> Ajouter un ouvrage</button>
-          <button className="btn btn-primary" onClick={() => save('upcoming_books', config.upcoming_books || [])} disabled={saving}>Sauvegarder les ouvrages</button>
-        </div>
+        <p className="admin-hint">
+          Cette section est désormais pilotée depuis le catalogue. Pour qu'un livre apparaisse
+          dans « Ouvrages à paraître » sur la page d'accueil, ouvrez sa fiche dans{' '}
+          <Link to="/admin/books">Catalogue&nbsp;›&nbsp;Livres</Link> et cochez
+          « Ouvrage à paraître ». La date de parution, l'accroche et la remise de précommande
+          se règlent au même endroit. Le titre, l'auteur et la couverture sont repris automatiquement
+          du livre — plus aucune double saisie.
+        </p>
       </section>
 
       {/* SMTP */}

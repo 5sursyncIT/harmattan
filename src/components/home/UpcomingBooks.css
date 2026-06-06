@@ -58,33 +58,39 @@
 
 .upcoming-book-card {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
+  grid-template-columns: 128px minmax(0, 1fr);
   gap: 18px;
   height: 100%;
-  padding: 20px;
+  padding: 18px;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.07);
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
   transition: var(--transition);
 }
 
 .upcoming-book-card:hover {
   transform: translateY(-4px);
+  border-color: rgba(16, 83, 26, 0.18);
   box-shadow: 0 20px 40px rgba(15, 23, 42, 0.11);
 }
 
+/* La couverture ne doit JAMAIS s'étirer sur la hauteur de la carte :
+   align-self/flex-start fige son ratio quelle que soit la longueur du texte. */
 .upcoming-book-media {
-  display: flex;
+  position: relative;
+  align-self: flex-start;
 }
 
 .upcoming-book-cover {
+  display: block;
   width: 100%;
   aspect-ratio: 2 / 3;
+  height: auto;
   object-fit: cover;
-  border-radius: 16px;
+  border-radius: 14px;
   background: linear-gradient(180deg, #eef4f7 0%, #dce7ee 100%);
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.1);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.14);
 }
 
 .upcoming-book-cover-placeholder {
@@ -96,10 +102,25 @@
   font-weight: 900;
 }
 
+/* Pastille remise précommande, ancrée en bas de la couverture */
+.upcoming-book-promo {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  background: var(--color-orange);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  box-shadow: 0 4px 12px rgba(249, 115, 22, 0.35);
+}
+
 .upcoming-book-content {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -107,7 +128,8 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
+  margin-bottom: 2px;
 }
 
 .upcoming-book-badge,
@@ -116,14 +138,17 @@
   align-items: center;
   gap: 6px;
   border-radius: 999px;
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .upcoming-book-badge {
-  padding: 0.42rem 0.82rem;
-  background: rgba(249, 115, 22, 0.12);
-  color: var(--color-orange);
+  padding: 0.36rem 0.78rem;
+  background: linear-gradient(135deg, var(--color-green-deep) 0%, var(--color-green) 100%);
+  color: #fff;
+  letter-spacing: 0.01em;
+  box-shadow: 0 4px 12px rgba(16, 83, 26, 0.25);
 }
 
 .upcoming-book-date {
@@ -131,9 +156,14 @@
 }
 
 .upcoming-book-title {
+  margin: 0;
   color: var(--color-dark);
-  font-size: 1.16rem;
-  line-height: 1.3;
+  font-size: 1.1rem;
+  line-height: 1.32;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .upcoming-book-author {
@@ -141,17 +171,30 @@
   align-items: center;
   gap: 8px;
   color: var(--color-green);
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   font-weight: 700;
 }
 
+.upcoming-book-author span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .upcoming-book-summary {
-  color: var(--color-text);
-  line-height: 1.65;
+  margin: 0;
+  color: var(--color-text-light);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .upcoming-book-actions {
   margin-top: auto;
+  padding-top: 10px;
 }
 
 .upcoming-book-link {
@@ -160,13 +203,14 @@
   gap: 8px;
   color: var(--color-green);
   font-weight: 700;
+  font-size: 0.88rem;
   text-decoration: none;
   transition: var(--transition);
 }
 
 .upcoming-book-link:hover,
 .upcoming-book-link:focus-visible {
-  color: var(--color-orange);
+  color: var(--color-green-deep);
   transform: translateX(2px);
 }
 

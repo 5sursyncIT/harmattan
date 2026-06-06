@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { FiCamera, FiImage, FiLoader } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { uploadBookCover } from '../../api/admin';
-import { getProduct, getProductImageUrl } from '../../api/dolibarr';
+import { getProduct, getProductImageUrl, invalidateProductCacheEntry } from '../../api/dolibarr';
 
 /**
  * Affiche les couvertures d'un livre (recto + verso) + boutons pour changer.
@@ -34,6 +34,9 @@ export default function CoverUploader({ productId, title, onUpdated }) {
   const rectoBase = getProductImageUrl(productId, title);
   const rectoUrl = `${rectoBase}${rectoBase.includes('?') ? '&' : '?'}v=${version}`;
   const handleUploaded = () => {
+    // Le cache client de getProduct() (5 min) masquerait le verso/recto fraîchement
+    // uploadé : on l'invalide pour que la redétection ci-dessous refetch des données fraîches.
+    invalidateProductCacheEntry(productId);
     setVersion((v) => v + 1);
     if (onUpdated) onUpdated(productId);
   };

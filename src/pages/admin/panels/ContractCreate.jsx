@@ -177,7 +177,7 @@ export default function ContractCreate() {
     author_purchase_discount: 30,
     // Paramètres de fabrication (v2)
     tirage_initial: 100,
-    format_ouvrage: '15 × 21 cm',
+    format_ouvrage: '15,5 × 24 cm',
     nombre_pages_estime: 200,
     prix_public_previsionnel: 15,
     exemplaires_sp: 5,
@@ -586,7 +586,7 @@ export default function ContractCreate() {
             </Field>
             <Field label="Format">
               <select value={form.format_ouvrage} onChange={e => set('format_ouvrage', e.target.value)}>
-                <option value="15 × 21 cm">15 × 21 cm (standard)</option>
+                <option value="15,5 × 24 cm">15,5 × 24 cm (standard)</option>
                 <option value="13,5 × 21,5 cm">13,5 × 21,5 cm (devis-fabrication)</option>
               </select>
             </Field>

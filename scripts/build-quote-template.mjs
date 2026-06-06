@@ -134,42 +134,44 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8"?>
 
   <!-- Table styles -->
   <style:style style:name="QuoteTable" style:family="table">
-   <style:table-properties style:width="17cm" table:align="margins" fo:margin-top="0.15cm" fo:margin-bottom="0.15cm"/>
+   <style:table-properties style:width="17cm" table:align="margins" fo:margin-top="0.25cm" fo:margin-bottom="0.2cm"/>
   </style:style>
+  <!-- Colonne Désignation élargie (13.4cm) + police 9pt (cf. QuoteCellText) pour que
+       les libellés longs ("…réalisation du Prêt-à-clicher", "…report de correction")
+       tiennent sur UNE seule ligne : évite les retours à la ligne qui alourdissent le devis. -->
   <style:style style:name="QuoteColLabel" style:family="table-column">
-   <style:table-column-properties style:column-width="13cm"/>
+   <style:table-column-properties style:column-width="13.4cm"/>
   </style:style>
   <style:style style:name="QuoteColPrice" style:family="table-column">
-   <style:table-column-properties style:column-width="4cm"/>
+   <style:table-column-properties style:column-width="3.6cm"/>
   </style:style>
-  <style:style style:name="QuoteHeaderCell" style:family="table-cell">
-   <style:table-cell-properties fo:background-color="#e5e7eb" fo:border="0.5pt solid #9ca3af" fo:padding="0.12cm 0.25cm"/>
-  </style:style>
-  <style:style style:name="QuoteCell" style:family="table-cell">
-   <style:table-cell-properties fo:border="0.5pt solid #d1d5db" fo:padding="0.13cm 0.25cm"/>
-  </style:style>
-  <style:style style:name="QuoteTotalCell" style:family="table-cell">
-   <style:table-cell-properties fo:background-color="#f0fdf4" fo:border="0.8pt solid ${COLOR_PRIMARY}" fo:padding="0.18cm 0.25cm"/>
-  </style:style>
+  <!-- Cellules (en-tête / lignes / total) → définies en automatic-styles dans
+       content.xml (TABLE_CELL_AUTOSTYLES) : LibreOffice n'applique le fond et les
+       bordures des cellules que pour des styles AUTOMATIQUES, pas pour des styles
+       nommés de styles.xml. -->
   <style:style style:name="QuoteHeaderText" style:family="paragraph">
-   <style:paragraph-properties fo:text-align="center" fo:margin-bottom="0cm"/>
-   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="10pt" fo:font-weight="bold"/>
+   <style:paragraph-properties fo:text-align="left" fo:margin-bottom="0cm"/>
+   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="10pt" fo:font-weight="bold" fo:letter-spacing="0.04cm" fo:color="#ffffff"/>
+  </style:style>
+  <style:style style:name="QuoteHeaderTextRight" style:family="paragraph">
+   <style:paragraph-properties fo:text-align="right" fo:margin-bottom="0cm"/>
+   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="10pt" fo:font-weight="bold" fo:letter-spacing="0.04cm" fo:color="#ffffff"/>
   </style:style>
   <style:style style:name="QuoteCellText" style:family="paragraph">
-   <style:paragraph-properties fo:text-align="left" fo:margin-bottom="0cm" fo:line-height="115%"/>
-   <style:text-properties style:font-name="${FONT_SERIF}" fo:font-size="10pt"/>
+   <style:paragraph-properties fo:text-align="left" fo:margin-bottom="0cm" fo:line-height="120%"/>
+   <style:text-properties style:font-name="${FONT_SERIF}" fo:font-size="9pt" fo:color="${COLOR_DARK}"/>
   </style:style>
   <style:style style:name="QuoteCellPrice" style:family="paragraph">
    <style:paragraph-properties fo:text-align="right" fo:margin-bottom="0cm"/>
-   <style:text-properties style:font-name="${FONT_SERIF}" fo:font-size="10pt"/>
+   <style:text-properties style:font-name="${FONT_SERIF}" fo:font-size="9pt" fo:color="${COLOR_DARK}"/>
   </style:style>
   <style:style style:name="QuoteCellTotalText" style:family="paragraph">
    <style:paragraph-properties fo:text-align="left" fo:margin-bottom="0cm"/>
-   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="11pt" fo:font-weight="bold" fo:color="${COLOR_PRIMARY}"/>
+   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="11.5pt" fo:font-weight="bold" fo:letter-spacing="0.03cm" fo:color="${COLOR_PRIMARY}"/>
   </style:style>
   <style:style style:name="QuoteCellTotalPrice" style:family="paragraph">
    <style:paragraph-properties fo:text-align="right" fo:margin-bottom="0cm"/>
-   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="12pt" fo:font-weight="bold" fo:color="${COLOR_PRIMARY}"/>
+   <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="13pt" fo:font-weight="bold" fo:color="${COLOR_PRIMARY}"/>
   </style:style>
 
   <style:style style:name="FooterBank" style:family="paragraph">
@@ -199,6 +201,22 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8"?>
  </office:master-styles>
 </office:document-styles>`;
 
+// Styles de cellule du tableau des frais — DOIVENT être des styles automatiques
+// (content.xml) pour que LibreOffice rende fonds + bordures à la conversion PDF.
+const TABLE_CELL_AUTOSTYLES = `
+  <style:style style:name="QuoteHeaderCell" style:family="table-cell">
+   <style:table-cell-properties fo:background-color="${COLOR_PRIMARY}" fo:border="none" fo:padding="0.2cm 0.3cm" style:vertical-align="middle"/>
+  </style:style>
+  <style:style style:name="QuoteCell" style:family="table-cell">
+   <style:table-cell-properties fo:background-color="#ffffff" fo:border="none" fo:border-bottom="0.4pt solid #e5e7eb" fo:padding="0.17cm 0.3cm" style:vertical-align="middle"/>
+  </style:style>
+  <style:style style:name="QuoteCellAlt" style:family="table-cell">
+   <style:table-cell-properties fo:background-color="#f4f8f5" fo:border="none" fo:border-bottom="0.4pt solid #e5e7eb" fo:padding="0.17cm 0.3cm" style:vertical-align="middle"/>
+  </style:style>
+  <style:style style:name="QuoteTotalCell" style:family="table-cell">
+   <style:table-cell-properties fo:background-color="#e8f1ea" fo:border="none" fo:border-top="1.2pt solid ${COLOR_PRIMARY}" fo:border-bottom="1.2pt solid ${COLOR_PRIMARY}" fo:padding="0.24cm 0.3cm" style:vertical-align="middle"/>
+  </style:style>`;
+
 const CONTENT = `<?xml version="1.0" encoding="UTF-8"?>
 <office:document-content
   xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -210,7 +228,8 @@ const CONTENT = `<?xml version="1.0" encoding="UTF-8"?>
   xmlns:xlink="http://www.w3.org/1999/xlink"
   xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
   office:version="1.2">
- <office:automatic-styles/>
+ <office:automatic-styles>${TABLE_CELL_AUTOSTYLES}
+ </office:automatic-styles>
  <office:body>
   <office:text>
    <table:table table:name="HeaderTable" table:style-name="HeaderTable">
@@ -263,7 +282,7 @@ const CONTENT = `<?xml version="1.0" encoding="UTF-8"?>
       <text:p text:style-name="QuoteHeaderText">Désignation</text:p>
      </table:table-cell>
      <table:table-cell table:style-name="QuoteHeaderCell">
-      <text:p text:style-name="QuoteHeaderText">PRIX</text:p>
+      <text:p text:style-name="QuoteHeaderTextRight">Prix (FCFA)</text:p>
      </table:table-cell>
     </table:table-row>
     <table:table-row>
@@ -279,7 +298,7 @@ const CONTENT = `<?xml version="1.0" encoding="UTF-8"?>
       <text:p text:style-name="QuoteCellTotalText">TOTAL</text:p>
      </table:table-cell>
      <table:table-cell table:style-name="QuoteTotalCell">
-      <text:p text:style-name="QuoteCellTotalPrice">{TOTAL_AMOUNT}</text:p>
+      <text:p text:style-name="QuoteCellTotalPrice">{TOTAL_AMOUNT}&#160;FCFA</text:p>
      </table:table-cell>
     </table:table-row>
    </table:table>

@@ -693,10 +693,76 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
         ).get(id) || null;
       } catch (e) { void e; }
 
-      res.json({ societe, invoices, invoiceTotals, quotes, quoteTotals, webAccount });
+      // Lien éventuel avec une fiche auteur (tiers promu en auteur)
+      let authorAccount = null;
+      try {
+        authorAccount = db.prepare(
+          `SELECT id, display_name, slug, public_listed FROM authors WHERE dolibarr_thirdparty_id = ?`
+        ).get(id) || null;
+      } catch (e) { void e; }
+
+      res.json({ societe, invoices, invoiceTotals, quotes, quoteTotals, webAccount, authorAccount });
     } catch (err) {
       console.error('Societe detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement tiers' });
+    }
+  });
+
+  // POST /api/admin/societes/:id/promote-author — transforme un tiers en fiche auteur
+  // Idempotent : si déjà lié (ou même email), renvoie l'auteur existant en le liant au tiers.
+  router.post('/societes/:id/promote-author', auth, requireRoles('super_admin', 'admin', 'editor'), csrfProtection, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'Id invalide' });
+
+      const [[societe]] = await dolibarrPool.query(
+        `SELECT rowid AS id, nom, name_alias, email, phone FROM llx_societe WHERE rowid = ?`, [id]
+      );
+      if (!societe) return res.status(404).json({ error: 'Tiers introuvable' });
+
+      // 1. Déjà lié à ce tiers ? → on renvoie l'auteur existant
+      const linked = db.prepare(
+        `SELECT id, display_name, slug FROM authors WHERE dolibarr_thirdparty_id = ?`
+      ).get(id);
+      if (linked) return res.status(200).json({ created: false, linked: true, ...linked });
+
+      const fullName = String(societe.nom || societe.name_alias || '').trim();
+      if (!fullName) return res.status(400).json({ error: 'Le tiers n’a pas de nom' });
+      // Découpage best-effort : dernier mot = nom, le reste = prénom (display_name = nom du tiers tel quel)
+      const parts = fullName.split(/\s+/);
+      const lastname = parts.length > 1 ? parts[parts.length - 1] : fullName;
+      const firstname = parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+      const email = String(societe.email || '').trim().toLowerCase();
+      const phone = String(societe.phone || '').trim() || null;
+
+      // 2. Un auteur a déjà cet email ? → on le lie à ce tiers (pas de doublon)
+      if (email) {
+        const byEmail = db.prepare(`SELECT id, display_name, slug FROM authors WHERE LOWER(email) = ?`).get(email);
+        if (byEmail) {
+          db.prepare(`UPDATE authors SET dolibarr_thirdparty_id = ?, phone = COALESCE(NULLIF(phone, ''), ?) WHERE id = ?`)
+            .run(id, phone, byEmail.id);
+          db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+            .run(req.admin?.username || 'unknown', 'author_link_thirdparty', `#${byEmail.id} ↔ tiers ${id} (${byEmail.display_name})`);
+          return res.status(200).json({ created: false, linked: true, ...byEmail });
+        }
+      }
+
+      // 3. Création de la fiche auteur liée au tiers
+      const slug = generateUniqueSlug(db, fullName);
+      const finalEmail = email || `auteur+${slug}@senharmattan.local`;
+      const r = db.prepare(
+        `INSERT INTO authors (email, password, firstname, lastname, display_name, phone, slug, dolibarr_thirdparty_id, public_listed)
+         VALUES (?, '', ?, ?, ?, ?, ?, ?, 0)`
+      ).run(finalEmail, firstname, lastname, fullName, phone, slug, id);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin?.username || 'unknown', 'author_promote_from_tiers', `#${r.lastInsertRowid} ${fullName} (tiers=${id}, slug=${slug})`);
+
+      res.status(201).json({ created: true, id: r.lastInsertRowid, display_name: fullName, slug });
+    } catch (err) {
+      console.error('Promote author error:', err.message);
+      res.status(500).json({ error: 'Erreur transformation en auteur' });
     }
   });
 
@@ -752,9 +818,22 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
          ) t`, [id]
       );
 
+      // Réglé / reste dû calculés avec la MÊME logique que la synthèse ci-dessus
+      // (paiements réels, avoirs type=2 exclus, reste dû limité aux impayés) :
+      // ainsi SUM(paid) == total_paid et SUM(reste) == total_unpaid, et les deux
+      // blocs du PDF se réconcilient au franc près.
       const [byStatus] = await dolibarrPool.query(
-        `SELECT fk_statut AS statut, COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS ttc
-         FROM llx_facture WHERE fk_soc = ? GROUP BY fk_statut`, [id]
+        `SELECT fk_statut AS statut, COUNT(*) AS cnt,
+                COALESCE(SUM(total_ttc), 0) AS ttc,
+                COALESCE(SUM(CASE WHEN type <> 2 THEN paid_amount ELSE 0 END), 0) AS paid,
+                COALESCE(SUM(CASE WHEN fk_statut = 1 AND type <> 2
+                                  THEN GREATEST(total_ttc - paid_amount, 0) ELSE 0 END), 0) AS reste
+         FROM (
+           SELECT f.total_ttc, f.fk_statut, f.type,
+                  COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+           FROM llx_facture f WHERE f.fk_soc = ?
+         ) t
+         GROUP BY fk_statut`, [id]
       );
 
       const [monthlyRows] = await dolibarrPool.query(

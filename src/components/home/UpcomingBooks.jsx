@@ -23,6 +23,7 @@ function UpcomingBookCard({ book }) {
   const releaseDate = formatReleaseDate(book.release_date);
   const detailsLink = book.link?.trim() || '/catalogue';
   const hasCover = Boolean(book.cover?.trim());
+  const discount = Number(book.preorder_discount_pct) || 0;
 
   return (
     <article className="upcoming-book-card">
@@ -39,6 +40,9 @@ function UpcomingBookCard({ book }) {
           <div className="upcoming-book-cover upcoming-book-cover-placeholder" aria-hidden="true">
             <span>{title.slice(0, 1).toUpperCase()}</span>
           </div>
+        )}
+        {discount > 0 && (
+          <span className="upcoming-book-promo">−{Math.round(discount)}% précommande</span>
         )}
       </div>
 

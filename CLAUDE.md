@@ -1,4 +1,4 @@
-te # CLAUDE.md
+# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -27,12 +27,12 @@ sudo systemctl restart senharmattan-shop   # systemd service on VPS 38.242.229.1
 
 **Contract ODT templates regeneration:**
 ```bash
-node scripts/build-contract-templates.mjs                                                    # output: /tmp/contract-templates-v2/
-sudo cp /tmp/contract-templates-v2/*.odt /var/www/html/dolibarr/documents/doctemplates/contracts/
-sudo chown www-data:www-data /var/www/html/dolibarr/documents/doctemplates/contracts/template_*.odt
+node scripts/build-contract-templates.mjs        # génère les 15 ODT dans /tmp/contract-templates-v2/
+sudo bash scripts/deploy-contract-templates.sh   # backup horodaté + copie vers Dolibarr + chown www-data
 # si nouveaux extrafields :
 mysql -u dolibarr -p dolibarr < scripts/add-contract-subtitle-extrafield.sql
 ```
+Le déploiement nécessite sudo (dossier Dolibarr appartenant à `www-data`). Les contrats déjà générés gardent leur ancien PDF/ODT : régénérer le document (bouton PDF de la fiche) pour reprendre le nouveau template.
 
 ## Architecture
 
@@ -100,7 +100,8 @@ ADMIN_DEFAULT_PASSWORD
   - **Étendues** : `edition_simple` (papier), `edition_numerique` (+ avenant numérique), `edition_complete` (+ adaptations audiovisuelle & théâtrale).
 - Extrafields Dolibarr propres aux contrats (table `llx_contrat_extrafields`) : `book_title`, `book_subtitle`, `book_isbn`, `royalty_rate_print/digital`, `royalty_threshold`, `royalty_digital_threshold_fcfa` (seuil de report num.), `free_author_copies`, `tirage_initial`, `format_ouvrage`, `nombre_pages_estime`, `prix_public_previsionnel` (€), `exemplaires_sp`, `author_purchase_enabled/qty/discount` (annexe achat auteur), `date_signature`, `editeur_signataire_nom/qualite`.
 - Migration SQL des extrafields : `scripts/add-contract-subtitle-extrafield.sql` (idempotent — `ON DUPLICATE KEY` + `ADD COLUMN IF NOT EXISTS`).
-- **Templates ODT** générés par `scripts/build-contract-templates.mjs` (9 combinaisons + 6 alias legacy), déployés dans `/var/www/html/dolibarr/documents/doctemplates/contracts/`. Wording Article 4 spécifique pour DLL (15 % sur 1000 premiers ex. subventionnés, puis 10 %). Placeholders `{object_options_*}` + `{__THIRDPARTY_NAME/PHONE/EMAIL__}` + `{__ONLINE_SIGN_URL__}`. **Dolibarr ne supporte pas les blocs conditionnels** → l'annexe d'achat auteur apparaît toujours (avec `qty=0` si non activée).
+- **Templates ODT** générés par `scripts/build-contract-templates.mjs` (9 combinaisons + 6 alias legacy = 15 fichiers), déployés via `scripts/deploy-contract-templates.sh` dans `/var/www/html/dolibarr/documents/doctemplates/contracts/`. Wording Article 4 spécifique pour DLL (15 % sur 1000 premiers ex. subventionnés, puis 10 %). Placeholders `{object_options_*}` + `{__THIRDPARTY_NAME/PHONE/EMAIL__}` + `{__ONLINE_SIGN_URL__}`. **Dolibarr ne supporte pas les blocs conditionnels** → l'annexe d'achat auteur apparaît toujours (avec `qty=0` si non activée).
+- **Logo en-tête** : chaque ODT embarque `public/images/logo.png` sous `Pictures/logo.png` (entrée manifest + `draw:frame`/`draw:image` `as-char` en tête de l'ouverture, 4,5 × 2,29 cm). Le chemin source et les dimensions sont en constantes (`LOGO_SRC`, `LOGO_WIDTH_CM`, `LOGO_HEIGHT_CM`) en tête du script. Format ouvrage standard : `15,5 × 24 cm`.
 - Workflow manuscrit : la création auto de contrat (`server/index.js`) bascule sur `harmattan_2024_edition_simple` par défaut.
 - Signature en ligne : URL générée via `generateSignatureUrl(ref)` (HMAC bcrypt avec `DOLIBARR_INSTANCE_KEY` + `DOLIBARR_SIGN_TOKEN`).
 

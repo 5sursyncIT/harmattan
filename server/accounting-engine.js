@@ -308,7 +308,10 @@ async function runTransferTx(conn, { date_from, date_to, userId, force }) {
     if (!bankAcc) { bankAcc = acc.suspense; suspenseHits += 1; }
     const thirdCode = pay.code_client || (pay.soc_id ? `CL${pay.soc_id}` : '');
     const opLabel = `Encaissement ${pay.ref || '#' + pay.rowid}${pay.soc_name ? ' — ' + pay.soc_name : ''}`;
-    const common = { piece: pieceNum, date, docType: 'bank', docRef: pay.ref, fkDoc: pay.rowid, journal: 'BQ', opLabel };
+    // fk_doc d'une écriture doc_type='bank' = id de la LIGNE BANQUE (llx_bank.rowid), PAS du paiement.
+    // Avec l'id du paiement on collisionne les rowid de lignes banque → le garde-fou natif
+    // AccountLine::delete bloque à tort la suppression de paiements (cf. doublons POS).
+    const common = { piece: pieceNum, date, docType: 'bank', docRef: pay.ref, fkDoc: pay.fk_bank || 0, journal: 'BQ', opLabel };
     // Trésorerie au débit
     leg({ ...common, account: bankAcc, signed: Number(pay.amount), naturalSide: 'D' });
     // Client au crédit
@@ -342,7 +345,7 @@ async function runTransferTx(conn, { date_from, date_to, userId, force }) {
   // 6. Paiements fournisseurs (journal BQ) — table optionnelle
   try {
     const [supplierPayments] = await conn.query(
-      `SELECT p.rowid, p.ref, p.datep, p.amount, bk.fk_account,
+      `SELECT p.rowid, p.ref, p.datep, p.amount, p.fk_bank, bk.fk_account,
               (SELECT s.nom FROM llx_paiementfourn_facturefourn pf
                  JOIN llx_facture_fourn f ON f.rowid = pf.fk_facturefourn
                  JOIN llx_societe s ON s.rowid = f.fk_soc
@@ -363,7 +366,8 @@ async function runTransferTx(conn, { date_from, date_to, userId, force }) {
       if (!bankAcc) { bankAcc = acc.suspense; suspenseHits += 1; }
       const thirdCode = pay.code_fournisseur || '';
       const opLabel = `Règlement fourn. ${pay.ref || '#' + pay.rowid}${pay.soc_name ? ' — ' + pay.soc_name : ''}`;
-      const common = { piece: pieceNum, date, docType: 'bank', docRef: pay.ref, fkDoc: pay.rowid, journal: 'BQ', opLabel };
+      // fk_doc d'une écriture doc_type='bank' = id de la LIGNE BANQUE (llx_bank.rowid), PAS du paiement (cf. ci-dessus).
+      const common = { piece: pieceNum, date, docType: 'bank', docRef: pay.ref, fkDoc: pay.fk_bank || 0, journal: 'BQ', opLabel };
       leg({ ...common, account: acc.supplier, signed: Number(pay.amount), naturalSide: 'D', thirdCode, thirdLabel: pay.soc_name });
       leg({ ...common, account: bankAcc, signed: Number(pay.amount), naturalSide: 'C' });
       breakdown.purchase_payments += 1;

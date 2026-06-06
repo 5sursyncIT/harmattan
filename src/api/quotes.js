@@ -3,6 +3,7 @@ import api from './dolibarr';
 export const listContractQuotes = (contractId) => api.get(`/contracts/${contractId}/quotes`);
 export const createContractQuote = (contractId, data) => api.post(`/contracts/${contractId}/quotes`, data);
 export const getQuote = (id) => api.get(`/quotes/${id}`);
+export const markQuoteSent = (id) => api.post(`/quotes/${id}/send`);
 export const deleteQuote = (id) => api.delete(`/quotes/${id}`);
 export const getQuoteDefaults = (params) => api.get('/quotes/defaults', { params });
 

@@ -3,7 +3,7 @@ import 'dotenv/config';
 import axios from 'axios';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { transition as wfTransition } from './manuscript-workflow.js';
+import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 
 // ─── Shared admin Dolibarr API client ────────────────────
@@ -841,7 +841,19 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'validate_contract', `Contrat ${detail.data.ref} validé`);
 
-      res.json({ success: true, ref: detail.data.ref });
+      // Génération automatique du document ODT+PDF juste après validation.
+      // Bloquant (attendu avant la réponse) pour que le front trouve le document
+      // dès le rechargement de la fiche. L'échec est logué mais ne fait pas échouer la validation.
+      let docGenerated = false;
+      try {
+        await ensureContractModel(id);
+        await rebuildContractDocument(id);
+        docGenerated = true;
+      } catch (genErr) {
+        console.warn(`Auto-generate document after validate (contract ${id}):`, genErr.response?.data || genErr.message);
+      }
+
+      res.json({ success: true, ref: detail.data.ref, docGenerated });
     } catch (err) {
       console.error('Validate contract error:', err.response?.data || err.message);
       const { status, body } = dolibarrError(err, 'Erreur validation contrat');
@@ -1089,6 +1101,23 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'download_contract', `Téléchargement ${doc.name}`);
+
+      // Trace « document de contrat envoyé » sur la frise du manuscrit lié, une
+      // seule fois : la route est appelée à chaque consultation du PDF, on ne
+      // veut pas répéter l'évènement à chaque ouverture.
+      try {
+        const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(id);
+        if (ms) {
+          const already = db.prepare(
+            "SELECT 1 FROM manuscript_stages WHERE manuscript_id = ? AND event = 'contract_doc_sent' LIMIT 1"
+          ).get(ms.id);
+          if (!already) {
+            logManuscriptEvent(db, ms.id, 'contract_doc_sent',
+              { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
+              `Document ${doc.name}`);
+          }
+        }
+      } catch (e) { console.warn('Manuscript event (contract_doc_sent) warning:', e.message); }
 
       res.send(buffer);
     } catch (err) {

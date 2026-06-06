@@ -140,6 +140,14 @@ export const getProduct = (id) => {
   });
 };
 
+// Invalide l'entrée de cache d'un produit (après upload de couverture, édition…)
+// pour forcer le prochain getProduct() à refetcher des données fraîches.
+export const invalidateProductCacheEntry = (id) => {
+  productCache.delete(id);
+  productCache.delete(String(id));
+  productCache.delete(Number(id));
+};
+
 export const getFeaturedProducts = (limit = 8) =>
   api.get('/products/featured', { params: { limit } });
 

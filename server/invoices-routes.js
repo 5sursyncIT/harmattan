@@ -1052,10 +1052,17 @@ function normalizeSplits(body) {
 
 // Enregistre N paiements (un par split / méthode) sur une facture via l'API
 // Dolibarr. Chaque appel crée une ligne llx_paiement + llx_paiement_facture + banque.
-// closepaidinvoices='yes' ne solde la facture qu'au reste atteint = 0.
+//
+// IMPORTANT : il FAUT transmettre `amount` par split. En v21, l'endpoint
+// /payments retombe sinon sur le total_ttc COMPLET de la facture à chaque appel,
+// ce qui impute le total entier autant de fois qu'il y a de méthodes (un
+// règlement fractionné de 104 500 en Wave+OM+Espèces enregistrait 3×104 500).
+// On ne solde la facture (closepaidinvoices) que sur le dernier split, comme le POS.
 async function recordSplitPayments(pool, invoiceId, splits, bankAccount, datepUnix, comment) {
   const ids = [];
-  for (const s of splits) {
+  for (let i = 0; i < splits.length; i++) {
+    const s = splits[i];
+    const isLast = i === splits.length - 1;
     const paymentId = await resolvePaymentId(pool, s.method);
     if (!paymentId) {
       const err = new Error(`Code paiement inconnu dans Dolibarr : ${s.method}`);
@@ -1065,10 +1072,11 @@ async function recordSplitPayments(pool, invoiceId, splits, bankAccount, datepUn
     const r = await adminApi.post(`/invoices/${invoiceId}/payments`, {
       datepaye: datepUnix,
       paymentid: paymentId,
-      closepaidinvoices: 'yes',
+      closepaidinvoices: isLast ? 'yes' : 'no',
       accountid: bankAccount,
       num_payment: s.num_payment || undefined,
       comment,
+      amount: s.amount,
     });
     ids.push(r.data);
   }

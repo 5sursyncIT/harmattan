@@ -15,6 +15,11 @@ export const EMPTY_BOOK = Object.freeze({
   price_ttc: '',
   soustitre: '',
   description: '',
+  // Section « Ouvrages à paraître » (pilotée depuis la fiche produit)
+  is_upcoming: false,
+  release_date: '',
+  upcoming_summary: '',
+  preorder_discount_pct: '',
 });
 
 /**

@@ -21,12 +21,18 @@
  * Usage : node scripts/build-contract-templates.mjs
  */
 
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, copyFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { join } from 'path';
 
 const OUT_DIR = '/tmp/contract-templates-v2';
 const WORK_DIR = '/tmp/contract-templates-work';
+
+// Logo de l'en-tête (lettre à en-tête). Embarqué dans chaque ODT sous Pictures/.
+// 1153×586 px → ratio 1.967 ; affiché à 4.5cm de large = 2.29cm de haut.
+const LOGO_SRC = '/var/www/html/senharmattan-shop/public/images/logo.png';
+const LOGO_WIDTH_CM = '4.5cm';
+const LOGO_HEIGHT_CM = '2.29cm';
 
 // ═══════════════════════════════════════════════════════════
 // CHARTE VISUELLE
@@ -143,6 +149,9 @@ function buildStyles(variant) {
   </style:default-style>
 
   <!-- En-tête (lettre à en-tête) de la première page -->
+  <style:style style:name="LetterheadLogo" style:family="paragraph">
+   <style:paragraph-properties fo:text-align="left" fo:margin-bottom="0.15cm"/>
+  </style:style>
   <style:style style:name="LetterheadEditor" style:family="paragraph">
    <style:paragraph-properties fo:text-align="left" fo:margin-bottom="0.05cm"/>
    <style:text-properties style:font-name="${FONT_SANS}" fo:font-size="15pt" fo:font-weight="bold" fo:color="${COLOR_PRIMARY}"/>
@@ -305,6 +314,7 @@ function buildOpening(variant) {
   const editor = cfg.editorLong;
   const editorDative = cfg.editorDative || editor;
   return `
+  <text:p text:style-name="LetterheadLogo"><draw:frame draw:name="Logo" text:anchor-type="as-char" svg:width="${LOGO_WIDTH_CM}" svg:height="${LOGO_HEIGHT_CM}" draw:z-index="0"><draw:image xlink:href="Pictures/logo.png" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame></text:p>
   <text:p text:style-name="LetterheadEditor">${esc(editor)}</text:p>
   <text:p text:style-name="LetterheadTag">ÉDITION · DIFFUSION · LIBRAIRIE</text:p>
   <text:p text:style-name="LetterheadSlogan">Faire revenir le livre dans le quotidien des Sénégalais</text:p>
@@ -430,7 +440,7 @@ ${buildOpening(variant)}
   <text:p text:style-name="ArticleTitle">Article 7 · Compétence</text:p>
   <text:p>Le présent contrat, dans son intégralité, engage les héritiers et tous les ayants droit de l'Auteur. Pour toutes contestations pouvant naître à l'occasion du présent contrat, attribution de juridiction est faite aux tribunaux compétents de Dakar.</text:p>
 
-${buildSignatureBlock(true)}
+${buildSignatureBlock()}
 `;
 }
 
@@ -470,7 +480,7 @@ function buildDigitalAnnex(variant) {
   <text:p text:style-name="ArticleTitle">Article 6 · Compétence</text:p>
   <text:p>Le présent avenant, dans son intégralité, engage les héritiers et tous les ayants droit de l'Auteur. Pour toutes contestations pouvant naître à l'occasion du présent avenant, attribution de juridiction est faite aux tribunaux compétents de Dakar. Les autres dispositions du contrat d'édition restent inchangées.</text:p>
 
-${buildSignatureBlock(false)}
+${buildSignatureBlock()}
 `;
 }
 
@@ -516,7 +526,7 @@ function buildAudiovisualAnnex(variant) {
   <text:p text:style-name="ArticleTitle">Article 8 · TVA</text:p>
   <text:p>Les droits d'auteur issus de l'exécution du présent contrat sont assujettis à la TVA au taux de <text:span text:style-name="Bold">18&#160;%</text:span>, payable par l'Éditeur. En conséquence, les sommes précisées dans le contrat s'entendent nettes.</text:p>
 
-${buildSignatureBlock(false)}
+${buildSignatureBlock()}
 `;
 }
 
@@ -559,7 +569,7 @@ function buildTheatreAnnex(variant) {
   <text:p text:style-name="ArticleTitle">Article 8 · TVA</text:p>
   <text:p>Les droits d'auteur issus de l'exécution du présent contrat sont assujettis à la TVA au taux de <text:span text:style-name="Bold">18&#160;%</text:span>, payable par l'Éditeur. En conséquence, les sommes précisées dans le contrat s'entendent nettes.</text:p>
 
-${buildSignatureBlock(false)}
+${buildSignatureBlock()}
 `;
 }
 
@@ -582,10 +592,13 @@ function buildAuthorPurchaseAnnex() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Bloc signature (commun) — withOnline = true uniquement pour le
-// contrat principal (le lien de signature en ligne vaut pour l'ensemble).
+// Bloc signature (commun à toutes les variantes).
+// NB : le lien de signature en ligne ({__ONLINE_SIGN_URL__}) n'est
+// volontairement PAS imprimé sur le contrat — la version papier ne doit
+// pas exposer cette URL. La signature en ligne reste possible via le lien
+// envoyé séparément par l'application (cf. generateSignatureUrl).
 // ═══════════════════════════════════════════════════════════
-function buildSignatureBlock(withOnline) {
+function buildSignatureBlock() {
   return `
   <text:p>Fait à <text:span text:style-name="Bold">Dakar</text:span> le <text:span text:style-name="Bold">{object_options_date_signature}</text:span>, en deux exemplaires originaux.</text:p>
 
@@ -609,8 +622,6 @@ function buildSignatureBlock(withOnline) {
     </table:table-cell>
    </table:table-row>
   </table:table>
-${withOnline ? `
-  <text:p text:style-name="SmallMuted">Signature en ligne possible à l'adresse suivante&#160;: {__ONLINE_SIGN_URL__}</text:p>` : ''}
 `;
 }
 
@@ -635,6 +646,9 @@ function buildContent(variant) {
   xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
   xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
   xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+  xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+  xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
   office:version="1.2">
  <office:automatic-styles/>
  <office:body>
@@ -670,6 +684,7 @@ const MANIFEST = `<?xml version="1.0" encoding="UTF-8"?>
  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
  <manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/>
  <manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="Pictures/logo.png" manifest:media-type="image/png"/>
 </manifest:manifest>`;
 
 // ═══════════════════════════════════════════════════════════
@@ -680,14 +695,16 @@ function packageOdt(variant, outPath) {
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(join(workDir, 'META-INF'), { recursive: true });
 
+  mkdirSync(join(workDir, 'Pictures'), { recursive: true });
   writeFileSync(join(workDir, 'mimetype'), 'application/vnd.oasis.opendocument.text', { encoding: 'utf8' });
   writeFileSync(join(workDir, 'META-INF/manifest.xml'), MANIFEST);
   writeFileSync(join(workDir, 'content.xml'), buildContent(variant));
   writeFileSync(join(workDir, 'styles.xml'), buildStyles(variant));
   writeFileSync(join(workDir, 'meta.xml'), buildMeta(variant));
+  copyFileSync(LOGO_SRC, join(workDir, 'Pictures/logo.png'));
 
   if (existsSync(outPath)) rmSync(outPath);
-  execSync(`cd ${workDir} && zip -q -X -0 ${outPath} mimetype && zip -q -r -X ${outPath} META-INF content.xml styles.xml meta.xml`);
+  execSync(`cd ${workDir} && zip -q -X -0 ${outPath} mimetype && zip -q -r -X ${outPath} META-INF content.xml styles.xml meta.xml Pictures`);
   console.log(`  ✓ ${outPath} (${execSync(`du -h ${outPath}`).toString().trim().split(/\s+/)[0]})`);
 }
 

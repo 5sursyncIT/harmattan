@@ -49,6 +49,16 @@ export const deleteBook = (id, hard = false) => api.delete(`/admin/books/${id}`,
 export const checkIsbn = (isbn, excludeId = null) =>
   api.get(`/admin/books/check-isbn/${encodeURIComponent(isbn)}`, { params: excludeId ? { exclude: excludeId } : {} });
 export const createGenre = (label) => api.post('/admin/books/genres', { label });
+// ── Genres (CRUD) ──
+export const listGenres = () => api.get('/admin/books/genres');
+export const updateGenre = (id, label) => api.put(`/admin/books/genres/${id}`, { label });
+export const deleteGenre = (id, { reassignTo, force } = {}) =>
+  api.delete(`/admin/books/genres/${id}`, {
+    params: {
+      ...(reassignTo ? { reassignTo } : {}),
+      ...(force ? { force: 1 } : {}),
+    },
+  });
 export const searchAuthors = (q = '', limit = 10, config = {}) =>
   api.get('/admin/books/authors', { params: { q, limit }, ...config });
 export const getBookQualityStats = () => api.get('/admin/books/quality-stats');
@@ -107,6 +117,12 @@ export const forceLogoutAdminUser = (id) => api.post(`/admin/users/${id}/force-l
 export const forcePasswordResetAdminUser = (id) => api.post(`/admin/users/${id}/force-password-reset`);
 export const resetAdminUser2FA = (id) => api.post(`/admin/users/${id}/reset-2fa`);
 export const getAdminRoles = () => api.get('/admin/roles');
+// Surcharges de permissions (super-admin) : élargir/restreindre un rôle×module à chaud
+export const setRolePermissionOverride = (role, module, level) =>
+  api.put(`/admin/roles/${role}/permissions/${module}`, { level });
+export const clearRolePermissionOverride = (role, module) =>
+  api.delete(`/admin/roles/${role}/permissions/${module}`);
+export const clearAllRolePermissionOverrides = () => api.delete('/admin/roles/overrides');
 
 // 2FA (TOTP) — pour l'utilisateur connecté
 export const setup2FA = () => api.post('/admin/2fa/setup');
@@ -167,6 +183,25 @@ export const deleteSupplier = (id) => api.delete(`/admin/suppliers/${id}`);
 export const searchSupplierTiers = (q) => api.get('/admin/suppliers/search-tiers', { params: { q } });
 export const addSupplierFromTier = (dolibarrId) => api.post(`/admin/suppliers/from-tier/${dolibarrId}`);
 
+// Inventaire (comptage physique de stock)
+export const getInventoryScopeOptions = () => api.get('/admin/inventory/scope-options');
+export const getInventorySessions = (params = {}) => api.get('/admin/inventory/sessions', { params });
+export const getInventorySession = (id) => api.get(`/admin/inventory/sessions/${id}`);
+export const getInventoryLines = (id, params = {}) => api.get(`/admin/inventory/sessions/${id}/lines`, { params });
+export const createInventorySession = (data) => api.post('/admin/inventory/sessions', data);
+export const startInventorySession = (id, product_ids) => api.post(`/admin/inventory/sessions/${id}/start`, product_ids ? { product_ids } : {});
+// Saisie : { barcode } = scan +1 · { product_id, qty } = quantité absolue
+export const countInventory = (id, payload) => api.post(`/admin/inventory/sessions/${id}/count`, payload);
+export const bulkCountInventory = (id, lines) => api.post(`/admin/inventory/sessions/${id}/count/bulk`, { lines });
+export const resetInventoryLine = (id, lineId) => api.post(`/admin/inventory/sessions/${id}/lines/${lineId}/reset`);
+export const previewInventoryClose = (id) => api.get(`/admin/inventory/sessions/${id}/preview`);
+export const closeInventorySession = (id) => api.post(`/admin/inventory/sessions/${id}/close`);
+export const cancelInventorySession = (id) => api.post(`/admin/inventory/sessions/${id}/cancel`);
+export const deleteInventorySession = (id) => api.delete(`/admin/inventory/sessions/${id}`);
+// Rapports téléchargeables (auth par cookie — ouverture directe de l'URL)
+export const inventoryReportPdfUrl = (id) => `/api/admin/inventory/sessions/${id}/report.pdf`;
+export const inventoryReportCsvUrl = (id) => `/api/admin/inventory/sessions/${id}/report.csv`;
+
 // Notification badges
 export const getNotificationCounts = () => api.get('/admin/notifications/counts');
 
@@ -185,6 +220,7 @@ export const getAdminSocieteInvoices = (id, params = {}) => api.get(`/admin/soci
 export const createAdminSociete = (data) => api.post('/admin/societes', data);
 export const updateAdminSociete = (id, data) => api.put(`/admin/societes/${id}`, data);
 export const deleteAdminSociete = (id) => api.delete(`/admin/societes/${id}`);
+export const promoteSocieteToAuthor = (id) => api.post(`/admin/societes/${id}/promote-author`);
 
 export const getAdminAuthors = (params = {}, config = {}) => api.get('/admin/authors', { params, ...config });
 export const getAdminAuthor = (id) => api.get(`/admin/authors/${id}`);

@@ -1,0 +1,244 @@
+/* Module Inventaire — comptage physique. Complète Stock.css (classes .sk-*). */
+
+/* ── Badges de statut de session ── */
+.inv-status {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 10px; border-radius: 20px;
+  font-size: 0.74rem; font-weight: 700; letter-spacing: .02em;
+  text-transform: uppercase;
+}
+.inv-status.draft    { background: #f1f5f9; color: #475569; }
+.inv-status.counting { background: #dbeafe; color: #1d4ed8; }
+.inv-status.closed   { background: #dcfce7; color: #15803d; }
+.inv-status.canceled { background: #fee2e2; color: #b91c1c; }
+
+/* ── Cartes de session (liste) ── */
+.inv-session-list { display: flex; flex-direction: column; gap: 10px; }
+.inv-session-card {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px; border: 1px solid #e2e8f0; border-radius: 12px;
+  background: #fff; text-decoration: none; color: inherit;
+  transition: box-shadow .15s, border-color .15s;
+}
+.inv-session-card:hover { border-color: #c7d2fe; box-shadow: 0 4px 14px rgba(30,64,175,.08); }
+.inv-session-main { flex: 1; min-width: 0; }
+.inv-session-ref { font-weight: 800; font-size: 0.95rem; color: #0f172a; }
+.inv-session-ref .mono { color: #1e40af; }
+.inv-session-meta { font-size: 0.8rem; color: #64748b; margin-top: 2px; }
+.inv-session-prog { min-width: 130px; text-align: right; }
+
+/* ── En-tête de scan (écran de comptage) ── */
+.inv-scan-box {
+  position: relative; margin: 14px 0;
+}
+.inv-scan-box svg.lead {
+  position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: #1e40af;
+}
+.inv-scan-input {
+  width: 100%; padding: 16px 16px 16px 48px;
+  border-radius: 12px; border: 2px solid #1e40af;
+  font-size: 1.15rem; font-weight: 600; letter-spacing: .02em;
+  box-shadow: 0 2px 10px rgba(30,64,175,.10);
+}
+.inv-scan-input:focus { outline: none; border-color: #1d4ed8; box-shadow: 0 0 0 4px rgba(59,130,246,.18); }
+.inv-scan-feedback {
+  margin-top: 8px; min-height: 22px; font-size: 0.9rem; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.inv-scan-feedback.ok  { color: #15803d; }
+.inv-scan-feedback.err { color: #b91c1c; }
+
+/* ── Barre de progression ── */
+.inv-progress-wrap { margin: 8px 0 16px; }
+.inv-progress-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.85rem; color: #475569; margin-bottom: 6px;
+}
+.inv-progress-head strong { color: #0f172a; font-size: 1.05rem; }
+.inv-progress-track { height: 10px; border-radius: 8px; background: #e2e8f0; overflow: hidden; }
+.inv-progress-fill { height: 100%; background: linear-gradient(90deg,#2563eb,#1e40af); transition: width .3s; }
+
+/* ── Stat pills (résumé) ── */
+.inv-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.inv-stat-pill {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 8px 14px; border-radius: 10px; background: #f8fafc; border: 1px solid #e2e8f0;
+  min-width: 78px;
+}
+.inv-stat-pill .v { font-weight: 800; font-size: 1.15rem; color: #0f172a; line-height: 1.1; }
+.inv-stat-pill .l { font-size: 0.7rem; color: #64748b; text-transform: uppercase; letter-spacing: .03em; }
+.inv-stat-pill.variance .v { color: #b45309; }
+
+/* ── Saisie inline de quantité comptée ── */
+/* font ≥ 16px : empêche le zoom auto iOS au focus. */
+.inv-qty-input {
+  width: 60px; padding: 8px 6px; text-align: center;
+  border-radius: 8px; border: 2px solid #cbd5e1; font-weight: 700; font-size: 16px;
+  font-variant-numeric: tabular-nums; touch-action: manipulation;
+}
+.inv-qty-input:focus-visible { outline: 2px solid #1e40af; outline-offset: 1px; border-color: #1e40af; }
+.inv-qty-input.counted { border-color: #93c5fd; background: #eff6ff; }
+
+/* Pastille d'écart dans le tableau */
+.inv-delta {
+  display: inline-block; min-width: 38px; text-align: center;
+  font-weight: 800; padding: 2px 8px; border-radius: 20px; font-size: 0.82rem;
+}
+.inv-delta.pos { background: #dcfce7; color: #15803d; }
+.inv-delta.neg { background: #fee2e2; color: #b91c1c; }
+.inv-delta.zero { color: #94a3b8; }
+
+/* ── Choix de périmètre (modale création) ── */
+.inv-scope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px 0 14px; }
+.inv-scope-opt {
+  border: 2px solid #e2e8f0; border-radius: 12px; padding: 12px; cursor: pointer;
+  display: flex; gap: 10px; align-items: flex-start; transition: border-color .15s, background .15s;
+}
+.inv-scope-opt:hover { border-color: #c7d2fe; }
+.inv-scope-opt.active { border-color: #1e40af; background: #eff6ff; }
+.inv-scope-opt .t { font-weight: 700; font-size: 0.88rem; color: #0f172a; }
+.inv-scope-opt .d { font-size: 0.76rem; color: #64748b; margin-top: 2px; }
+
+.inv-warn {
+  display: flex; gap: 8px; align-items: flex-start;
+  background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+  border-radius: 10px; padding: 10px 12px; font-size: 0.82rem; margin: 6px 0 12px;
+}
+
+@media (max-width: 640px) {
+  .inv-scope-grid { grid-template-columns: 1fr; }
+  .inv-session-prog { min-width: 90px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   LOT 4 — Comptage tactile / mobile
+   ═══════════════════════════════════════════════════════════ */
+
+/* Barre de scan collante : toujours atteignable en faisant défiler la liste. */
+.inv-scan-sticky {
+  position: sticky; top: 0; z-index: 5;
+  background: #fff; padding: 10px 0 8px;
+  border-bottom: 1px solid #eef2f7; margin-bottom: 10px;
+}
+.inv-scan-box { margin: 0; }
+
+/* Lien secondaire « titre sans code-barres » */
+.inv-add-toggle {
+  background: none; border: none; color: #1e40af; cursor: pointer;
+  font-size: 0.85rem; font-weight: 600; padding: 8px 4px; min-height: 40px;
+  display: inline-flex; align-items: center; gap: 6px; touch-action: manipulation;
+}
+.inv-add-toggle:hover { text-decoration: underline; }
+.inv-add-toggle:focus-visible { outline: 2px solid #1e40af; outline-offset: 2px; border-radius: 6px; }
+
+/* Panneau de recherche-ajout */
+.inv-search-add {
+  border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; margin-bottom: 12px;
+  background: #f8fafc;
+}
+.inv-search-add input[type="text"] {
+  width: 100%; padding: 12px 14px; border-radius: 10px; border: 2px solid #e2e8f0;
+  font-size: 16px; /* anti-zoom iOS */
+}
+.inv-search-add input[type="text"]:focus-visible { outline: 2px solid #1e40af; outline-offset: 1px; border-color: #1e40af; }
+.inv-search-results { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.inv-search-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+}
+.inv-search-row-main { flex: 1; min-width: 0; }
+.inv-search-row-title { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inv-search-row-meta { font-size: 0.78rem; color: #64748b; font-variant-numeric: tabular-nums; }
+
+/* Liste des lignes en CARTES (tactile, mobile-first) */
+.inv-line-list { display: flex; flex-direction: column; gap: 8px; }
+.inv-line {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff;
+}
+.inv-line-main { flex: 1; min-width: 0; }
+.inv-line-title { font-weight: 600; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inv-line-ref { font-size: 0.78rem; color: #64748b; font-variant-numeric: tabular-nums; }
+.inv-line-theo { font-size: 0.78rem; color: #64748b; text-align: center; min-width: 64px; }
+.inv-line-theo strong { display: block; font-size: 0.98rem; color: #334155; font-variant-numeric: tabular-nums; }
+.inv-line-ctrl { display: flex; align-items: center; gap: 10px; }
+
+/* Stepper − [qté] + : cibles ≥ 44px */
+.inv-stepper { display: inline-flex; align-items: center; gap: 6px; }
+.inv-step-btn {
+  width: 44px; height: 44px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; color: #1e40af;
+  cursor: pointer; touch-action: manipulation; transition: background 0.12s, border-color 0.12s;
+}
+.inv-step-btn:hover { background: #eff6ff; border-color: #93c5fd; }
+.inv-step-btn:active { background: #dbeafe; }
+.inv-step-btn:focus-visible { outline: 2px solid #1e40af; outline-offset: 2px; }
+.inv-step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.inv-line-reset {
+  width: 40px; height: 40px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none; color: #94a3b8; cursor: pointer;
+  border-radius: 8px; touch-action: manipulation;
+}
+.inv-line-reset:hover { background: #f1f5f9; color: #475569; }
+.inv-line-reset:focus-visible { outline: 2px solid #1e40af; outline-offset: 1px; }
+
+/* Valeur comptée en lecture seule (sessions clôturées) */
+.inv-line-readval { min-width: 48px; text-align: center; font-weight: 800; font-size: 1.05rem; font-variant-numeric: tabular-nums; color: #0f172a; }
+
+/* Filtres : cibles tactiles confortables + recherche ≥ 16px */
+.inv-filter-search { position: relative; margin-left: auto; min-width: 200px; flex: 1; max-width: 280px; }
+.inv-filter-search input { width: 100%; padding: 10px 12px 10px 34px; border-radius: 9px; border: 1px solid #e2e8f0; font-size: 16px; }
+.inv-filter-search input:focus-visible { outline: 2px solid #1e40af; outline-offset: 1px; border-color: #1e40af; }
+
+/* Empilage sur petit écran : titre au-dessus, contrôles en dessous, pleine largeur */
+@media (max-width: 560px) {
+  .inv-line { flex-wrap: wrap; }
+  .inv-line-main { flex-basis: 100%; }
+  .inv-line-ctrl { width: 100%; justify-content: space-between; }
+  .inv-line-theo { text-align: left; min-width: auto; }
+  .inv-filter-search { max-width: none; margin-left: 0; flex-basis: 100%; }
+}
+
+/* ── Boutons & modales AUTONOMES (le module ne dépend plus de Contracts.css) ──
+   Mêmes proportions/couleurs que le reste de l'admin, + conformité tactile :
+   cibles ≥ 44px, focus-visible, touch-action. */
+.inv-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 18px; min-height: 44px; border: none; border-radius: 10px;
+  font-weight: 700; font-size: 0.85rem; line-height: 1; cursor: pointer; white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s; touch-action: manipulation;
+}
+.inv-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.inv-btn:focus-visible { outline: 2px solid #1e40af; outline-offset: 2px; }
+.inv-btn-primary { background: #10531a; color: #fff; }
+.inv-btn-primary:hover:not(:disabled) { background: #0d4516; }
+.inv-btn-outline { background: #fff; color: #475569; border: 1px solid #d1d5db; }
+.inv-btn-outline:hover:not(:disabled) { background: #f9fafb; }
+.inv-btn-danger { background: #fff; color: #dc2626; border: 1px solid #fecaca; }
+.inv-btn-danger:hover:not(:disabled) { background: #fef2f2; }
+
+.inv-modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  z-index: 1000; animation: inv-fadeIn 0.15s ease-out;
+}
+.inv-modal {
+  background: #fff; border-radius: 16px; padding: 24px; width: 100%;
+  max-width: 420px; max-height: 90vh; overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.16); animation: inv-slideUp 0.2s ease-out;
+}
+.inv-modal h3 { margin: 0 0 6px; font-size: 1.1rem; color: #0f172a; }
+.inv-modal p { color: #64748b; font-size: 0.9rem; line-height: 1.5; }
+.inv-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+@keyframes inv-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes inv-slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Accessibilité : respect du reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .inv-progress-fill, .inv-step-btn, .inv-session-card, .inv-btn { transition: none; }
+  .inv-modal-overlay, .inv-modal { animation: none; }
+}

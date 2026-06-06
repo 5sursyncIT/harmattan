@@ -16,6 +16,10 @@ import {
   ROLE_ALLOWED_PATHS,
   DEPRECATED_ACTOR_ROLES,
   serializeRolesForClient,
+  OVERRIDABLE_MODULES,
+  PERMISSION_LEVELS,
+  moduleForPath,
+  methodAllowedForLevel,
 } from './roles-config.js';
 import { generateBase32Secret, verifyTotp, buildOtpAuthUrl } from './totp.js';
 
@@ -162,6 +166,21 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     if (!admin) return next();
 
     const role = admin.role;
+    // Le super_admin n'est jamais restreint (évite tout auto-verrouillage : c'est
+    // lui qui pilote les surcharges).
+    if (role === 'super_admin') return next();
+
+    // Surcharge temporaire éventuelle pour le module de ce chemin : elle prime sur
+    // la config de base (octroi OU restriction). N'affecte que les modules dont
+    // l'accès transite par /api/admin/<x> (cf. MODULE_PATHS).
+    const ovModule = moduleForPath(path);
+    const ovLevel = ovModule ? overridesCache[role]?.[ovModule] : undefined;
+    if (ovLevel !== undefined) {
+      if (methodAllowedForLevel(ovLevel, req.method)) return next();
+      return res.status(403).json({ error: 'Accès non autorisé (permission temporaire en vigueur)' });
+    }
+
+    // Pas de surcharge pour ce module → comportement de base inchangé.
     if (FULL_ACCESS_ROLES.includes(role)) {
       return next();
     }
@@ -226,6 +245,32 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   function logActivity(username, action, details = '') {
     db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)').run(username, action, details);
   }
+
+  // ─── Surcharges temporaires de permissions (pilotées par le super-admin) ────
+  // Permettent d'élargir OU de restreindre l'accès d'un rôle à un module, à chaud.
+  // Manuel uniquement (pas d'expiration auto) : restauration explicite par cellule
+  // ou globale. Prennent le pas sur la config de base (roles-config.js) par module.
+  db.exec(`CREATE TABLE IF NOT EXISTS role_permission_overrides (
+    role TEXT NOT NULL,
+    module TEXT NOT NULL,
+    level TEXT NOT NULL,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (role, module)
+  )`);
+
+  // Cache mémoire : { [role]: { [module]: level } }. Rechargé au démarrage et
+  // après chaque écriture (les surcharges sont rares → coût négligeable).
+  let overridesCache = {};
+  function reloadOverrides() {
+    const rows = db.prepare('SELECT role, module, level FROM role_permission_overrides').all();
+    const map = {};
+    for (const r of rows) {
+      (map[r.role] || (map[r.role] = {}))[r.module] = r.level;
+    }
+    overridesCache = map;
+  }
+  reloadOverrides();
 
   // Create contact_messages table
   db.exec(`CREATE TABLE IF NOT EXISTS contact_messages (
@@ -351,6 +396,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_stages_ms ON manuscript_stages(manuscript_id, created_at)'); } catch (e) { void e; }
+  // Évènements informatifs (devis, contrat envoyé…) : colonne nullable, les
+  // lignes existantes (transitions de stage) gardent event = NULL.
+  try { db.exec('ALTER TABLE manuscript_stages ADD COLUMN event TEXT'); } catch (e) { void e; }
 
   db.exec(`CREATE TABLE IF NOT EXISTS manuscript_evaluations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -523,6 +571,8 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       email: req.admin.email || null,
       mustChangePassword: req.admin.must_change_password === 1,
       totpEnabled: req.admin.totp_enabled === 1,
+      // Surcharges actives pour CE rôle → la nav peut afficher/masquer en conséquence.
+      permissionOverrides: overridesCache[req.admin.role] || {},
     });
   });
 
@@ -591,14 +641,87 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   // ─── SITE CONFIG ROUTES ─────────────────────────────────────
 
+  // Nettoie le HTML d'une accroche/description pour l'affichage public.
+  function stripHtmlServer(s) {
+    return String(s || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"').replace(/&#0?39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Construit la section « Ouvrages à paraître » depuis le catalogue :
+  // table SQLite book_upcoming (marqueur posé sur la fiche produit) jointe aux
+  // produits Dolibarr réels. Une seule source de vérité, gérée depuis /admin/books.
+  async function buildUpcomingBooksFromCatalogue() {
+    if (!db || !dolibarrPool) return [];
+    let rows;
+    try {
+      rows = db.prepare(
+        `SELECT product_id, release_date, summary, preorder_discount_pct, sort_order
+           FROM book_upcoming
+          ORDER BY (release_date IS NULL) ASC, release_date ASC, sort_order ASC, product_id ASC`
+      ).all();
+    } catch { return []; }
+    if (!rows.length) return [];
+
+    const ids = rows.map((r) => r.product_id);
+    const placeholders = ids.map(() => '?').join(',');
+    let prods = [];
+    try {
+      const [queryRows] = await dolibarrPool.query(
+        `SELECT p.rowid AS id, p.label, p.description, p.price_ttc, pe.auteur, pe.longdescript
+           FROM llx_product p
+           LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
+          WHERE p.rowid IN (${placeholders})`,
+        ids
+      );
+      prods = queryRows;
+    } catch (e) {
+      console.error('[CONFIG] build upcoming_books failed:', e.message);
+      return [];
+    }
+    const byId = new Map(prods.map((p) => [String(p.id), p]));
+
+    return rows
+      .filter((r) => byId.has(String(r.product_id)))
+      .map((r) => {
+        const p = byId.get(String(r.product_id));
+        const summary = stripHtmlServer(r.summary || p.longdescript || p.description || '');
+        return {
+          product_id: String(r.product_id),
+          title: p.label || '',
+          author: p.auteur || '',
+          release_date: r.release_date || '',
+          summary,
+          cover: `/api/image/${r.product_id}`,
+          preorder_discount_pct: r.preorder_discount_pct || 0,
+          link: `/produit/${r.product_id}`,
+        };
+      });
+  }
+
   // Public: get config (for frontend)
-  app.get('/api/admin/config', (req, res) => {
+  app.get('/api/admin/config', async (req, res) => {
     try {
       const config = readConfig();
       // Don't expose SMTP credentials to public
       const { smtp, ...publicConfig } = config;
       // Use smtp variable to avoid linter error
       if (smtp) { /* nothing */ }
+
+      // « Ouvrages à paraître » : dérivé du catalogue (cache 120 s, invalidé à chaque
+      // changement de flag dans book-routes via cache.del('upcoming_books:public')).
+      let upcoming = cache?.get?.('upcoming_books:public');
+      if (!upcoming) {
+        upcoming = await buildUpcomingBooksFromCatalogue();
+        cache?.set?.('upcoming_books:public', upcoming, 120);
+      }
+      publicConfig.upcoming_books = upcoming;
+
       res.json(publicConfig);
     } catch (err) {
       console.error(err);
@@ -1066,7 +1189,49 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // Définition des rôles et matrice de permissions — accessible à tout admin
   // authentifié (la matrice est purement informative pour l'UI).
   app.get('/api/admin/roles', auth, (req, res) => {
-    res.json(serializeRolesForClient());
+    res.json({ ...serializeRolesForClient(), overrides: overridesCache });
+  });
+
+  // ── Surcharges de permissions : RÉSERVÉ AU SUPER-ADMIN ──────────────────────
+  // Élargir ou restreindre l'accès d'un rôle à un module, à chaud. Le super_admin
+  // n'est jamais modifiable (sécurité). Restauration = DELETE.
+  app.put('/api/admin/roles/:role/permissions/:module', auth, csrfProtection, requireSuperAdmin, (req, res) => {
+    const { role, module } = req.params;
+    const level = String(req.body?.level || '');
+    if (!validRoles.includes(role) || role === 'super_admin') {
+      return res.status(400).json({ error: 'Rôle invalide ou non modifiable' });
+    }
+    if (!OVERRIDABLE_MODULES.includes(module)) {
+      return res.status(400).json({ error: 'Ce module ne peut pas être surchargé ici' });
+    }
+    if (!PERMISSION_LEVELS.includes(level)) {
+      return res.status(400).json({ error: 'Niveau de permission invalide' });
+    }
+    db.prepare(`INSERT INTO role_permission_overrides (role, module, level, created_by, created_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(role, module) DO UPDATE SET
+                  level = excluded.level, created_by = excluded.created_by, created_at = datetime('now')`)
+      .run(role, module, level, req.admin.username);
+    reloadOverrides();
+    logActivity(req.admin.username, 'permission_override', `${role} · ${module} → ${level}`);
+    res.json({ role, module, level, overrides: overridesCache });
+  });
+
+  // Restaure TOUTES les surcharges (placé avant la route paramétrée pour la lisibilité).
+  app.delete('/api/admin/roles/overrides', auth, csrfProtection, requireSuperAdmin, (req, res) => {
+    db.prepare('DELETE FROM role_permission_overrides').run();
+    reloadOverrides();
+    logActivity(req.admin.username, 'permission_override_reset_all', 'Toutes les surcharges supprimées');
+    res.json({ overrides: {} });
+  });
+
+  // Restaure une cellule (role × module) à sa valeur de base.
+  app.delete('/api/admin/roles/:role/permissions/:module', auth, csrfProtection, requireSuperAdmin, (req, res) => {
+    const { role, module } = req.params;
+    db.prepare('DELETE FROM role_permission_overrides WHERE role = ? AND module = ?').run(role, module);
+    reloadOverrides();
+    logActivity(req.admin.username, 'permission_override_reset', `${role} · ${module}`);
+    res.json({ role, module, overrides: overridesCache });
   });
 
   // Construit l'objet exposé au client à partir d'une ligne admin_users (sans

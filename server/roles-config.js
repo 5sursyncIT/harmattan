@@ -79,6 +79,11 @@ export const ROLE_ALLOWED_PATHS = {
     // Stock : lecture seule pour le libraire (méthodes d'écriture refusées par la
     // RBAC elle-même, en plus du garde-fou applicatif blockLibrarianWrite).
     { re: /^\/api\/admin\/stock(\/.*)?$/, methods: ['GET'] },
+    // Inventaire : lecture + comptage simple (scan/saisie) autorisés ; création,
+    // démarrage, import CSV et clôture refusés (réservés au gestionnaire de stock).
+    { re: /^\/api\/admin\/inventory\/sessions\/\d+\/count$/, methods: ['POST'] },
+    { re: /^\/api\/admin\/inventory\/sessions\/\d+\/lines\/\d+\/reset$/, methods: ['POST'] },
+    { re: /^\/api\/admin\/inventory(\/.*)?$/, methods: ['GET'] },
     /^\/api\/admin\/invoices(\/.*)?$/,
     /^\/api\/admin\/deliveries(\/.*)?$/,
     // Dépôt-vente : lecture seule pour le libraire.
@@ -96,6 +101,9 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/authors(\/.*)?$/,
     /^\/api\/admin\/news(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
+    // ── Volet « Site & contenu » : configuration + bannières (slides) ──
+    /^\/api\/admin\/config(\/.*)?$/,
+    /^\/api\/admin\/slides(\/.*)?$/,
   ],
   // Profil « Gestionnaire de stock » : gestion complète du stock/réappro, des
   // fournisseurs, du catalogue, des BL et du dépôt-vente.
@@ -105,6 +113,7 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/tags(\/.*)?$/,
     /^\/api\/admin\/authors(\/.*)?$/,
     /^\/api\/admin\/stock(\/.*)?$/,
+    /^\/api\/admin\/inventory(\/.*)?$/,
     /^\/api\/admin\/suppliers(\/.*)?$/,
     /^\/api\/admin\/deliveries(\/.*)?$/,
     /^\/api\/admin\/consignments(\/.*)?$/,
@@ -159,7 +168,7 @@ export const ROLE_ALLOWED_PATHS = {
 // 'r' (lecture seule), '-' (aucun accès).
 const M = (modules) => {
   const empty = {
-    dashboard: '-', books: '-', tags: '-', authors: '-', stock: '-', suppliers: '-',
+    dashboard: '-', books: '-', tags: '-', authors: '-', stock: '-', inventory: '-', suppliers: '-',
     manuscripts: '-', evaluations: '-', corrections: '-', editorial: '-', covers: '-',
     printing: '-', contracts: '-', pos: '-', payments: '-', accounting: '-',
     invoices: '-', deliveries: '-', consignments: '-', orders: '-', propals: '-',
@@ -172,7 +181,7 @@ const M = (modules) => {
 
 export const MODULE_PERMISSIONS = {
   super_admin: M({
-    dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', suppliers: 'crud',
+    dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
     invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
@@ -180,7 +189,7 @@ export const MODULE_PERMISSIONS = {
     customers: 'crud', users: 'crud', activity: 'r', profile: 'rw',
   }),
   admin: M({
-    dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', suppliers: 'crud',
+    dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
     invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
@@ -196,12 +205,14 @@ export const MODULE_PERMISSIONS = {
   // Profil fusionné « Libraire & Support » : union des permissions des deux anciens rôles.
   librarian: M({
     dashboard: 'r',
-    books: 'crud', tags: 'r', stock: 'r', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'crud', orders: 'r',
+    books: 'crud', tags: 'r', stock: 'r', inventory: 'rw', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'crud', orders: 'r',
     authors: 'r', contacts: 'crud', faq: 'crud', newsletter: 'crud', customers: 'rw', news: 'crud',
+    // Rubrique « Site & contenu » : contrôle total config + bannières.
+    config: 'crud', slides: 'crud',
     profile: 'rw',
   }),
   gestionnaire_stock: M({
-    dashboard: 'r', books: 'crud', tags: 'crud', authors: 'rw', stock: 'crud', suppliers: 'crud',
+    dashboard: 'r', books: 'crud', tags: 'crud', authors: 'rw', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     deliveries: 'crud', consignments: 'crud', legal_deposits: 'crud', profile: 'rw',
   }),
   comptable: M({
@@ -230,6 +241,7 @@ export const MODULE_LABELS = {
   tags: 'Tags curation',
   authors: 'Auteurs',
   stock: 'Stock',
+  inventory: 'Inventaire',
   suppliers: 'Fournisseurs',
   manuscripts: 'Manuscrits',
   evaluations: 'Évaluations',
@@ -260,6 +272,69 @@ export const MODULE_LABELS = {
   profile: 'Mon profil',
 };
 
+// ─── Surcharges temporaires de permissions (pilotées par le super-admin) ──────
+// Mapping module → chemins API permettant au middleware RBAC d'arbitrer une
+// surcharge. SEULS ces modules sont « surchargeables » : leur accès transite par
+// une route /api/admin/<x> gérable par la whitelist. Les autres modules de la
+// matrice (contracts hors /api/admin, pos via PIN, users via requireSuperAdmin,
+// profile personnel, faq/slides = sous-clés de config) ne sont PAS pilotables ici
+// et restent verrouillés dans l'UI.
+export const MODULE_PATHS = {
+  dashboard:      [/^\/api\/admin\/stats(\/.*)?$/],
+  books:          [/^\/api\/admin\/books(\/.*)?$/],
+  tags:           [/^\/api\/admin\/tags(\/.*)?$/],
+  authors:        [/^\/api\/admin\/authors(\/.*)?$/],
+  stock:          [/^\/api\/admin\/stock(\/.*)?$/],
+  inventory:      [/^\/api\/admin\/inventory(\/.*)?$/],
+  suppliers:      [/^\/api\/admin\/suppliers(\/.*)?$/],
+  manuscripts:    [/^\/api\/admin\/manuscripts(\/.*)?$/],
+  evaluations:    [/^\/api\/admin\/evaluations(\/.*)?$/],
+  corrections:    [/^\/api\/admin\/corrections(\/.*)?$/],
+  editorial:      [/^\/api\/admin\/editorial(\/.*)?$/],
+  covers:         [/^\/api\/admin\/covers(\/.*)?$/],
+  printing:       [/^\/api\/admin\/printing(\/.*)?$/],
+  payments:       [/^\/api\/admin\/payments(\/.*)?$/],
+  accounting:     [/^\/api\/admin\/accounting(\/.*)?$/],
+  invoices:       [/^\/api\/admin\/invoices(\/.*)?$/],
+  deliveries:     [/^\/api\/admin\/deliveries(\/.*)?$/],
+  consignments:   [/^\/api\/admin\/consignments(\/.*)?$/],
+  expenses:       [/^\/api\/admin\/expenses(\/.*)?$/],
+  orders:         [/^\/api\/admin\/orders(\/.*)?$/],
+  propals:        [/^\/api\/admin\/propals(\/.*)?$/],
+  legal_deposits: [/^\/api\/admin\/legal-deposits(\/.*)?$/],
+  config:         [/^\/api\/admin\/config(\/.*)?$/],
+  news:           [/^\/api\/admin\/news(\/.*)?$/],
+  contacts:       [/^\/api\/admin\/contact(\/.*)?$/],
+  newsletter:     [/^\/api\/admin\/newsletter(\/.*)?$/],
+  customers:      [/^\/api\/admin\/customers(\/.*)?$/],
+  activity:       [/^\/api\/admin\/activity-log(\/.*)?$/],
+};
+
+export const OVERRIDABLE_MODULES = Object.keys(MODULE_PATHS);
+export const PERMISSION_LEVELS = ['crud', 'rw', 'r', '-'];
+
+// Méthodes HTTP autorisées par niveau. 'crud' = tout (y compris DELETE).
+const LEVEL_METHODS = {
+  rw: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'],
+  r:  ['GET', 'HEAD'],
+};
+
+export function methodAllowedForLevel(level, method) {
+  if (level === 'crud') return true;
+  if (level === 'r' || level === 'rw') {
+    return LEVEL_METHODS[level].includes(String(method || '').toUpperCase());
+  }
+  return false; // '-' (aucun accès) ou niveau inconnu
+}
+
+// Retourne la clé de module surchargeable correspondant à un chemin, ou null.
+export function moduleForPath(path) {
+  for (const mod of OVERRIDABLE_MODULES) {
+    if (MODULE_PATHS[mod].some((re) => re.test(path))) return mod;
+  }
+  return null;
+}
+
 // Pour le payload JSON envoyé au frontend (RegExp non sérialisable, on n'envoie
 // que ce qui est utile à l'UI : labels, couleurs, descriptions, matrice).
 export function serializeRolesForClient() {
@@ -276,5 +351,6 @@ export function serializeRolesForClient() {
     ),
     permissions: MODULE_PERMISSIONS,
     moduleLabels: MODULE_LABELS,
+    overridableModules: OVERRIDABLE_MODULES,
   };
 }

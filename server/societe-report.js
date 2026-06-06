@@ -68,9 +68,11 @@ const TABLE_STYLES = `
   <style:style style:name="KpiTable" style:family="table"><style:table-properties style:width="16.6cm" table:align="left" fo:margin-top="0.15cm"/></style:style>
   <style:style style:name="KpiCol" style:family="table-column"><style:table-column-properties style:column-width="5.53cm"/></style:style>
   <style:style style:name="StatTable" style:family="table"><style:table-properties style:width="16.6cm" table:align="left" fo:margin-top="0.15cm"/></style:style>
-  <style:style style:name="ColStat" style:family="table-column"><style:table-column-properties style:column-width="6.6cm"/></style:style>
-  <style:style style:name="ColNb" style:family="table-column"><style:table-column-properties style:column-width="3cm"/></style:style>
-  <style:style style:name="ColAmt" style:family="table-column"><style:table-column-properties style:column-width="7cm"/></style:style>`;
+  <style:style style:name="ColStat" style:family="table-column"><style:table-column-properties style:column-width="4.6cm"/></style:style>
+  <style:style style:name="ColNb" style:family="table-column"><style:table-column-properties style:column-width="2cm"/></style:style>
+  <style:style style:name="ColAmt" style:family="table-column"><style:table-column-properties style:column-width="3.4cm"/></style:style>
+  <style:style style:name="ColAmt2" style:family="table-column"><style:table-column-properties style:column-width="3.4cm"/></style:style>
+  <style:style style:name="ColAmt3" style:family="table-column"><style:table-column-properties style:column-width="3.2cm"/></style:style>`;
 
 // ─── STYLES ──────────────────────────────────────────────────
 function buildStyles() {
@@ -189,16 +191,22 @@ function buildContent(data) {
     <table:table-cell table:style-name="TCell"><text:p>${escXml(STATUS[s.statut]?.label || s.statut)}</text:p></table:table-cell>
     <table:table-cell table:style-name="TCell"><text:p text:style-name="TCellNum">${escXml(String(s.cnt))}</text:p></table:table-cell>
     <table:table-cell table:style-name="TCell"><text:p text:style-name="TCellNum">${escXml(money(s.ttc))}</text:p></table:table-cell>
+    <table:table-cell table:style-name="TCell"><text:p text:style-name="TCellNum">${escXml(money(s.paid))}</text:p></table:table-cell>
+    <table:table-cell table:style-name="TCell"><text:p text:style-name="TCellNum">${escXml(money(s.reste))}</text:p></table:table-cell>
    </table:table-row>`).join('');
   const statusTable = `
   <table:table table:name="Stat" table:style-name="StatTable">
    <table:table-column table:style-name="ColStat"/>
    <table:table-column table:style-name="ColNb"/>
    <table:table-column table:style-name="ColAmt"/>
+   <table:table-column table:style-name="ColAmt2"/>
+   <table:table-column table:style-name="ColAmt3"/>
    <table:table-row>
     <table:table-cell table:style-name="THead"><text:p text:style-name="THeadP">Statut</text:p></table:table-cell>
     <table:table-cell table:style-name="THead"><text:p text:style-name="THeadPR">Nombre</text:p></table:table-cell>
     <table:table-cell table:style-name="THead"><text:p text:style-name="THeadPR">Montant TTC</text:p></table:table-cell>
+    <table:table-cell table:style-name="THead"><text:p text:style-name="THeadPR">Réglé</text:p></table:table-cell>
+    <table:table-cell table:style-name="THead"><text:p text:style-name="THeadPR">Reste dû</text:p></table:table-cell>
    </table:table-row>${statusRows}
   </table:table>`;
 
@@ -237,6 +245,7 @@ function buildContent(data) {
 
   <text:p text:style-name="BlockTitle">FACTURES PAR STATUT</text:p>
   ${statusTable}
+  <text:p text:style-name="Muted">« Réglé » = paiements réellement encaissés (avoirs exclus) ; « Reste dû » = solde des factures impayées. Les colonnes se totalisent en Total payé et Total impayé de la synthèse.</text:p>
 
   <text:p text:style-name="BlockTitle">ÉVOLUTION DE LA FACTURATION (12 DERNIERS MOIS)</text:p>
   ${monthlyBlock}`;

@@ -8,11 +8,11 @@ import {
 import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
   FiPercent, FiFileText, FiCalendar, FiCopy, FiExternalLink, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
-  FiPlus, FiTrash2,
+  FiPlus, FiTrash2, FiSend, FiCheck,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
-import { listContractQuotes, deleteQuote, openQuotePdf } from '../../../api/quotes';
+import { listContractQuotes, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
 import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES, CONTRACT_VALIDATE_ROLES } from '../../../hooks/useAdminRole';
 import './Contracts.css';
@@ -138,6 +138,17 @@ export default function ContractDetail() {
       loadQuotes();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur suppression');
+    }
+  };
+
+  const handleSendQuote = async (quote) => {
+    if (!window.confirm(`Marquer le devis ${quote.ref} comme envoyé à l'auteur ?\n(Pensez à lui transmettre le PDF par email.)`)) return;
+    try {
+      await markQuoteSent(quote.id);
+      toast.success('Devis marqué comme envoyé');
+      loadQuotes();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur envoi');
     }
   };
 
@@ -433,10 +444,20 @@ export default function ContractDetail() {
                       </span>
                     </div>
                     <span className="ct-quote-row-total">{Number(q.total).toLocaleString('fr-FR')} FCFA</span>
-                    <div style={{ display: 'flex', gap: 4 }}>
+                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                      {q.status === 'sent' && (
+                        <span className="ct-badge" style={{ padding: '2px 8px', background: '#10531a14', color: '#10531a', fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: 4 }} title="Devis envoyé à l'auteur">
+                          <FiCheck size={11} /> Envoyé
+                        </span>
+                      )}
                       <button onClick={() => openQuotePdf(q.id)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Ouvrir le PDF">
                         <FiDownload size={12} /> PDF
                       </button>
+                      {canManage && q.status !== 'sent' && (
+                        <button onClick={() => handleSendQuote(q)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Marquer comme envoyé à l'auteur">
+                          <FiSend size={12} /> Envoyé
+                        </button>
+                      )}
                       {canManage && q.status === 'draft' && (
                         <button onClick={() => handleDeleteQuote(q)} className="ct-btn-ghost" title="Supprimer le devis">
                           <FiTrash2 size={14} />

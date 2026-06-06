@@ -33,6 +33,7 @@ const NAV_GROUPS = [
       { path: 'tags', label: 'Tags curation', icon: <FiTag />, roles: ['super_admin', 'admin', 'editor', 'gestionnaire_stock'] },
       { path: 'authors', label: 'Auteurs', icon: <FiPenTool />, roles: ['super_admin', 'admin', 'editor', 'librarian', 'gestionnaire_stock'] },
       { path: 'stock', label: 'Stock', icon: <FiPackage />, roles: ['super_admin', 'admin', 'librarian', 'gestionnaire_stock'] },
+      { path: 'inventory', label: 'Inventaire', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'librarian', 'gestionnaire_stock'] },
       { path: 'suppliers', label: 'Fournisseurs', icon: <FiTruck />, roles: ['super_admin', 'admin', 'gestionnaire_stock'] },
     ],
   },
@@ -71,8 +72,8 @@ const NAV_GROUPS = [
     id: 'site',
     label: 'Site & contenu',
     items: [
-      { path: 'config', label: 'Configuration', icon: <FiSettings />, roles: ['super_admin', 'admin'] },
-      { path: 'slides', label: 'Bannières', icon: <FiImage />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'config', label: 'Configuration', icon: <FiSettings />, roles: ['super_admin', 'admin', 'librarian'] },
+      { path: 'slides', label: 'Bannières', icon: <FiImage />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
       { path: 'news', label: 'Actualités', icon: <FiRss />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
       { path: 'faq', label: 'FAQ', icon: <FiHelpCircle />, roles: ['super_admin', 'admin', 'librarian'] },
       { path: 'contacts', label: 'Messages', icon: <FiMail />, roles: ['super_admin', 'admin', 'librarian'] },
@@ -94,6 +95,21 @@ const NAV_GROUPS = [
 // Aplatit la nav pour les besoins de redirection et recherche active
 function flattenTabs() {
   return NAV_GROUPS.flatMap((g) => g.items);
+}
+
+// Correspondance chemin de nav → clé de module (pour les surcharges de permission).
+// La plupart des chemins == clé de module ; seuls quelques-uns diffèrent.
+const NAV_MODULE_ALIASES = { '': 'dashboard', 'legal-deposits': 'legal_deposits', devis: 'propals' };
+function navModuleKey(path) {
+  return NAV_MODULE_ALIASES[path] || path;
+}
+
+// Visibilité d'un onglet : une surcharge (octroi/retrait) prime sur les rôles de base.
+function navVisible(tab, role, overrides) {
+  const ov = overrides?.[navModuleKey(tab.path)];
+  if (ov === '-') return false;       // accès retiré temporairement → masquer
+  if (ov !== undefined) return true;  // accès accordé/modifié → afficher
+  return tab.roles.includes(role);    // comportement de base
 }
 
 // Mapping onglet → clé de compteur notification
@@ -131,6 +147,7 @@ export default function AdminDashboard() {
   const [mustChangePassword, setMustChangePassword] = useState(false);
   const [checking, setChecking] = useState(true);
   const [badges, setBadges] = useState({});
+  const [myOverrides, setMyOverrides] = useState({});
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const location = useLocation();
   const navigate = useNavigate();
@@ -141,6 +158,7 @@ export default function AdminDashboard() {
         setAdmin(res.data.username);
         setRole(res.data.role || 'admin');
         setMustChangePassword(!!res.data.mustChangePassword);
+        setMyOverrides(res.data.permissionOverrides || {});
       })
       .catch(() => { setAdmin(null); setRole(null); setMustChangePassword(false); })
       .finally(() => setChecking(false));
@@ -167,14 +185,14 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (!role) return;
     const allTabs = flattenTabs();
-    const allowed = allTabs.filter(t => t.roles.includes(role));
+    const allowed = allTabs.filter(t => navVisible(t, role, myOverrides));
     const current = location.pathname.replace('/admin', '').replace(/^\//, '');
     const isAllowed = allowed.some(t => t.path === current || (t.path && current.startsWith(t.path + '/')));
     if (!isAllowed) {
       const fallback = allowed[0]?.path || 'profile';
       navigate(`/admin/${fallback}`, { replace: true });
     }
-  }, [role, location.pathname, navigate]);
+  }, [role, myOverrides, location.pathname, navigate]);
 
   const handleLogout = async () => {
     await adminLogout().catch(() => {});
@@ -195,6 +213,8 @@ export default function AdminDashboard() {
     setAdmin(data.username);
     setRole(data.role || 'admin');
     setMustChangePassword(!!data.mustChangePassword);
+    // Récupère les surcharges de permission actives pour ce rôle (nav à jour).
+    adminMe().then((r) => setMyOverrides(r.data.permissionOverrides || {})).catch(() => {});
   };
 
   if (checking) return <div className="admin-loading"><Loader /></div>;
@@ -211,7 +231,7 @@ export default function AdminDashboard() {
 
   // Filtrer les groupes selon le rôle : ne garder que les items autorisés, masquer les groupes vides
   const visibleGroups = NAV_GROUPS
-    .map((g) => ({ ...g, items: g.items.filter((t) => t.roles.includes(role)) }))
+    .map((g) => ({ ...g, items: g.items.filter((t) => navVisible(t, role, myOverrides)) }))
     .filter((g) => g.items.length > 0);
 
   const currentPath = location.pathname.replace('/admin', '').replace(/^\//, '');

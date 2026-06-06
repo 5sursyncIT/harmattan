@@ -127,6 +127,51 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
     return rows.length ? rows[0].fk_parent : 0;
   }
 
+  // ── Helper: lit un genre (catégorie produit) par id, ou null ──
+  async function fetchGenreById(id) {
+    const [rows] = await dolibarrPool.query(
+      'SELECT rowid, label, fk_parent FROM llx_categorie WHERE rowid = ? AND type = 0 LIMIT 1',
+      [id]
+    );
+    return rows.length ? rows[0] : null;
+  }
+
+  // ── Helper: ids des produits rattachés à un genre ──
+  async function fetchGenreProductIds(genreId) {
+    const [rows] = await dolibarrPool.query(
+      'SELECT fk_product FROM llx_categorie_product WHERE fk_categorie = ?',
+      [genreId]
+    );
+    return rows.map((r) => r.fk_product);
+  }
+
+  // ── Helper: nombre de sous-genres (catégories enfants non système) ──
+  async function countGenreChildren(genreId) {
+    const [rows] = await dolibarrPool.query(
+      `SELECT COUNT(*) AS n FROM llx_categorie
+        WHERE fk_parent = ? AND type = 0 AND label NOT IN ${excludedListSql}`,
+      [genreId, ...EXCLUDED_CATEGORY_LABELS]
+    );
+    return rows[0]?.n || 0;
+  }
+
+  // ── Helper: un libellé correspond-il à une catégorie système réservée ? ──
+  function isReservedLabel(label) {
+    const target = normalizeLabel(label);
+    return EXCLUDED_CATEGORY_LABELS.some((l) => normalizeLabel(l) === target);
+  }
+
+  // ── Helper: invalide les caches liés aux catégories/genres ──
+  function invalidateCategoryCaches() {
+    if (!cache) return;
+    cache.del('categories:all');
+    for (const k of cache.keys()) {
+      if (k.startsWith('products:') || k.startsWith('suggest:') || k.startsWith('catimg:')) {
+        cache.del(k);
+      }
+    }
+  }
+
   // ── Helper: check ISBN uniqueness (exclude self for updates) ──
   async function isIsbnDuplicate(isbn, excludeId = null) {
     const [rows] = await dolibarrPool.query(
@@ -163,6 +208,43 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
         options_editeur: normalized.editeur,
       },
     };
+  }
+
+  // ── Helper: marqueur « Ouvrage à paraître » (table SQLite book_upcoming) ──
+  // Pilote la section home + la précommande directement depuis la fiche produit.
+  function normalizeReleaseDate(v) {
+    if (!v) return null;
+    const s = String(v).trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+  }
+
+  function syncUpcomingFlag(productId, body) {
+    const isUpcoming = body?.is_upcoming === true || body?.is_upcoming === 'true'
+      || body?.is_upcoming === 1 || body?.is_upcoming === '1';
+
+    if (!isUpcoming) {
+      db.prepare('DELETE FROM book_upcoming WHERE product_id = ?').run(productId);
+      cache?.del('upcoming_books:public');
+      return;
+    }
+
+    const releaseDate = normalizeReleaseDate(body?.release_date);
+    const summary = typeof body?.upcoming_summary === 'string'
+      ? body.upcoming_summary.trim().slice(0, 2000) : '';
+    let pct = parseFloat(body?.preorder_discount_pct);
+    if (!Number.isFinite(pct) || pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    db.prepare(`
+      INSERT INTO book_upcoming (product_id, release_date, summary, preorder_discount_pct, updated_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(product_id) DO UPDATE SET
+        release_date = excluded.release_date,
+        summary = excluded.summary,
+        preorder_discount_pct = excluded.preorder_discount_pct,
+        updated_at = datetime('now')
+    `).run(productId, releaseDate, summary, pct);
+    cache?.del('upcoming_books:public');
   }
 
   // ══════════════════════════════════════════════════════
@@ -306,9 +388,19 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
       const params = [];
 
       if (q) {
-        conditions.push('(p.label LIKE ? OR p.ref LIKE ? OR p.barcode LIKE ? OR pe.auteur LIKE ?)');
         const like = `%${q}%`;
-        params.push(like, like, like, like);
+        // Un livre peut porter plusieurs ISBN (rééditions/réimpressions L'Harmattan) :
+        // l'ISBN alternatif figure souvent dans la description et non dans ref/barcode.
+        // Quand la requête ressemble à un ISBN (≥10 chiffres), on cherche aussi la
+        // description, sur les seuls chiffres, pour tolérer tirets/espaces saisis.
+        const digits = String(q).replace(/[^0-9Xx]/g, '');
+        if (digits.length >= 10) {
+          conditions.push('(p.label LIKE ? OR p.ref LIKE ? OR p.barcode LIKE ? OR pe.auteur LIKE ? OR p.description LIKE ?)');
+          params.push(like, like, like, like, `%${digits}%`);
+        } else {
+          conditions.push('(p.label LIKE ? OR p.ref LIKE ? OR p.barcode LIKE ? OR pe.auteur LIKE ?)');
+          params.push(like, like, like, like);
+        }
       }
 
       const joins = ['FROM llx_product p', 'LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid'];
@@ -447,6 +539,29 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
   });
 
   // ══════════════════════════════════════════════════════
+  // GET /api/admin/books/genres — Liste des genres + nb de livres liés
+  // ⚠ Placé AVANT GET /:id pour ne pas être capturé par la route paramétrée.
+  // ══════════════════════════════════════════════════════
+  router.get('/genres', auth, async (req, res) => {
+    try {
+      const [rows] = await dolibarrPool.query(
+        `SELECT c.rowid AS id, c.label,
+                (SELECT COUNT(*) FROM llx_categorie_product cp WHERE cp.fk_categorie = c.rowid) AS count
+           FROM llx_categorie c
+          WHERE c.type = 0 AND c.label NOT IN ${excludedListSql}`,
+        EXCLUDED_CATEGORY_LABELS
+      );
+      const genres = rows
+        .map((r) => ({ id: r.rowid, label: decodeEntitiesServer(r.label), count: Number(r.count) || 0 }))
+        .sort((a, b) => a.label.localeCompare(b.label, 'fr'));
+      res.json({ genres });
+    } catch (err) {
+      console.error('[BOOKS] GET /genres error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement des genres' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
   // GET /api/admin/books/:id — Détail complet (multi-catégories)
   // ══════════════════════════════════════════════════════
   router.get('/:id', auth, async (req, res) => {
@@ -490,9 +605,18 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
 
       const description = p.longdescript || p.description || '';
 
+      // Marqueur « à paraître » (table SQLite) pour pré-remplir le formulaire
+      const upcoming = db.prepare(
+        'SELECT release_date, summary, preorder_discount_pct FROM book_upcoming WHERE product_id = ?'
+      ).get(id);
+
       res.json({
         id: p.id,
         title: p.label,
+        is_upcoming: !!upcoming,
+        release_date: upcoming?.release_date || '',
+        upcoming_summary: upcoming?.summary || '',
+        preorder_discount_pct: upcoming?.preorder_discount_pct || 0,
         author_nom,
         author_prenom,
         isbn: p.barcode || p.ref,
@@ -566,13 +690,145 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
       );
       const storedLabel = row.length ? decodeEntitiesServer(row[0].label) : label;
 
-      // Invalide le cache catégories partagé (/api/categories) pour rafraîchir partout
-      cache.del('categories:all');
+      // Invalide les caches catégories partagés pour rafraîchir partout
+      invalidateCategoryCaches();
 
       res.status(201).json({ id: newId, label: storedLabel });
     } catch (err) {
       console.error('[BOOKS] POST /genres error:', err.response?.data || err.message);
       res.status(500).json({ error: 'Erreur lors de la création du genre' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
+  // PUT /api/admin/books/genres/:id — Renomme un genre
+  // (catégorie produit Dolibarr ; mêmes garde-fous que la création)
+  // ══════════════════════════════════════════════════════
+  router.put('/genres/:id', auth, csrfProtection, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'ID invalide' });
+
+      const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+      if (!label) return res.status(400).json({ error: 'Le nom du genre est obligatoire' });
+      if (label.length > 80) return res.status(400).json({ error: 'Nom de genre trop long (80 caractères maximum)' });
+      if (isReservedLabel(label)) {
+        return res.status(400).json({ error: 'Ce nom est réservé et ne peut pas être utilisé comme genre' });
+      }
+
+      const genre = await fetchGenreById(id);
+      if (!genre || isReservedLabel(genre.label)) {
+        return res.status(404).json({ error: 'Genre introuvable' });
+      }
+
+      // Anti-doublon insensible casse/accents/entités sur les AUTRES genres
+      const target = normalizeLabel(label);
+      const [existing] = await dolibarrPool.query(
+        `SELECT rowid, label FROM llx_categorie WHERE type = 0 AND rowid != ? AND label NOT IN ${excludedListSql}`,
+        [id, ...EXCLUDED_CATEGORY_LABELS]
+      );
+      const dup = existing.find((c) => normalizeLabel(c.label) === target);
+      if (dup) {
+        return res.status(409).json({
+          error: `Le genre « ${decodeEntitiesServer(dup.label)} » existe déjà`,
+          genre: { id: dup.rowid, label: decodeEntitiesServer(dup.label) },
+        });
+      }
+
+      await adminApi.put(`/categories/${id}`, { label });
+
+      // Relit le libellé canonique stocké (Dolibarr peut ré-encoder les accents)
+      const [row] = await dolibarrPool.query('SELECT label FROM llx_categorie WHERE rowid = ? LIMIT 1', [id]);
+      const storedLabel = row.length ? decodeEntitiesServer(row[0].label) : label;
+
+      invalidateCategoryCaches();
+      res.json({ id, label: storedLabel });
+    } catch (err) {
+      console.error('[BOOKS] PUT /genres error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur lors du renommage du genre' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
+  // DELETE /api/admin/books/genres/:id — Supprime un genre
+  // Query: ?reassignTo=<id>  → réaffecte d'abord les livres vers ce genre (fusion)
+  //        ?force=1          → supprime même si des livres y sont rattachés
+  // Sans l'un ni l'autre, un genre utilisé renvoie 409 (anti-suppression silencieuse).
+  // ══════════════════════════════════════════════════════
+  router.delete('/genres/:id', auth, csrfProtection, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'ID invalide' });
+
+      const genre = await fetchGenreById(id);
+      if (!genre || isReservedLabel(genre.label)) {
+        return res.status(404).json({ error: 'Genre introuvable' });
+      }
+
+      // Refuse si le genre a des sous-genres (éviter d'orphaniser l'arborescence)
+      const children = await countGenreChildren(id);
+      if (children > 0) {
+        return res.status(409).json({
+          error: `Ce genre contient ${children} sous-genre(s) : renommez-les ou supprimez-les d'abord`,
+        });
+      }
+
+      const reassignTo = req.query.reassignTo ? parseInt(req.query.reassignTo, 10) : null;
+      const force = req.query.force === '1' || req.query.force === 'true';
+
+      const productIds = await fetchGenreProductIds(id);
+
+      // Cas fusion : valide la destination puis relie les livres avant suppression
+      let reassigned = 0;
+      if (reassignTo) {
+        if (reassignTo === id) {
+          return res.status(400).json({ error: 'Le genre de destination doit être différent' });
+        }
+        const dest = await fetchGenreById(reassignTo);
+        if (!dest || isReservedLabel(dest.label)) {
+          return res.status(400).json({ error: 'Genre de destination invalide' });
+        }
+        const destProducts = new Set(await fetchGenreProductIds(reassignTo));
+        for (const pid of productIds) {
+          if (destProducts.has(pid)) continue; // déjà dans la destination
+          try {
+            await adminApi.post(`/categories/${reassignTo}/objects/product/${pid}`);
+            reassigned += 1;
+          } catch (linkErr) {
+            console.warn(`[BOOKS] reassign p=${pid} → cat ${reassignTo} failed:`, linkErr.message);
+          }
+        }
+      } else if (productIds.length > 0 && !force) {
+        // Anti-suppression silencieuse d'un genre utilisé
+        return res.status(409).json({
+          error: `Ce genre est utilisé par ${productIds.length} livre(s)`,
+          count: productIds.length,
+        });
+      }
+
+      // Détache le genre de tous ses livres (état propre quelle que soit la cascade Dolibarr)
+      for (const pid of productIds) {
+        try {
+          await adminApi.delete(`/categories/${id}/objects/product/${pid}`);
+        } catch (unlinkErr) {
+          console.warn(`[BOOKS] unlink p=${pid} from cat ${id} failed:`, unlinkErr.message);
+        }
+      }
+
+      await adminApi.delete(`/categories/${id}`);
+
+      invalidateCategoryCaches();
+      res.json({
+        id,
+        deleted: true,
+        label: decodeEntitiesServer(genre.label),
+        unlinked: productIds.length,
+        reassigned: reassignTo ? reassigned : 0,
+        reassignedTo: reassignTo || null,
+      });
+    } catch (err) {
+      console.error('[BOOKS] DELETE /genres error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur lors de la suppression du genre' });
     }
   });
 
@@ -638,6 +894,10 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
         : syncBookAuthorsLink(newProductId, [result.normalized.author_nom, result.normalized.author_prenom].filter(Boolean).join(' ').trim());
 
       invalidateProductCache(newProductId, result.normalized.isbn);
+
+      // Marqueur « Ouvrage à paraître » (non bloquant)
+      try { syncUpcomingFlag(newProductId, req.body); }
+      catch (e) { console.warn('[BOOKS] syncUpcomingFlag (create) échec:', e.message); }
 
       res.status(201).json({
         id: newProductId,
@@ -740,6 +1000,10 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
       const authorLink = explicitAuthorIdsPut.length > 0
         ? syncBookAuthorsLinks(id, explicitAuthorIdsPut)
         : syncBookAuthorsLink(id, [result.normalized.author_nom, result.normalized.author_prenom].filter(Boolean).join(' ').trim());
+
+      // Marqueur « Ouvrage à paraître » (non bloquant)
+      try { syncUpcomingFlag(id, req.body); }
+      catch (e) { console.warn('[BOOKS] syncUpcomingFlag (update) échec:', e.message); }
 
       // Si la sync des genres a partiellement échoué, le signaler explicitement
       if (genreFailures.unlink.length > 0 || genreFailures.link.length > 0) {
@@ -850,6 +1114,32 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
         overwriteifexists: 1,
         createdirifnotexists: 1,
       });
+
+      // Règle « 1 recto + 1 verso » : on supprime les autres images du MÊME côté
+      // (sinon chaque upload horodaté s'accumule — ex. doublons issus de la migration).
+      // Non bloquant : un échec de nettoyage n'invalide pas l'upload réussi.
+      try {
+        const listRes = await adminApi.get('/documents', { params: { modulepart: 'produit', id } });
+        const isVerso = (n) => /(^|[-_. ])(verso|back|dos|arriere|arrière)([-_. ]|\.)/i.test(n);
+        const stale = (listRes.data || []).filter((d) => {
+          const n = d.name || '';
+          if (n === filename) return false;                          // garder le fichier qu'on vient d'uploader
+          if (!/\.(jpg|jpeg|png|gif|webp)$/i.test(n)) return false;  // images uniquement
+          if (n.startsWith('default_cover')) return false;           // placeholder Dolibarr
+          return side === 'verso' ? isVerso(n) : !isVerso(n);        // même côté que l'upload
+        });
+        for (const d of stale) {
+          try {
+            await adminApi.delete('/documents', {
+              params: { modulepart: 'produit', original_file: `${ref}/${d.name}` },
+            });
+          } catch (delErr) {
+            console.warn(`[BOOKS] cover cleanup: échec suppression ${d.name}:`, delErr.response?.data?.error || delErr.message);
+          }
+        }
+      } catch (listErr) {
+        console.warn('[BOOKS] cover cleanup: liste documents échouée:', listErr.message);
+      }
 
       invalidateProductCache(id, ref);
 

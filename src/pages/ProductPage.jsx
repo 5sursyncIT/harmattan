@@ -209,9 +209,18 @@ export default function ProductPage() {
   const stock = parseFloat(product.stock_reel || 0);
   const upcomingBook = getMatchingUpcomingBook(config, product.id);
   const publicationDate = upcomingBook?.release_date || getPublicationDate(product);
+  // Caractéristiques structurées (extrafields Dolibarr) affichées sous l'ISBN
+  const rawPages = product.array_options?.options_nombre_pages;
+  const nombrePages = rawPages && Number(rawPages) > 0 ? String(rawPages) : null;
+  const editeur = (product.array_options?.options_editeur || '').trim() || null;
+  const publicationYear = (product.array_options?.options_publication_year || '').toString().trim() || null;
+  const parution = publicationDate || publicationYear;
   const ribbon = product.array_options?.options_livre_du_mois_ribbon;
   const releaseDateLabel = formatReleaseDate(publicationDate);
-  const isUpcoming = isUpcomingRelease(publicationDate);
+  // « À paraître » dès que l'ouvrage est explicitement flaggé dans l'admin
+  // (présent dans upcoming_books), même si sa date est « à confirmer » ou déjà
+  // passée. La date seule ne suffit pas (cf. parution annoncée par année).
+  const isUpcoming = Boolean(upcomingBook) || isUpcomingRelease(publicationDate);
   const preorderDiscountRate = Number(upcomingBook?.preorder_discount_pct || 0);
   const preorderUnitPrice = Math.max(0, Number(price) * (1 - preorderDiscountRate / 100));
   const preorderTotal = preorderUnitPrice * Number(preorderForm.quantity || 1);
@@ -336,7 +345,9 @@ export default function ProductPage() {
               <div className="preorder-panel">
                 <div className="preorder-badge">Précommandes ouvertes</div>
                 <p className="preorder-copy">
-                  Cet ouvrage est annoncé pour le {releaseDateLabel}. Réservez votre exemplaire dès maintenant.
+                  {upcomingBook?.release_date
+                    ? `Cet ouvrage est annoncé pour le ${formatReleaseDate(upcomingBook.release_date)}. Réservez votre exemplaire dès maintenant.`
+                    : 'Cet ouvrage paraîtra prochainement (date à confirmer). Réservez votre exemplaire dès maintenant.'}
                 </p>
                 <div className="preorder-price-row">
                   {preorderDiscountRate > 0 ? (
@@ -474,10 +485,22 @@ export default function ProductPage() {
                   <span>{ref}</span>
                 </div>
               )}
-              {publicationDate && (
+              {nombrePages && (
                 <div className="meta-item">
-                  <span className="meta-label">Date de publication</span>
-                  <span>{publicationDate}</span>
+                  <span className="meta-label">Nombre de pages</span>
+                  <span>{nombrePages}</span>
+                </div>
+              )}
+              {parution && (
+                <div className="meta-item">
+                  <span className="meta-label">Date de parution</span>
+                  <span>{parution}</span>
+                </div>
+              )}
+              {editeur && (
+                <div className="meta-item">
+                  <span className="meta-label">Maison d'édition</span>
+                  <span>{editeur}</span>
                 </div>
               )}
             </div>

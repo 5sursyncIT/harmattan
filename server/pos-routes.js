@@ -493,9 +493,17 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       let where = 'WHERE p.tosell = 1';
 
       if (q.trim()) {
-        where += ' AND (p.ref LIKE ? OR p.label LIKE ? OR p.barcode LIKE ?)';
         const term = `%${q.trim()}%`;
-        params.push(term, term, term);
+        // ISBN alternatif (réédition L'Harmattan) souvent présent dans la description :
+        // si la requête ressemble à un ISBN, on y cherche aussi (chiffres seuls).
+        const digits = String(q).replace(/[^0-9Xx]/g, '');
+        if (digits.length >= 10) {
+          where += ' AND (p.ref LIKE ? OR p.label LIKE ? OR p.barcode LIKE ? OR p.description LIKE ?)';
+          params.push(term, term, term, `%${digits}%`);
+        } else {
+          where += ' AND (p.ref LIKE ? OR p.label LIKE ? OR p.barcode LIKE ?)';
+          params.push(term, term, term);
+        }
       }
 
       if (category) {

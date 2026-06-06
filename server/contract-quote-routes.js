@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
+import { logManuscriptEvent } from './manuscript-workflow.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -57,6 +58,14 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     if (!dolibarrPool) return true; // pas de pool injecté → on ne bloque pas (dégradé)
     const [rows] = await dolibarrPool.query('SELECT rowid FROM llx_contrat WHERE rowid = ? LIMIT 1', [contractId]);
     return rows.length > 0;
+  }
+
+  // Remonte du contrat (Dolibarr rowid) vers le manuscrit lié, s'il existe, afin
+  // de tracer les évènements devis sur la frise du manuscrit (best-effort).
+  function manuscriptIdForContract(contractId) {
+    try {
+      return db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(contractId)?.id || null;
+    } catch (e) { void e; return null; }
   }
 
   // Ensure table exists
@@ -172,6 +181,16 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'create_quote', `Devis ${ref} (contrat #${contractId}) — total ${total} FCFA`);
 
+      // Trace sur la frise du manuscrit lié (ne bloque pas la création du devis)
+      try {
+        const msId = manuscriptIdForContract(contractId);
+        if (msId) {
+          logManuscriptEvent(db, msId, 'quote_created',
+            { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+            `Devis ${ref} — ${total.toLocaleString('fr-FR')} FCFA`);
+        }
+      } catch (e) { console.warn('Manuscript event (quote_created) warning:', e.message); }
+
       res.status(201).json({ id, ref, total });
     } catch (err) {
       console.error('Create quote error:', err.message);
@@ -255,10 +274,16 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       const rowMatch = content.match(rowRegex);
       if (rowMatch) {
         const tpl = rowMatch[0];
-        const rows = items.map(item => tpl
-          .split('{ITEM_LABEL}').join(escapeXml(item.label))
-          .split('{ITEM_PRICE}').join(escapeXml(parseInt(item.price).toLocaleString('fr-FR'))),
-        ).join('');
+        const rows = items.map((item, i) => {
+          let row = tpl
+            .split('{ITEM_LABEL}').join(escapeXml(item.label))
+            .split('{ITEM_PRICE}').join(escapeXml(parseInt(item.price).toLocaleString('fr-FR')));
+          // Zébrage : une ligne sur deux bascule sur le style à fond vert très pâle.
+          // (Le remplacement cible le style de cellule "QuoteCell" sans toucher
+          //  "QuoteCellText"/"QuoteCellPrice" grâce aux guillemets englobants.)
+          if (i % 2 === 1) row = row.split('"QuoteCell"').join('"QuoteCellAlt"');
+          return row;
+        }).join('');
         content = content.replace(tpl, rows);
       }
 
@@ -301,19 +326,57 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     }
   });
 
+  // POST /api/quotes/:id/send — marque le devis comme envoyé à l'auteur.
+  // (Il n'y a pas d'envoi email automatique : le PDF est transmis manuellement ;
+  //  ce clic enregistre l'envoi sur la frise du manuscrit.)
+  router.post('/quotes/:id/send', auth, csrfProtection, (req, res) => {
+    try {
+      const quote = db.prepare('SELECT id, ref, contract_id, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
+      if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
+
+      db.prepare("UPDATE contract_quotes SET status = 'sent' WHERE id = ?").run(quote.id);
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'send_quote', `Devis ${quote.ref} marqué envoyé`);
+
+      try {
+        const msId = manuscriptIdForContract(quote.contract_id);
+        if (msId) {
+          logManuscriptEvent(db, msId, 'quote_sent',
+            { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+            `Devis ${quote.ref} envoyé à l'auteur`);
+        }
+      } catch (e) { console.warn('Manuscript event (quote_sent) warning:', e.message); }
+
+      res.json({ success: true, status: 'sent' });
+    } catch (err) {
+      console.error('Send quote error:', err.message);
+      res.status(500).json({ error: 'Erreur envoi devis' });
+    }
+  });
+
   // DELETE /api/quotes/:id — draft only
   router.delete('/quotes/:id', auth, csrfProtection, (req, res) => {
     try {
       if (!QUOTE_DELETE_ROLES.includes(req.admin.role || 'admin')) {
         return res.status(403).json({ error: 'Suppression non autorisée pour votre profil' });
       }
-      const quote = db.prepare('SELECT id, ref, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
+      const quote = db.prepare('SELECT id, ref, contract_id, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
       if (quote.status !== 'draft') return res.status(400).json({ error: 'Seuls les brouillons peuvent être supprimés' });
 
       db.prepare('DELETE FROM contract_quotes WHERE id = ?').run(quote.id);
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'delete_quote', `Devis ${quote.ref}`);
+
+      try {
+        const msId = manuscriptIdForContract(quote.contract_id);
+        if (msId) {
+          logManuscriptEvent(db, msId, 'quote_deleted',
+            { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+            `Devis ${quote.ref} supprimé`);
+        }
+      } catch (e) { console.warn('Manuscript event (quote_deleted) warning:', e.message); }
+
       res.json({ success: true });
     } catch (err) {
       console.error('Delete quote error:', err.message);

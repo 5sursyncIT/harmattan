@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
-import { transition, STAGE_LABELS, MANUSCRIPT_STAGES } from './manuscript-workflow.js';
+import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS } from './manuscript-workflow.js';
 import { notifyTransition, sendAssignmentEmail } from './manuscript-emails.js';
 import { createManuscriptMulter } from './author-routes.js';
 import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS } from './intervenants.js';
@@ -207,7 +207,12 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     res.json({
       manuscript: describeManuscript(manuscript),
       files,
-      stages: stages.map((s) => ({ ...s, stage_label: STAGE_LABELS[s.to_stage] || s.to_stage })),
+      stages: stages.map((s) => ({
+        ...s,
+        stage_label: s.event
+          ? (MANUSCRIPT_EVENTS[s.event]?.label || s.event)
+          : (STAGE_LABELS[s.to_stage] || s.to_stage),
+      })),
       evaluations,
       validations,
     });

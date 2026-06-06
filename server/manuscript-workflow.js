@@ -50,6 +50,21 @@ export const STAGE_LABELS = {
   printed: 'Imprimé',
 };
 
+/**
+ * Évènements « informatifs » de la frise. Contrairement aux stages (machine à
+ * états), un évènement S'AJOUTE à l'historique sans faire avancer current_stage.
+ * Sert à tracer des actions transverses au workflow : envoi de devis,
+ * transmission du contrat à l'auteur, etc. La clé est stockée dans la colonne
+ * manuscript_stages.event ; from_stage = to_stage = stage courant.
+ *   authorVisible : visible dans l'espace auteur (sinon réservé à l'admin).
+ */
+export const MANUSCRIPT_EVENTS = {
+  quote_created:     { label: 'Devis généré',                authorVisible: false },
+  quote_sent:        { label: "Devis envoyé à l'auteur",     authorVisible: true },
+  quote_deleted:     { label: 'Devis supprimé',              authorVisible: false },
+  contract_doc_sent: { label: "Document de contrat envoyé",  authorVisible: true },
+};
+
 export const STAGE_ACTORS = {
   submitted: 'admin',
   in_evaluation: 'evaluateur',
@@ -215,4 +230,34 @@ export function transition(db, manuscriptId, toStage, actor, payload = {}) {
   tx();
 
   return db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(manuscriptId);
+}
+
+/**
+ * Journalise un évènement informatif sur la frise d'un manuscrit, SANS
+ * transition d'état. Insère une ligne manuscript_stages avec `event` renseigné
+ * et from_stage = to_stage = current_stage (pour ne pas perturber les lecteurs
+ * de to_stage : la ligne est neutre du point de vue de la machine à états).
+ * No-op silencieux si l'évènement est inconnu ou le manuscrit introuvable —
+ * la journalisation ne doit jamais faire échouer l'action métier appelante.
+ *
+ * @param {*} db better-sqlite3
+ * @param {number} manuscriptId
+ * @param {string} eventKey   clé dans MANUSCRIPT_EVENTS
+ * @param {{ role?: string, id?: number, label?: string }} actor
+ * @param {string} [note]
+ * @returns {boolean} true si une ligne a été insérée
+ */
+export function logManuscriptEvent(db, manuscriptId, eventKey, actor = {}, note = null) {
+  if (!manuscriptId || !MANUSCRIPT_EVENTS[eventKey]) return false;
+  const manuscript = db.prepare('SELECT current_stage FROM manuscripts WHERE id = ?').get(manuscriptId);
+  if (!manuscript) return false;
+  const stage = manuscript.current_stage;
+  db.prepare(`INSERT INTO manuscript_stages
+    (manuscript_id, from_stage, to_stage, actor_role, actor_id, actor_label, note, event)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    manuscriptId, stage, stage,
+    actor.role || 'system', actor.id || null, actor.label || null,
+    note, eventKey,
+  );
+  return true;
 }

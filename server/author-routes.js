@@ -5,7 +5,7 @@ import { mkdirSync, existsSync, renameSync } from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
-import { generateManuscriptRef, transition, STAGE_LABELS } from './manuscript-workflow.js';
+import { generateManuscriptRef, transition, STAGE_LABELS, MANUSCRIPT_EVENTS } from './manuscript-workflow.js';
 import { notifyTransition, sendTransitionEmail, getAuthorPreferences } from './manuscript-emails.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -555,7 +555,16 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     const evaluations = db.prepare('SELECT verdict, recommendation, created_at FROM manuscript_evaluations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     res.json({
       manuscript: { ...manuscript, stage_label: STAGE_LABELS[manuscript.current_stage] || manuscript.current_stage },
-      stages: stages.map((s) => ({ ...s, stage_label: STAGE_LABELS[s.to_stage] || s.to_stage })),
+      stages: stages
+        // L'auteur ne voit que les transitions de stage + les évènements qui le concernent
+        // (devis envoyé, contrat transmis) — pas les actions internes (devis généré/supprimé).
+        .filter((s) => !s.event || MANUSCRIPT_EVENTS[s.event]?.authorVisible)
+        .map((s) => ({
+          ...s,
+          stage_label: s.event
+            ? (MANUSCRIPT_EVENTS[s.event]?.label || s.event)
+            : (STAGE_LABELS[s.to_stage] || s.to_stage),
+        })),
       files,
       validations,
       evaluations,

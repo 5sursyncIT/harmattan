@@ -2,14 +2,14 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   FiArrowLeft, FiMail, FiPhone, FiMapPin, FiEye, FiDollarSign,
-  FiFileText, FiClipboard, FiCreditCard, FiRefreshCw, FiUser, FiEdit3, FiTrash2,
+  FiFileText, FiClipboard, FiCreditCard, FiRefreshCw, FiUser, FiEdit3, FiTrash2, FiBookOpen,
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import Loader from '../../../components/common/Loader';
 import PdfViewerModal from '../../../components/admin/PdfViewerModal';
 import InvoicePayModal from '../../../components/admin/InvoicePayModal';
 import TiersFormModal from '../../../components/admin/TiersFormModal';
-import { getAdminSociete, getAdminSocieteInvoices, deleteAdminSociete } from '../../../api/admin';
+import { getAdminSociete, getAdminSocieteInvoices, deleteAdminSociete, promoteSocieteToAuthor } from '../../../api/admin';
 import { getPageItems } from '../../../utils/pagination';
 
 const INV_PAGE_SIZE = 25;
@@ -73,10 +73,26 @@ export default function SocieteDetailPage() {
   const [pdfView, setPdfView] = useState(null);
   const [payInvoice, setPayInvoice] = useState(null); // facture en cours de paiement
   const [editing, setEditing] = useState(false);
+  const [promoting, setPromoting] = useState(false);
   // Factures paginées (un tiers peut en avoir des milliers)
   const [invoices, setInvoices] = useState([]);
   const [invPage, setInvPage] = useState(0);
   const [invLoading, setInvLoading] = useState(false);
+
+  const handlePromoteAuthor = async () => {
+    if (!data?.societe || promoting) return;
+    if (!window.confirm(`Transformer « ${data.societe.nom} » en fiche auteur ?`)) return;
+    setPromoting(true);
+    try {
+      const r = await promoteSocieteToAuthor(id);
+      toast.success(r.data?.created === false ? 'Tiers déjà lié à un auteur' : 'Fiche auteur créée');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur transformation en auteur');
+    } finally {
+      setPromoting(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!data?.societe) return;
@@ -116,7 +132,7 @@ export default function SocieteDetailPage() {
   if (loading) return <Loader />;
   if (!data) return <div className="admin-panel">Tiers introuvable</div>;
 
-  const { societe, invoiceTotals, quotes, quoteTotals, webAccount } = data;
+  const { societe, invoiceTotals, quotes, quoteTotals, webAccount, authorAccount } = data;
   const invTotalPages = Math.ceil((invoiceTotals?.count || 0) / INV_PAGE_SIZE);
 
   const tabs = [
@@ -149,6 +165,15 @@ export default function SocieteDetailPage() {
             </button>
           )}
           <button className="btn btn-outline" onClick={load}><FiRefreshCw /> Actualiser</button>
+          {authorAccount ? (
+            <Link className="btn btn-outline" to="/admin/authors" title={`Fiche auteur #${authorAccount.id}`}>
+              <FiBookOpen /> Auteur ✓
+            </Link>
+          ) : (
+            <button className="btn btn-outline" onClick={handlePromoteAuthor} disabled={promoting}>
+              <FiBookOpen /> {promoting ? 'Transformation…' : 'Transformer en auteur'}
+            </button>
+          )}
           <button className="btn btn-outline" onClick={() => setEditing(true)}><FiEdit3 /> Modifier</button>
           <button className="btn btn-outline" onClick={handleDelete} style={{ color: '#dc2626', borderColor: '#fecaca' }}>
             <FiTrash2 /> Supprimer

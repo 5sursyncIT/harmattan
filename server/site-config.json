@@ -73,38 +73,7 @@
       "isBanner": true
     }
   ],
-  "upcoming_books": [
-    {
-      "title": "Les mémoires du baobab",
-      "author": "Aminata Diop",
-      "release_date": "2026-05-15",
-      "summary": "Un roman de transmission entre Dakar et Saint-Louis, porté par une voix féminine contemporaine et une mémoire familiale vibrante.",
-      "cover": "",
-      "product_id": "",
-      "preorder_discount_pct": 0,
-      "link": "/catalogue"
-    },
-    {
-      "title": "Repenser la cité africaine",
-      "author": "Mamadou Ndiaye",
-      "release_date": "2026-06-03",
-      "summary": "Un essai sur les nouvelles dynamiques urbaines, l’habitat, la mobilité et les imaginaires politiques des métropoles africaines.",
-      "cover": "",
-      "product_id": "",
-      "preorder_discount_pct": 0,
-      "link": "/catalogue"
-    },
-    {
-      "title": "Paroles de mangrove",
-      "author": "Seynabou Faye",
-      "release_date": "2026-06-24",
-      "summary": "Un recueil poétique qui explore les paysages du littoral, les gestes du quotidien et les voix intérieures d’une génération en mouvement.",
-      "cover": "",
-      "product_id": "",
-      "preorder_discount_pct": 0,
-      "link": "/catalogue"
-    }
-  ],
+  "upcoming_books": [],
   "faq": [
     {
       "category": "Commandes",
@@ -202,6 +171,14 @@
       "icon": "🏦",
       "enabled": true,
       "instructions": "Banque : CBAO CLAIR DE LUNE\nIBAN : **SN08 SN012 01212 036199352101 46**\nSWIFT : CBAOSNDA\nRéférence : votre nom"
+    },
+    {
+      "id": "boutique",
+      "label": "Paiement en boutique",
+      "subtitle": "Réglez et retirez sur place",
+      "icon": "🏬",
+      "enabled": true,
+      "instructions": "Réglez votre commande directement à la librairie L'Harmattan Sénégal. Votre ouvrage vous sera remis sur place."
     },
     {
       "id": "orange_money",

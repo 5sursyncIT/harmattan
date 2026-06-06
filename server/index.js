@@ -558,6 +558,8 @@ function requireCustomerAuth(req, res, next) {
 // ─── PAYTECH columns migration (idempotent) ─────────────────
 import { migrateAddPaytechColumns } from './migrations/add-paytech-columns.js';
 migrateAddPaytechColumns(db);
+import { migrateAddUpcomingBooks } from './migrations/add-upcoming-books.js';
+migrateAddUpcomingBooks(db);
 
 // ─── DOLIBARR WEBHOOK SYNC ──────────────────────────────────
 const WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
@@ -845,6 +847,23 @@ function getSiteConfig() {
 }
 
 function getUpcomingBookConfig(productId, config = getSiteConfig()) {
+  // Source de vérité : le catalogue (table book_upcoming, pilotée depuis /admin/books).
+  try {
+    const row = db.prepare(
+      'SELECT release_date, summary, preorder_discount_pct FROM book_upcoming WHERE product_id = ?'
+    ).get(Number(productId));
+    if (row) {
+      return {
+        product_id: String(productId),
+        release_date: row.release_date || '',
+        summary: row.summary || '',
+        preorder_discount_pct: row.preorder_discount_pct || 0,
+        link: `/produit/${productId}`,
+      };
+    }
+  } catch (e) { void e; }
+
+  // Rétrocompat : ancienne liste manuelle dans site-config.json
   const expectedLink = `/produit/${productId}`;
   return (config.upcoming_books || []).find((book) =>
     String(book?.product_id || '') === String(productId) || String(book?.link || '').trim() === expectedLink
@@ -1646,6 +1665,16 @@ try {
   console.log('[STOCK] Stock & suppliers routes mounted');
 } catch (err) {
   console.error('[STOCK] Failed to mount stock routes:', err);
+}
+
+// ─── INVENTAIRE PHYSIQUE (comptage de stock) ─────────────────
+import { createInventoryRouter } from './inventory-routes.js';
+try {
+  const inventoryAuth = adminAuth(db);
+  app.use('/api/admin/inventory', createInventoryRouter({ db, dolibarrPool, auth: inventoryAuth, csrfProtection }));
+  console.log('[INVENTORY] Inventory routes mounted');
+} catch (err) {
+  console.error('[INVENTORY] Failed to mount inventory routes:', err);
 }
 
 // ─── DÉPÔT LÉGAL MODULE ─────────────────────────────────────

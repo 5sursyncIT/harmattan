@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { FiPlus, FiSearch, FiBook, FiAlertCircle, FiImage } from 'react-icons/fi';
+import { FiPlus, FiSearch, FiBook, FiAlertCircle, FiImage, FiTag } from 'react-icons/fi';
 import { listBooks, getBook, getBookQualityStats } from '../../../api/admin';
 import { getProductImageUrl } from '../../../api/dolibarr';
 import { getPageItems } from '../../../utils/pagination';
 import BookForm from './BookForm';
+import GenreManager from './GenreManager';
 import './BooksPanel.css';
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -22,6 +23,7 @@ export default function BooksPanel() {
   const [mode, setMode] = useState('list');
   const [coverVersion, setCoverVersion] = useState({});
   const [justUpdatedAt, setJustUpdatedAt] = useState(null);
+  const [showGenres, setShowGenres] = useState(false);
 
   // Conformité globale catalogue
   const [qualityGlobal, setQualityGlobal] = useState(null);
@@ -169,6 +171,9 @@ export default function BooksPanel() {
             aria-label="Rechercher un livre"
           />
         </label>
+        <button className="btn btn-outline" onClick={() => setShowGenres(true)} type="button">
+          <FiTag aria-hidden="true" /> Gérer les genres
+        </button>
         <button className="btn btn-primary" onClick={handleCreate} type="button">
           <FiPlus aria-hidden="true" /> Nouveau livre
         </button>
@@ -310,6 +315,13 @@ export default function BooksPanel() {
           )}
         </div>
       </div>
+
+      {showGenres && (
+        <GenreManager
+          onClose={() => setShowGenres(false)}
+          onChanged={() => { loadBooks(); loadQualityStats(); }}
+        />
+      )}
     </div>
   );
 }
