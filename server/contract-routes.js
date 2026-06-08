@@ -3,8 +3,40 @@ import 'dotenv/config';
 import axios from 'axios';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import multer from 'multer';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync, mkdirSync, createReadStream, readFileSync, statSync } from 'fs';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ─── Stockage des scans de signatures manuscrites ────────────
+// Node tourne sous `youssoupha` et ne peut pas écrire dans le store Dolibarr
+// (www-data). Les scans de contrats signés sur papier sont donc archivés dans un
+// répertoire applicatif, servis via une route authentifiée. La preuve d'intégrité
+// (empreinte SHA-256) est stockée en base pour détecter toute substitution.
+const CONTRACT_SIG_DIR = join(__dirname, '..', 'contract-signatures');
+if (!existsSync(CONTRACT_SIG_DIR)) mkdirSync(CONTRACT_SIG_DIR, { recursive: true });
+
+const signatureUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return cb(new Error('Identifiant de contrat invalide'));
+      const dir = join(CONTRACT_SIG_DIR, String(id));
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const m = (file.originalname || '').match(/\.(pdf|jpe?g|png)$/i);
+      cb(null, `signed${(m ? m[0] : '.pdf').toLowerCase()}`);
+    },
+  }),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /\.(pdf|jpe?g|png)$/i.test(file.originalname || '')),
+});
 
 // ─── Shared admin Dolibarr API client ────────────────────
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -231,6 +263,25 @@ function validateContractData(data) {
 export function createContractRouter({ db, dolibarrPool, csrfProtection, transporter }) {
   const router = Router();
 
+  // Attestations de signature manuscrite (papier). Une ligne par contrat signé
+  // physiquement : méthode, signataire, date de signature déclarée, scan archivé
+  // (nom de fichier + type + taille + empreinte SHA-256), et qui a attesté/quand.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contract_signatures (
+      contract_id   INTEGER PRIMARY KEY,
+      contract_ref  TEXT,
+      method        TEXT NOT NULL DEFAULT 'manuscrite',
+      signer_name   TEXT,
+      signed_date   TEXT,
+      scan_filename TEXT,
+      scan_mime     TEXT,
+      scan_size     INTEGER,
+      scan_hash     TEXT,
+      attested_by   TEXT,
+      attested_at   TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
   // Admin auth middleware — vérifie session + rôle autorisé pour les contrats
   const CONTRACT_ALLOWED_ROLES = ['super_admin', 'admin', 'editor'];
   // Le comptable peut CRÉER et MODIFIER un contrat, ainsi que le VALIDER et
@@ -242,6 +293,9 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   const CONTRACT_VALIDATE_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
   // Lecture de navigation (fiches + devis de contribution) : inclut aussi le comptable.
   const CONTRACT_READ_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
+  // Réouverture d'un contrat validé en brouillon : action de correction
+  // exceptionnelle, réservée aux seuls administrateurs (ni éditeur, ni comptable).
+  const CONTRACT_REOPEN_ROLES = ['super_admin', 'admin'];
   function makeAuth(allowedRoles) {
     return function (req, res, next) {
       const session = req.cookies?.admin_session;
@@ -263,6 +317,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   const authWrite = makeAuth(CONTRACT_WRITE_ROLES); // création + modification (inclut le comptable)
   const authValidate = makeAuth(CONTRACT_VALIDATE_ROLES); // validation + téléchargement PDF (inclut le comptable)
   const authRead = makeAuth(CONTRACT_READ_ROLES);   // lecture de navigation (inclut le comptable)
+  const authReopen = makeAuth(CONTRACT_REOPEN_ROLES); // réouverture en brouillon (admins uniquement)
 
   // SQL filter sanitizer
   function safeSql(value) {
@@ -535,6 +590,31 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
     } catch (err) {
       console.error('Contract export error:', err.message);
       res.status(500).json({ error: 'Erreur export contrats' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // FILE D'ATTENTE ISBN — liste (avant /:id pour ne pas être capté par lui)
+  // ═══════════════════════════════════════════════════════
+  // Contrats validés (statut >= 1) sans ISBN renseigné : droits incalculables
+  // tant que l'ISBN (posé après impression/dépôt légal) n'est pas saisi.
+  router.get('/pending-isbn', authRead, async (req, res) => {
+    try {
+      const [rows] = await dolibarrPool.query(
+        `SELECT c.rowid AS id, c.ref, c.statut, c.date_contrat,
+                s.nom AS author_name,
+                ce.book_title, ce.contract_type
+           FROM llx_contrat c
+           JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+           JOIN llx_societe s ON s.rowid = c.fk_soc
+          WHERE c.statut >= 1
+            AND (ce.book_isbn IS NULL OR ce.book_isbn = '')
+          ORDER BY c.date_contrat DESC, c.rowid DESC`
+      );
+      res.json({ count: rows.length, items: rows });
+    } catch (err) {
+      console.error('Pending ISBN list error:', err.message);
+      res.status(500).json({ error: 'Erreur lors de la récupération des contrats sans ISBN' });
     }
   });
 
@@ -862,6 +942,105 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   });
 
   // ═══════════════════════════════════════════════════════
+  // REOPEN CONTRACT (validated → draft) — admins only
+  // ═══════════════════════════════════════════════════════
+  // Repasse un contrat validé en brouillon afin de corriger une erreur détectée
+  // après validation, puis de le re-valider (ce qui régénère le document).
+  // Calque exact du Contrat::reopen() natif de Dolibarr :
+  //   UPDATE llx_contrat SET statut = 0 WHERE rowid = ? AND statut = 1
+  // (l'API REST Dolibarr n'expose pas reopen ; on réplique la requête native).
+  router.post('/:id/reopen', authReopen, csrfProtection, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+
+      const existing = await adminApi.get(`/contracts/${id}`);
+      const statut = parseInt(existing.data.statut);
+      if (statut === 0) {
+        return res.status(409).json({ error: 'Ce contrat est déjà un brouillon' });
+      }
+      if (statut !== 1) {
+        return res.status(409).json({ error: 'Seul un contrat validé (actif) peut être rouvert en brouillon' });
+      }
+
+      // Réplique fidèle de Contrat::reopen() — garde statut = 1 dans le WHERE
+      // pour rester idempotent face à un double-clic concurrent.
+      const [result] = await dolibarrPool.query(
+        'UPDATE llx_contrat SET statut = 0 WHERE rowid = ? AND statut = 1', [id]
+      );
+      if (!result.affectedRows) {
+        return res.status(409).json({ error: 'Le contrat n\'est plus dans un état permettant la réouverture' });
+      }
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'reopen_contract', `Contrat ${existing.data.ref} (#${id}) rouvert en brouillon pour correction`);
+
+      res.json({ success: true, ref: existing.data.ref });
+    } catch (err) {
+      console.error('Reopen contract error:', err.response?.data || err.message);
+      const { status, body } = dolibarrError(err, 'Erreur réouverture contrat');
+      res.status(status).json(body);
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // FILE D'ATTENTE ISBN — contrats validés sans ISBN
+  // ═══════════════════════════════════════════════════════
+  // L'ISBN n'existe qu'APRÈS l'impression / le dépôt légal : on ne peut pas
+  // l'exiger à la signature. Or sans ISBN, aucune vente n'est rattachée au
+  // contrat → droits d'auteur incalculables. Cette file liste les contrats
+  // validés dont l'ISBN manque encore, pour le compléter une fois le livre paru.
+
+  // Renseigne l'ISBN d'un contrat DÉJÀ VALIDÉ (sans le rouvrir en brouillon).
+  // Vérifie le format, normalise, et indique si un produit catalogue correspond
+  // (condition nécessaire pour que les droits se calculent réellement).
+  router.patch('/:id/isbn', authWrite, csrfProtection, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+
+      const raw = (req.body?.book_isbn || '').trim();
+      if (!raw) return res.status(400).json({ error: 'ISBN requis' });
+      if (!validateISBN(raw)) return res.status(400).json({ error: 'Format ISBN invalide (10 ou 13 chiffres)' });
+      const isbn = raw.replace(/[-\s]/g, '');
+
+      // Le contrat doit exister et être validé/clos (pas un brouillon : un brouillon
+      // se modifie par l'édition normale).
+      const [[contract]] = await dolibarrPool.query(
+        'SELECT rowid, ref, statut FROM llx_contrat WHERE rowid = ?', [id]
+      );
+      if (!contract) return res.status(404).json({ error: 'Contrat introuvable' });
+      if (parseInt(contract.statut) < 1) {
+        return res.status(409).json({ error: 'Ce contrat est un brouillon : modifiez l\'ISBN via l\'édition du contrat' });
+      }
+
+      // Pose l'ISBN dans l'extrafield (UPSERT défensif si la ligne n'existe pas).
+      await dolibarrPool.query(
+        `INSERT INTO llx_contrat_extrafields (fk_object, book_isbn) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE book_isbn = VALUES(book_isbn)`, [id, isbn]
+      );
+
+      // Le produit catalogue correspondant existe-t-il ? (barcode = ISBN normalisé)
+      const [[prod]] = await dolibarrPool.query(
+        `SELECT rowid, ref, label FROM llx_product
+          WHERE REPLACE(REPLACE(barcode, '-', ''), ' ', '') = ? LIMIT 1`, [isbn]
+      );
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'set_contract_isbn', `ISBN ${isbn} renseigné sur ${contract.ref}`);
+
+      res.json({
+        success: true,
+        isbn,
+        catalog_match: prod ? { id: prod.rowid, ref: prod.ref, label: prod.label } : null,
+      });
+    } catch (err) {
+      console.error('Set contract ISBN error:', err.message);
+      res.status(500).json({ error: 'Erreur lors de l\'enregistrement de l\'ISBN' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
   // DELETE CONTRACT (draft only)
   // ═══════════════════════════════════════════════════════
 
@@ -991,9 +1170,18 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       const c = rows[0];
       const labels = { 0: 'Non signé', 1: 'Signé par l\'éditeur', 2: 'Signé par l\'auteur', 9: 'Signé par tous' };
       const status = c.signed_status || 0;
+
+      // Signature manuscrite (papier) éventuelle, depuis l'attestation locale.
+      const phys = db.prepare(
+        'SELECT signer_name, signed_date, scan_filename, scan_hash, attested_by, attested_at FROM contract_signatures WHERE contract_id = ?'
+      ).get(parseInt(req.params.id, 10));
+
       res.json({
         status,
         label: labels[status],
+        // Mode de signature : 'manuscrite' si une attestation papier existe,
+        // sinon 'en_ligne' si une signature en ligne est présente, sinon null.
+        method: phys ? 'manuscrite' : (c.online_sign_name ? 'en_ligne' : null),
         signedBy: c.online_sign_name,
         signedIp: c.online_sign_ip,
         signedAt: c.signed_tms,
@@ -1001,6 +1189,14 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         certifiedInPdf: !!c.signature_auteur_nom && !!c.signature_auteur_date,
         pdfSignerName: c.signature_auteur_nom,
         pdfSignerDate: c.signature_auteur_date,
+        physical: phys ? {
+          signerName: phys.signer_name,
+          signedDate: phys.signed_date,
+          hasScan: !!phys.scan_filename,
+          scanHash: phys.scan_hash,
+          attestedBy: phys.attested_by,
+          attestedAt: phys.attested_at,
+        } : null,
       });
     } catch (err) {
       console.error('Signature status error:', err.message);
@@ -1030,6 +1226,99 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
     }
   });
 
+  // ═══════════════════════════════════════════════════════
+  // SIGNATURE MANUSCRITE (papier) — attestation + scan archivé
+  // ═══════════════════════════════════════════════════════
+  // Une signature papier ne se vérifie pas techniquement : sa valeur tient à
+  // l'original papier. Le système l'ATTESTE (qui/quand), la DATE, et archive le
+  // SCAN comme preuve, avec une empreinte SHA-256 garantissant son intégrité.
+  // Le contrat passe alors en « signé par l'auteur » (signed_status=2), et les
+  // extrafields nom/date alimentent le PDF comme pour la signature en ligne.
+  router.post('/:id/sign-physical', authWrite, csrfProtection, signatureUpload.single('scan'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+      if (!req.file) return res.status(400).json({ error: 'Le scan du contrat signé est requis (PDF, JPG ou PNG)' });
+
+      const signedDate = (req.body?.signed_date || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(signedDate)) {
+        return res.status(400).json({ error: 'Date de signature invalide (format AAAA-MM-JJ attendu)' });
+      }
+
+      // Le contrat doit exister et être validé (un brouillon n'est pas signable).
+      const [[contract]] = await dolibarrPool.query(
+        'SELECT rowid, ref, statut, fk_soc FROM llx_contrat WHERE rowid = ?', [id]
+      );
+      if (!contract) return res.status(404).json({ error: 'Contrat introuvable' });
+      if (parseInt(contract.statut) < 1) {
+        return res.status(409).json({ error: 'Le contrat doit être validé avant d\'enregistrer une signature' });
+      }
+
+      // Nom du signataire : fourni, sinon nom de l'auteur (tiers) du contrat.
+      let signerName = (req.body?.signer_name || '').trim();
+      if (!signerName) {
+        const [[soc]] = await dolibarrPool.query('SELECT nom FROM llx_societe WHERE rowid = ?', [contract.fk_soc]);
+        signerName = soc?.nom || '';
+      }
+
+      // Empreinte d'intégrité du scan (preuve qu'il n'a pas été substitué).
+      const buf = readFileSync(req.file.path);
+      const hash = crypto.createHash('sha256').update(buf).digest('hex');
+
+      // Enregistre l'attestation (une par contrat — REPLACE en cas de re-dépôt).
+      db.prepare(`
+        INSERT INTO contract_signatures
+          (contract_id, contract_ref, method, signer_name, signed_date, scan_filename, scan_mime, scan_size, scan_hash, attested_by, attested_at)
+        VALUES (@cid, @ref, 'manuscrite', @signer, @date, @file, @mime, @size, @hash, @by, datetime('now'))
+        ON CONFLICT(contract_id) DO UPDATE SET
+          contract_ref=@ref, method='manuscrite', signer_name=@signer, signed_date=@date,
+          scan_filename=@file, scan_mime=@mime, scan_size=@size, scan_hash=@hash,
+          attested_by=@by, attested_at=datetime('now')
+      `).run({
+        cid: id, ref: contract.ref, signer: signerName, date: signedDate,
+        file: req.file.filename, mime: req.file.mimetype, size: req.file.size, hash,
+        by: req.admin.username,
+      });
+
+      // Reflète l'état dans Dolibarr : signé par l'auteur + nom/date pour le PDF.
+      await dolibarrPool.query('UPDATE llx_contrat SET signed_status = 2 WHERE rowid = ?', [id]);
+      await dolibarrPool.query(
+        `INSERT INTO llx_contrat_extrafields (fk_object, signature_auteur_nom, signature_auteur_date)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE signature_auteur_nom = VALUES(signature_auteur_nom),
+                                 signature_auteur_date = VALUES(signature_auteur_date)`,
+        [id, signerName, signedDate]
+      );
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'sign_contract_physical',
+          `Signature manuscrite enregistrée pour ${contract.ref} (signataire: ${signerName}, le ${signedDate})`);
+
+      res.json({ success: true, method: 'manuscrite', signer_name: signerName, signed_date: signedDate, scan_hash: hash });
+    } catch (err) {
+      console.error('Physical signature error:', err.message);
+      res.status(500).json({ error: 'Erreur lors de l\'enregistrement de la signature manuscrite' });
+    }
+  });
+
+  // Téléchargement du scan signé archivé (preuve).
+  router.get('/:id/signed-scan', authValidate, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+      const row = db.prepare('SELECT scan_filename, scan_mime, contract_ref FROM contract_signatures WHERE contract_id = ?').get(id);
+      if (!row || !row.scan_filename) return res.status(404).json({ error: 'Aucun scan signé pour ce contrat' });
+      const filePath = join(CONTRACT_SIG_DIR, String(id), row.scan_filename);
+      if (!existsSync(filePath)) return res.status(404).json({ error: 'Fichier scan introuvable' });
+      res.setHeader('Content-Type', row.scan_mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${row.contract_ref || 'contrat'}-signe-${row.scan_filename}"`);
+      createReadStream(filePath).pipe(res);
+    } catch (err) {
+      console.error('Signed scan download error:', err.message);
+      res.status(500).json({ error: 'Erreur téléchargement du scan' });
+    }
+  });
+
   // DOWNLOAD DOCUMENT
   // ═══════════════════════════════════════════════════════
 
@@ -1055,8 +1344,27 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         console.warn('Auto-regenerate warning:', autoErr.response?.data || autoErr.message);
       }
 
-      const pickDoc = (docs) =>
-        docs.find(d => d.name.endsWith('.pdf')) || docs.find(d => d.name.endsWith('.odt')) || docs[0];
+      // Un contrat peut porter PLUSIEURS documents générés si son type a changé
+      // au fil du temps (ex. créé en « édition simple » puis basculé en « complète » :
+      // l'ancien PDF _simple subsiste à côté du nouveau _complete). On doit donc
+      // servir celui qui correspond au TEMPLATE COURANT (model_pdf), faute de quoi
+      // un contrat complet pourrait renvoyer son ancien PDF simple — d'où des
+      // contrats simple/complète d'apparence identique.
+      const [tplRows] = await dolibarrPool.query(
+        'SELECT model_pdf FROM llx_contrat WHERE rowid = ?', [id]
+      );
+      const tplMatch = /template_([a-zA-Z0-9_]+)\.odt/.exec(tplRows[0]?.model_pdf || '');
+      const expectedSuffix = tplMatch ? `_${tplMatch[1]}.` : null; // ex. "_harmattan_2024_edition_complete."
+      const matchesTemplate = (name) => expectedSuffix && name.includes(expectedSuffix);
+
+      const pickDoc = (docs) => {
+        const byExt = (ext) => {
+          const all = docs.filter(d => d.name.endsWith(ext));
+          // Priorité au fichier dont le nom correspond au template courant.
+          return all.find(d => matchesTemplate(d.name)) || all[0];
+        };
+        return byExt('.pdf') || byExt('.odt') || docs[0];
+      };
 
       let docs = await listContractDocuments(id);
       let doc = pickDoc(docs);

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { FiArrowLeft, FiBook, FiDownload, FiFilePlus, FiInfo, FiX } from 'react-icons/fi';
 import { getRoyalties, getRoyaltyDetails, exportAccounting, createRoyaltySupplierInvoices } from '../../../api/accounting';
+import { getPendingIsbnContracts } from '../../../api/contracts';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
 import DolibarrLink from '../../../components/admin/DolibarrLink';
@@ -26,6 +27,10 @@ export default function AccountingRoyalties() {
   });
   const [detail, setDetail] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // Rappel : nombre de contrats validés sans ISBN — leurs ventes ne sont PAS
+  // rattachées, donc leurs droits manquent au total affiché ici.
+  const [pendingIsbn, setPendingIsbn] = useState(0);
+  useEffect(() => { getPendingIsbnContracts().then(r => setPendingIsbn(r.data.count || 0)).catch(() => {}); }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,6 +122,18 @@ export default function AccountingRoyalties() {
           </button>
         </div>
       </div>
+
+      {pendingIsbn > 0 && (
+        <div className="ac-info-box" style={{ background: '#fffbeb', borderColor: '#f59e0b', color: '#92400e', display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <FiInfo size={16} />
+            <strong>{pendingIsbn}</strong>&nbsp;contrat{pendingIsbn > 1 ? 's' : ''} validé{pendingIsbn > 1 ? 's' : ''} sans ISBN : leurs droits ne sont pas inclus dans ce total.
+          </span>
+          <Link to="/admin/contracts" className="btn btn-outline" style={{ borderColor: '#f59e0b', color: '#b45309' }}>
+            Compléter les ISBN
+          </Link>
+        </div>
+      )}
 
       <div className="ac-info-box">
         <FiInfo size={14} style={{ verticalAlign: -2, marginRight: 6 }} />

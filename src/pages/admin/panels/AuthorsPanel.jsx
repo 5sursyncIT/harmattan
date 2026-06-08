@@ -1,10 +1,10 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { FiSearch, FiRefreshCw, FiMail, FiEye, FiX, FiKey, FiCheckCircle, FiExternalLink, FiFileText, FiEdit2, FiDollarSign, FiGlobe } from 'react-icons/fi';
+import { FiSearch, FiRefreshCw, FiMail, FiEye, FiX, FiKey, FiCheckCircle, FiExternalLink, FiFileText, FiEdit2, FiDollarSign, FiGlobe, FiUpload } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import {
   getAdminAuthors, getAdminAuthor, resetAuthorPassword,
-  updateAdminAuthor, notifyAuthorRoyalties,
+  updateAdminAuthor, uploadAuthorPhoto, notifyAuthorRoyalties,
 } from '../../../api/admin';
 
 const STAGE_LABELS = {
@@ -53,6 +53,8 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const photoInputRef = useRef(null);
 
   const load = useCallback(() => {
     let cancelled = false;
@@ -121,6 +123,23 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
       toast.error(err.response?.data?.error || 'Erreur envoi');
     } finally {
       setNotifyLoading(false);
+    }
+  };
+
+  const handlePhotoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (file) e.target.value = ''; // permet de re-sélectionner le même fichier
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) { toast.error('Image trop lourde (8 Mo max)'); return; }
+    setUploadingPhoto(true);
+    try {
+      const res = await uploadAuthorPhoto(id, file);
+      setForm((f) => ({ ...f, photo_url: res.data.photo_url }));
+      toast.success('Photo mise à jour');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur upload photo');
+    } finally {
+      setUploadingPhoto(false);
     }
   };
 
@@ -214,10 +233,47 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
                       <input type="text" value={form.slug} onChange={handleChange('slug')} placeholder="prenom-nom" style={{ width: '100%' }} />
                     </label>
                   </div>
-                  <label>
-                    <strong style={{ display: 'block', marginBottom: 4 }}>Photo (URL)</strong>
-                    <input type="url" value={form.photo_url} onChange={handleChange('photo_url')} placeholder="https://…/photo.jpg" style={{ width: '100%' }} />
-                  </label>
+                  <div>
+                    <strong style={{ display: 'block', marginBottom: 4 }}>Photo de profil</strong>
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+                      <div style={{
+                        width: 84, height: 110, borderRadius: 8, overflow: 'hidden', flexShrink: 0,
+                        background: '#f3f4f6', border: '1px solid #e5e7eb',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        {form.photo_url
+                          ? <img src={form.photo_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          : <span style={{ color: '#9ca3af', fontSize: 11 }}>Aucune</span>}
+                      </div>
+                      <div style={{ flex: 1, display: 'grid', gap: 8 }}>
+                        <input
+                          ref={photoInputRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={handlePhotoUpload}
+                          style={{ display: 'none' }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-outline"
+                          onClick={() => photoInputRef.current?.click()}
+                          disabled={uploadingPhoto}
+                          style={{ justifySelf: 'start' }}
+                        >
+                          <FiUpload /> {uploadingPhoto ? 'Envoi…' : 'Téléverser une image'}
+                        </button>
+                        <input
+                          type="text"
+                          inputMode="url"
+                          value={form.photo_url}
+                          onChange={handleChange('photo_url')}
+                          placeholder="…ou coller une URL https://…/photo.jpg"
+                          style={{ width: '100%' }}
+                        />
+                        <small style={{ color: '#6b7280' }}>JPG, PNG ou WEBP — 8 Mo max. L'image est enregistrée immédiatement.</small>
+                      </div>
+                    </div>
+                  </div>
                   <label>
                     <strong style={{ display: 'block', marginBottom: 4 }}>Biographie</strong>
                     <textarea value={form.bio} onChange={handleChange('bio')} rows={6} maxLength={5000} style={{ width: '100%' }} />

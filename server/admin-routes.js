@@ -889,6 +889,12 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       if (!firstname || !lastname || !email || !title) {
         return res.status(400).json({ error: 'Champs requis manquants' });
       }
+      if (!phone || !String(phone).trim()) {
+        return res.status(400).json({
+          error: 'Le numéro de téléphone est obligatoire.',
+          errors: { phone: 'Veuillez renseigner votre numéro de téléphone.' },
+        });
+      }
       if (!req.file) {
         return res.status(400).json({
           error: 'Le manuscrit (PDF, DOC ou DOCX) est obligatoire.',
@@ -1577,13 +1583,13 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
              WHERE current_stage = 'in_correction' AND (? IN ('super_admin','admin') OR assigned_corrector_id = ?)`
           ).get(role, adminId)?.c || 0;
         }
-        if (role === 'editor' || role === 'super_admin' || role === 'admin') {
+        if (role === 'editor' || role === 'production' || role === 'super_admin' || role === 'admin') {
           editorial = db.prepare("SELECT COUNT(*) AS c FROM manuscripts WHERE current_stage = 'in_editorial'").get()?.c || 0;
         }
-        if (role === 'infographiste' || role === 'super_admin' || role === 'admin') {
+        if (role === 'infographiste' || role === 'production' || role === 'super_admin' || role === 'admin') {
           covers = db.prepare(
             `SELECT COUNT(*) AS c FROM manuscripts
-             WHERE current_stage = 'cover_design' AND (? IN ('super_admin','admin') OR assigned_infographist_id = ?)`
+             WHERE current_stage = 'cover_design' AND (? IN ('super_admin','admin','production') OR assigned_infographist_id = ?)`
           ).get(role, adminId)?.c || 0;
         }
         if (role === 'imprimeur' || role === 'super_admin' || role === 'admin') {

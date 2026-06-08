@@ -31,6 +31,7 @@ function roleCanAccessManuscript(admin, manuscript) {
   if (!admin || !manuscript) return false;
   if (['super_admin', 'admin'].includes(admin.role)) return true;
   if (admin.role === 'editor') return true;
+  if (admin.role === 'production') return true;   // pilote du pipeline éditorial + couvertures
   const mapping = {
     evaluateur: 'assigned_evaluator_id',
     correcteur: 'assigned_corrector_id',

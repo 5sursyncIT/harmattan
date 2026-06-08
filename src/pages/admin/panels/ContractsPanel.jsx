@@ -1,11 +1,90 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { getContractStats, getExpiringContracts } from '../../../api/contracts';
-import { FiFileText, FiPlus, FiAlertTriangle, FiCheckCircle, FiClock, FiBookOpen } from 'react-icons/fi';
+import { getContractStats, getExpiringContracts, getPendingIsbnContracts, setContractIsbn } from '../../../api/contracts';
+import { FiFileText, FiPlus, FiAlertTriangle, FiCheckCircle, FiClock, FiBookOpen, FiHash, FiSave } from 'react-icons/fi';
+import toast from 'react-hot-toast';
 import Loader from '../../../components/common/Loader';
 import './Contracts.css';
 import { contractTypeColor } from '../../../utils/contractTypes';
 import useAdminRole, { CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
+
+// File d'attente « contrats en attente d'ISBN » : un livre n'a son ISBN qu'après
+// impression / dépôt légal, mais le calcul des droits d'auteur exige l'ISBN pour
+// rattacher les ventes. Cette carte liste les contrats validés sans ISBN et
+// permet de le compléter (avec vérification qu'un produit catalogue correspond).
+function IsbnQueueCard({ canEdit }) {
+  const [items, setItems] = useState(null);
+  const [drafts, setDrafts] = useState({}); // { [contractId]: isbn saisi }
+  const [saving, setSaving] = useState(null);
+
+  const load = () => getPendingIsbnContracts().then(r => setItems(r.data.items || [])).catch(() => setItems([]));
+  useEffect(() => { load(); }, []);
+
+  const save = async (id) => {
+    const isbn = (drafts[id] || '').trim();
+    if (!isbn) return;
+    setSaving(id);
+    try {
+      const { data } = await setContractIsbn(id, isbn);
+      if (data.catalog_match) {
+        toast.success(`ISBN enregistré — produit catalogue trouvé : ${data.catalog_match.label || data.catalog_match.ref}. Les droits se calculeront désormais.`);
+      } else {
+        toast(`ISBN enregistré, mais AUCUN produit catalogue ne correspond encore. Les droits resteront à 0 tant que le livre n'est pas au catalogue avec ce code-barres.`, { icon: '⚠️', duration: 7000 });
+      }
+      setItems(prev => prev.filter(it => it.id !== id));
+      setDrafts(prev => { const n = { ...prev }; delete n[id]; return n; });
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de l\'enregistrement de l\'ISBN');
+    } finally { setSaving(null); }
+  };
+
+  if (items === null) return null;            // pas encore chargé : pas de scintillement
+  if (items.length === 0) return null;        // file vide : on n'affiche rien
+
+  return (
+    <div className="admin-card" style={{ borderLeft: '4px solid #f59e0b', background: '#fffbeb' }}>
+      <h4 style={{ margin: '0 0 4px', display: 'flex', alignItems: 'center', gap: 6, color: '#b45309' }}>
+        <FiHash size={16} /> {items.length} contrat{items.length > 1 ? 's' : ''} en attente d'ISBN
+      </h4>
+      <p style={{ margin: '0 0 12px', fontSize: '0.8rem', color: '#92400e' }}>
+        Droits d'auteur incalculables tant que l'ISBN n'est pas renseigné. À compléter une fois le livre imprimé / déposé.
+      </p>
+      {items.map(c => (
+        <div key={c.id} className="ct-isbn-queue-row" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: '1px solid #fde68a' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Link to={`/admin/contracts/${c.id}`} style={{ fontWeight: 600, color: '#1f2937', textDecoration: 'none' }}>
+              {c.book_title || c.ref}
+            </Link>
+            <div style={{ color: '#92400e', fontSize: '0.78rem' }}>{c.ref} · {c.author_name}</div>
+          </div>
+          {canEdit ? (
+            <>
+              <input
+                type="text"
+                inputMode="numeric"
+                placeholder="ISBN (10 ou 13 chiffres)"
+                value={drafts[c.id] || ''}
+                onChange={e => setDrafts(prev => ({ ...prev, [c.id]: e.target.value }))}
+                onKeyDown={e => { if (e.key === 'Enter') save(c.id); }}
+                style={{ width: 200, padding: '6px 8px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: '0.85rem' }}
+              />
+              <button
+                onClick={() => save(c.id)}
+                disabled={saving === c.id || !(drafts[c.id] || '').trim()}
+                className="ct-btn ct-btn-blue"
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                <FiSave size={13} /> {saving === c.id ? '…' : 'Enregistrer'}
+              </button>
+            </>
+          ) : (
+            <span style={{ color: '#92400e', fontSize: '0.8rem' }}>ISBN manquant</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const STATUS_COLORS = { 0: '#f59e0b', 1: '#10b981', 2: '#6b7280' };
 
@@ -79,6 +158,8 @@ export default function ContractsPanel() {
         <StatCard icon={<FiCheckCircle size={20} />} label="Actifs" value={stats.active} color="#10b981" />
         <StatCard icon={<FiAlertTriangle size={20} />} label="Expirent sous 90j" value={stats.expiringSoon} color="#ef4444" />
       </div>
+
+      <IsbnQueueCard canEdit={canCreate} />
 
       {byType.length > 0 && (
         <div className="admin-card">

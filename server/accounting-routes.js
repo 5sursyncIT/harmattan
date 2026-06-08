@@ -11,6 +11,7 @@
 import { Router } from 'express';
 import axios from 'axios';
 import { runTransfer, getTransferSummary } from './accounting-engine.js';
+import { computeRoyaltyBreakdown } from './royalties.js';
 
 // ─── CLIENT API REST DOLIBARR (clé admin) ────────────────────
 // Utilisé pour créer/valider les factures fournisseurs via les classes métier
@@ -85,84 +86,9 @@ function parseDateRange(req) {
   return { date_from, date_to };
 }
 
-const DLL_ROYALTY_RATE_AFTER_THRESHOLD = 10;
-
-function isDllContractType(contractType) {
-  return String(contractType || '').startsWith('harmattan_dll');
-}
-
-function computeRoyaltyBreakdown({ contractType, unitsSold, grossHt, cumulativeUnits, threshold, rate, thresholdMode }) {
-  const units = Number(unitsSold) || 0;
-  const gross = Number(grossHt) || 0;
-  const avgHtPerUnit = units > 0 ? gross / units : 0;
-
-  if (units <= 0 || gross <= 0) {
-    return {
-      avgHtPerUnit,
-      unitsOver: 0,
-      royaltyBase: 0,
-      royaltyDue: 0,
-      royaltyRateLabel: `${rate || 0}%`,
-      breakdown: [],
-    };
-  }
-
-  const safeThreshold = Math.max(0, Number(threshold) || 0);
-  const primaryRate = Number(rate) || 0;
-
-  // Contrat DLL : règle contractuelle à paliers.
-  // 15 % sur les 1000 premiers exemplaires subventionnés, puis 10 % au-delà.
-  if (isDllContractType(contractType)) {
-    let firstBandUnits;
-    if (thresholdMode === 'cumulative') {
-      const cum = Number(cumulativeUnits) || units;
-      const before = Math.max(0, cum - units);
-      firstBandUnits = Math.max(0, Math.min(cum, safeThreshold) - Math.min(before, safeThreshold));
-    } else {
-      firstBandUnits = Math.min(units, safeThreshold);
-    }
-
-    const secondBandUnits = Math.max(0, units - firstBandUnits);
-    const firstBandDue = firstBandUnits * avgHtPerUnit * (primaryRate / 100);
-    const secondBandDue = secondBandUnits * avgHtPerUnit * (DLL_ROYALTY_RATE_AFTER_THRESHOLD / 100);
-    const royaltyDue = firstBandDue + secondBandDue;
-
-    return {
-      avgHtPerUnit,
-      unitsOver: units,
-      royaltyBase: gross,
-      royaltyDue,
-      royaltyRateLabel: `${primaryRate}% puis ${DLL_ROYALTY_RATE_AFTER_THRESHOLD}%`,
-      breakdown: [
-        { label: `Premiers ${safeThreshold} ex. DLL`, units: firstBandUnits, rate: primaryRate, amount: firstBandDue },
-        { label: `Au-delà de ${safeThreshold} ex.`, units: secondBandUnits, rate: DLL_ROYALTY_RATE_AFTER_THRESHOLD, amount: secondBandDue },
-      ],
-    };
-  }
-
-  // Contrats classiques : seuil de déclenchement, droits uniquement au-delà du seuil.
-  let unitsOver = 0;
-  if (thresholdMode === 'cumulative') {
-    const cum = Number(cumulativeUnits) || units;
-    const before = cum - units;
-    if (cum > safeThreshold) {
-      unitsOver = before >= safeThreshold ? units : cum - safeThreshold;
-    }
-  } else {
-    unitsOver = Math.max(0, units - safeThreshold);
-  }
-
-  const royaltyBase = unitsOver * avgHtPerUnit;
-  const royaltyDue = royaltyBase * (primaryRate / 100);
-  return {
-    avgHtPerUnit,
-    unitsOver,
-    royaltyBase,
-    royaltyDue,
-    royaltyRateLabel: `${primaryRate}%`,
-    breakdown: [{ label: `Au-delà de ${safeThreshold} ex.`, units: unitsOver, rate: primaryRate, amount: royaltyDue }],
-  };
-}
+// Calcul des droits déplacé dans ./royalties.js (source unique partagée avec
+// author-routes.js). isDllContractType / DLL_ROYALTY_RATE_AFTER_THRESHOLD /
+// computeRoyaltyBreakdown sont désormais importés en tête de fichier.
 
 // ─── ROUTER FACTORY ──────────────────────────────────────────
 

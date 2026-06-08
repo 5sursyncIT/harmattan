@@ -33,3 +33,8 @@ export const CONTRACT_WRITE_ROLES = [...CONTRACT_EDIT_ROLES, 'comptable'];
 
 // Rôles autorisés à VALIDER un contrat et TÉLÉCHARGER son PDF. Inclut le comptable.
 export const CONTRACT_VALIDATE_ROLES = [...CONTRACT_EDIT_ROLES, 'comptable'];
+
+// Rôles autorisés à ROUVRIR un contrat validé en brouillon (correction d'erreur
+// détectée après validation). Action exceptionnelle réservée aux seuls
+// administrateurs — ni éditeur, ni comptable.
+export const CONTRACT_REOPEN_ROLES = ['super_admin', 'admin'];

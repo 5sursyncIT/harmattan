@@ -227,6 +227,11 @@ export const getAdminAuthor = (id) => api.get(`/admin/authors/${id}`);
 export const createAdminAuthor = (data) => api.post('/admin/authors', data);
 export const resetAuthorPassword = (id) => api.post(`/admin/authors/${id}/reset-password`);
 export const updateAdminAuthor = (id, data) => api.put(`/admin/authors/${id}`, data);
+export const uploadAuthorPhoto = (id, file) => {
+  const fd = new FormData();
+  fd.append('photo', file);
+  return api.post(`/admin/authors/${id}/photo`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+};
 export const notifyAuthorRoyalties = (id) => api.post(`/admin/authors/${id}/notify-royalties`);
 
 // ─── News / Actualités ─────────────────────────────────

@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import 'dotenv/config';
 import { dolibarrApi } from './dolibarr-client.js';
+import { recordInvoicePayment } from './dolibarr-payments.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { EXCLUDED_CATEGORIES_SET } from '../src/utils/excludedCategories.js';
 import {
@@ -1248,19 +1249,20 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           const { code, mapping, amount, cheque_issuer } = cappedPayments[i];
           const isLast = i === cappedPayments.length - 1;
           const paymentId = await resolvePaymentId(dolibarrPool, code, mapping.paymentId);
-          const payRes = await adminApi.post(`/invoices/${invoiceId}/payments`, {
-            datepaye: Math.floor(Date.now() / 1000),
-            paymentid: paymentId,
-            closepaidinvoices: isLast ? 'yes' : 'no',
-            accountid: mapping.bankAccount,
-            num_payment: invoiceRef,
-            comment: `POS T${terminal} - ${mapping.label}`,
+          const payId = await recordInvoicePayment(adminApi, {
+            invoiceId,
             amount,
+            paymentId,
+            accountId: mapping.bankAccount,
+            datepaye: Math.floor(Date.now() / 1000),
+            isLast,
+            numPayment: invoiceRef,
+            comment: `POS T${terminal} - ${mapping.label}`,
             ...(code === 'CHQ'
               ? { chqemetteur: String(cheque_issuer || '').trim() || chequeIssuerDefault }
               : {}),
           });
-          paymentResults.push({ code, amount, payment_id: payRes.data });
+          paymentResults.push({ code, amount, payment_id: payId });
           sale.paymentsRecorded++;
         }
 
@@ -1403,19 +1405,20 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         const { mapping, code, amount, cheque_issuer } = capped[i];
         const isLast = i === capped.length - 1;
         const paymentId = await resolvePaymentId(dolibarrPool, code, mapping.paymentId);
-        const r = await adminApi.post(`/invoices/${id}/payments`, {
-          datepaye: Math.floor(Date.now() / 1000),
-          paymentid: paymentId,
-          closepaidinvoices: isLast ? 'yes' : 'no',
-          accountid: mapping.bankAccount,
-          num_payment: inv.ref,
-          comment: `POS règlement T${getTerminal(req)} - ${mapping.label}`,
+        const payId = await recordInvoicePayment(adminApi, {
+          invoiceId: id,
           amount,
+          paymentId,
+          accountId: mapping.bankAccount,
+          datepaye: Math.floor(Date.now() / 1000),
+          isLast,
+          numPayment: inv.ref,
+          comment: `POS règlement T${getTerminal(req)} - ${mapping.label}`,
           ...(code === 'CHQ'
             ? { chqemetteur: String(cheque_issuer || '').trim() || chequeIssuerDefault }
             : {}),
         });
-        results.push({ code, amount, payment_id: r.data });
+        results.push({ code, amount, payment_id: payId });
       }
       const recorded = results.reduce((s, p) => s + p.amount, 0);
       const fullyPaid = recorded + 1 >= remaining;
@@ -2431,40 +2434,19 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const { items, customer } = req.body;
       const terminal = getTerminal(req);
       if (!items?.length) return res.status(400).json({ error: 'Panier vide' });
-      const total = items.reduce((s, i) => s + i.qty * i.price_ttc, 0);
+      // Le total doit toujours égaler la somme des totaux de ligne affichés
+      // (line_total intègre déjà la remise). On retombe sur le calcul brut
+      // seulement si line_total est absent.
+      const total = items.reduce((s, i) => {
+        const lt = Number(i.line_total);
+        return s + (Number.isFinite(lt) ? lt : i.qty * i.price_ttc * (1 - (parseFloat(i.discount) || 0) / 100));
+      }, 0);
       const ref = nextQuoteRef();
 
-      // Create propal in Dolibarr
-      let dolibarrPropalId = null;
-      let dolibarrPropalRef = null;
-      try {
-        const propalLines = items.map((item) => ({
-          fk_product: parseInt(item.product_id),
-          qty: item.qty,
-          subprice: parseFloat(item.price_ttc),
-          tva_tx: 0,
-          product_type: 0,
-        }));
-
-        const socid = customer?.id || POS_CONFIG.defaultCustomer;
-        const today = new Date().toISOString().split('T')[0];
-
-        const propalRes = await adminApi.post('/proposals', {
-          socid: parseInt(socid),
-          date: today,
-          duree_validite: 30,
-          lines: propalLines,
-          note_private: `POS Terminal ${terminal} | ${req.posStaff.name} | Ref locale: ${ref}`,
-        });
-        dolibarrPropalId = propalRes.data;
-
-        // Validate the proposal
-        await adminApi.post(`/proposals/${dolibarrPropalId}/validate`);
-        const propalDetail = await adminApi.get(`/proposals/${dolibarrPropalId}`);
-        dolibarrPropalRef = propalDetail.data.ref;
-      } catch (propalErr) {
-        console.error('[POS] Dolibarr propal creation failed (continuing with local):', propalErr.message);
-      }
+      // Les proformas POS sont des devis commerciaux natifs (SQLite). On ne crée
+      // PAS de propale Dolibarr : le module propal est réaffecté aux fiches de
+      // fabrication éditoriales (titre/genre/ISBN obligatoires). Ces proformas
+      // sont exposés à l'admin via /api/admin/propals/pos-quotes (visibles dans /admin/devis).
 
       // Save local copy (for ODT generation)
       const stmt = db.prepare(`INSERT INTO pos_quotes (ref, customer_name, customer_phone, customer_email, items, total_ttc, staff_name, terminal)
@@ -2483,7 +2465,6 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
       res.json({
         ref,
-        dolibarr_ref: dolibarrPropalRef,
         customer_name: customer?.name || 'Client comptoir',
         items,
         total_ttc: total,
@@ -2587,21 +2568,41 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   function numberToWordsFR(n) {
     n = Math.round(n);
     if (n === 0) return 'zéro';
+    if (n < 0) return 'moins ' + numberToWordsFR(-n);
     const units = ['', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix-sept', 'dix-huit', 'dix-neuf'];
     const tens = ['', '', 'vingt', 'trente', 'quarante', 'cinquante', 'soixante', 'soixante', 'quatre-vingt', 'quatre-vingt'];
-    function chunk(num) {
+    // Convertit un nombre 0..999. isFinal = ce groupe termine le nombre (accord de "cent"/"vingt").
+    function chunk(num, isFinal) {
       if (num === 0) return '';
       if (num < 20) return units[num];
       if (num < 70) return tens[Math.floor(num / 10)] + (num % 10 === 1 ? ' et un' : num % 10 ? '-' + units[num % 10] : '');
       if (num < 80) return 'soixante' + (num % 20 === 1 ? ' et onze' : '-' + units[10 + num % 10]);
-      if (num < 100) return 'quatre-vingt' + (num % 20 === 0 ? 's' : '-' + units[num % 20 < 20 ? num % 20 : num % 10]);
-      if (num < 200) return 'cent' + (num % 100 === 0 ? '' : ' ' + chunk(num % 100));
-      if (num < 1000) return units[Math.floor(num / 100)] + ' cent' + (num % 100 === 0 ? 's' : ' ' + chunk(num % 100));
-      if (num < 2000) return 'mille' + (num % 1000 === 0 ? '' : ' ' + chunk(num % 1000));
-      if (num < 1000000) return chunk(Math.floor(num / 1000)) + ' mille' + (num % 1000 === 0 ? '' : ' ' + chunk(num % 1000));
-      return String(num);
+      if (num < 100) return 'quatre-vingt' + (num % 20 === 0 ? (isFinal ? 's' : '') : '-' + units[num % 20 < 20 ? num % 20 : num % 10]);
+      const h = Math.floor(num / 100), r = num % 100;
+      const cent = h === 1 ? 'cent' : units[h] + ' cent';
+      return cent + (r === 0 ? (h > 1 && isFinal ? 's' : '') : ' ' + chunk(r, isFinal));
     }
-    return chunk(n);
+    const scales = [
+      { value: 1e9, sing: 'milliard', plur: 'milliards' },
+      { value: 1e6, sing: 'million', plur: 'millions' },
+      { value: 1e3, sing: 'mille', plur: 'mille' },
+    ];
+    const parts = [];
+    let rest = n;
+    for (const s of scales) {
+      const count = Math.floor(rest / s.value);
+      if (count > 0) {
+        if (s.value === 1e3) {
+          // "mille" est invariable et sans "un" devant.
+          parts.push((count === 1 ? '' : chunk(count, false) + ' ') + 'mille');
+        } else {
+          parts.push(chunk(count, false) + ' ' + (count === 1 ? s.sing : s.plur));
+        }
+        rest %= s.value;
+      }
+    }
+    if (rest > 0) parts.push(chunk(rest, true));
+    return parts.join(' ').trim();
   }
 
   // ═══════════════════════════════════════════════════════

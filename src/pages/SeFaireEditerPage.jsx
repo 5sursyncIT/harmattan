@@ -193,7 +193,9 @@ function getValidationErrors(form, file) {
     nextErrors.email = 'Veuillez renseigner une adresse email valide.';
   }
 
-  if (form.phone.trim() && !/^[+\d\s().-]{7,20}$/.test(form.phone.trim())) {
+  if (!form.phone.trim()) {
+    nextErrors.phone = 'Veuillez renseigner votre numéro de téléphone.';
+  } else if (!/^[+\d\s().-]{7,20}$/.test(form.phone.trim())) {
     nextErrors.phone = 'Veuillez renseigner un numéro de téléphone valide.';
   }
 
@@ -517,7 +519,7 @@ function ManuscriptForm() {
             {isVisibleError('email') && <p className="editer-field-error" id="email-error"><FiAlertCircle /> {errors.email}</p>}
           </div>
           <div className="editer-field">
-            <label htmlFor="phone"><FiPhone size={14} /> Téléphone</label>
+            <label htmlFor="phone"><FiPhone size={14} /> Téléphone <span>*</span></label>
             <input
               id="phone"
               type="tel"
@@ -528,6 +530,7 @@ function ManuscriptForm() {
               placeholder="+221 7X XXX XX XX"
               aria-invalid={isVisibleError('phone')}
               aria-describedby={isVisibleError('phone') ? 'phone-error' : undefined}
+              required
             />
             {isVisibleError('phone') && <p className="editer-field-error" id="phone-error"><FiAlertCircle /> {errors.phone}</p>}
           </div>

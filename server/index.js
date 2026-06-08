@@ -309,6 +309,16 @@ app.use(cors({
 
 app.use(compression());
 app.use(cookieParser());
+
+// Sert les images du dossier public/ à l'exécution (news, couvertures, slider,
+// photos auteurs…). En prod, Express ne sert que `dist`, qui ne reçoit les
+// fichiers de `public` qu'au moment du build (vite copie public→dist). Sans ce
+// montage, tout fichier uploadé après le dernier build renverrait 404 jusqu'au
+// rebuild suivant. `public` est le superset persistant (survit aux rebuilds).
+app.use('/images', express.static(join(__dirname, '..', 'public', 'images'), {
+  maxAge: '7d',
+  fallthrough: true, // laisse passer vers le static `dist` puis le catch-all
+}));
 // `verify` capture le buffer brut pour vérifier les signatures HMAC sans dépendre
 // de l'ordre des clés ou de l'échappement Unicode après re-stringification.
 app.use(express.json({
@@ -1649,7 +1659,7 @@ try {
 // ─── DEVIS MODULE (propositions commerciales) ───────────────
 import { createPropalsRouter } from './propals-routes.js';
 try {
-  app.use('/api/admin/propals', adminAuth(db), createPropalsRouter({ dolibarrPool, csrfProtection }));
+  app.use('/api/admin/propals', adminAuth(db), createPropalsRouter({ dolibarrPool, csrfProtection, db }));
   console.log('[PROPALS] Devis routes mounted');
 } catch (err) {
   console.error('[PROPALS] Failed to mount propals routes:', err);
@@ -3418,6 +3428,98 @@ if (IS_PROD) {
       }
     },
   }));
+  // ─── Open Graph dynamique (aperçus WhatsApp / Facebook / etc.) ───
+  // Les robots des réseaux sociaux n'exécutent pas le JS du SPA : on réécrit
+  // les balises OG dans index.html côté serveur pour /produit/:id et /auteur/:slug.
+  const ogEscape = (s) => String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  const absUrl = (u) => {
+    if (!u) return '';
+    if (/^https?:\/\//i.test(u)) return u;
+    return `${SITE_URL.replace(/\/$/, '')}${u.startsWith('/') ? '' : '/'}${u}`;
+  };
+  const renderOgPage = (res, { title, description, image, url, type = 'article' }) => {
+    let html;
+    try {
+      html = readFileSync(join(distPath, 'index.html'), 'utf-8');
+    } catch {
+      return res.sendFile(join(distPath, 'index.html'));
+    }
+    const desc = ogEscape(String(description || '').replace(/\s+/g, ' ').trim().slice(0, 280));
+    const tags = [
+      `<meta name="description" content="${desc}" />`,
+      `<meta property="og:type" content="${type}" />`,
+      `<meta property="og:site_name" content="L'Harmattan Sénégal" />`,
+      `<meta property="og:title" content="${ogEscape(title)}" />`,
+      `<meta property="og:description" content="${desc}" />`,
+      image ? `<meta property="og:image" content="${ogEscape(absUrl(image))}" />` : '',
+      `<meta property="og:url" content="${ogEscape(absUrl(url))}" />`,
+      `<meta name="twitter:card" content="summary_large_image" />`,
+    ].filter(Boolean).join('\n    ');
+    // Remplace le bloc OG par défaut (entre marqueurs) + le <title>
+    html = html.replace(/<!--OG:start-->[\s\S]*?<!--OG:end-->/, `<!--OG:start-->\n    ${tags}\n    <!--OG:end-->`);
+    if (title) html = html.replace(/<title>[\s\S]*?<\/title>/, `<title>${ogEscape(title)} — L'Harmattan Sénégal</title>`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('html').send(html);
+  };
+
+  // Fiche produit / livre
+  app.get('/produit/:id', async (req, res, next) => {
+    try {
+      const pid = parseInt(req.params.id);
+      if (!pid) return next();
+      let product = cache.get(`product:${pid}`);
+      if (!product) {
+        const [prodRes, docResult] = await Promise.all([
+          dolibarrApi.get(`/products/${pid}`),
+          dolibarrApi.get('/documents', { params: { modulepart: 'produit', id: pid } }).catch(() => null),
+        ]);
+        const p = prodRes.data;
+        const imgs = (docResult?.data || []).filter((d) => /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover') && !/(^|-|_)(verso|back)(-|_|\.)/i.test(d.name));
+        product = {
+          label: p.label,
+          description: resolveDescription(p),
+          images: imgs.length ? [{ name: imgs[0].name }] : [],
+          id: p.id,
+        };
+      }
+      const img = product.images?.[0]?.name
+        ? `/api/image/${pid}?file=${encodeURIComponent(product.images[0].name)}`
+        : null;
+      return renderOgPage(res, {
+        title: product.label,
+        description: product.description,
+        image: img,
+        url: `/produit/${pid}`,
+        type: 'product',
+      });
+    } catch {
+      return next();
+    }
+  });
+
+  // Fiche auteur
+  app.get('/auteur/:slug', (req, res, next) => {
+    try {
+      const slug = String(req.params.slug || '').slice(0, 80);
+      const a = db.prepare(
+        'SELECT slug, firstname, lastname, display_name, bio, photo_url, public_listed FROM authors WHERE slug = ?'
+      ).get(slug);
+      if (!a || !a.public_listed) return next();
+      const name = (a.display_name && a.display_name.trim()) || `${a.firstname || ''} ${a.lastname || ''}`.trim();
+      return renderOgPage(res, {
+        title: name,
+        description: a.bio || `Découvrez ${name}, auteur publié chez L'Harmattan Sénégal.`,
+        image: a.photo_url || null,
+        url: `/auteur/${slug}`,
+        type: 'profile',
+      });
+    } catch {
+      return next();
+    }
+  });
+
   app.get('{*path}', (req, res) => {
     // Don't intercept API routes
     if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });

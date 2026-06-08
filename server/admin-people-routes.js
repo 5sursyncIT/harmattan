@@ -3,10 +3,13 @@
 // Panel admin dashboard consumes these endpoints.
 import { Router } from 'express';
 import axios from 'axios';
+import multer from 'multer';
+import sharp from 'sharp';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { buildSocieteReportPdf } from './societe-report.js';
@@ -43,6 +46,29 @@ const adminApi = axios.create({
 
 const DOC_BUILDDOC_URL = 'http://localhost/dolibarr/htdocs/custom/senharmattansync/document-builddoc.php';
 const DOLIBARR_WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// Photos auteurs : stockées dans public/ (persiste aux rebuilds, copié vers dist
+// au build) et servies à l'exécution via le montage /images de index.js.
+const AUTHOR_PHOTOS_DIR = join(__dirname, '..', 'public', 'images', 'authors');
+if (!existsSync(AUTHOR_PHOTOS_DIR)) mkdirSync(AUTHOR_PHOTOS_DIR, { recursive: true });
+
+const authorPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+// Détecte le format réel via les magic bytes (ne pas se fier à l'extension).
+function detectImageFormat(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+      buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) return 'png';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'gif';
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'webp';
+  return null;
+}
 
 export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection, transporter }) {
   const router = Router();
@@ -410,6 +436,54 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     } catch (err) {
       console.error('Author update error:', err.message);
       res.status(500).json({ error: 'Erreur mise à jour auteur' });
+    }
+  });
+
+  // POST /api/admin/authors/:id/photo — upload de la photo de profil (re-encodée, sécurisée)
+  router.post('/authors/:id/photo', auth, requireRoles('super_admin', 'admin', 'editor'), csrfProtection, authorPhotoUpload.single('photo'), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const author = db.prepare('SELECT id, photo_url FROM authors WHERE id = ?').get(id);
+      if (!author) return res.status(404).json({ error: 'Auteur introuvable' });
+      if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
+
+      // 1) Validation par magic bytes
+      const detected = detectImageFormat(req.file.buffer);
+      if (!detected || !['jpeg', 'png', 'webp'].includes(detected)) {
+        return res.status(400).json({ error: 'Format non supporté (JPG, PNG ou WEBP uniquement)' });
+      }
+
+      // 2) Re-encodage via sharp : strip EXIF + normalise + recadre en portrait carré-ish
+      let safeBuffer;
+      try {
+        safeBuffer = await sharp(req.file.buffer, { failOn: 'error' })
+          .rotate() // auto-orient avant suppression EXIF
+          .resize({ width: 600, height: 800, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85, mozjpeg: true })
+          .toBuffer();
+      } catch (encodeErr) {
+        console.error('Author photo re-encode failed:', encodeErr.message);
+        return res.status(400).json({ error: 'Image corrompue ou non décodable' });
+      }
+
+      const filename = `author-${id}-${Date.now()}.jpg`;
+      writeFileSync(join(AUTHOR_PHOTOS_DIR, filename), safeBuffer);
+
+      // Supprime l'ancienne photo uploadée (si c'en était une, pas une URL externe)
+      const prev = author.photo_url || '';
+      if (prev.startsWith('/images/authors/')) {
+        try { rmSync(join(AUTHOR_PHOTOS_DIR, prev.split('/').pop()), { force: true }); } catch { /* ignore */ }
+      }
+
+      const photoUrl = `/images/authors/${filename}`;
+      db.prepare('UPDATE authors SET photo_url = ? WHERE id = ?').run(photoUrl, id);
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin?.username || 'unknown', 'author_upload_photo', `#${id} ${filename}`);
+
+      res.json({ success: true, photo_url: photoUrl });
+    } catch (err) {
+      console.error('Author photo upload error:', err.message);
+      res.status(500).json({ error: 'Erreur upload photo' });
     }
   });
 

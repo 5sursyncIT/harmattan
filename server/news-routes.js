@@ -1,27 +1,40 @@
 import { Router } from 'express';
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, unlinkSync } from 'fs';
 import multer from 'multer';
+import sharp from 'sharp';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const NEWS_IMAGES_DIR = join(__dirname, '..', 'public', 'images', 'news');
 if (!existsSync(NEWS_IMAGES_DIR)) mkdirSync(NEWS_IMAGES_DIR, { recursive: true });
 
+// Stockage en mémoire : on récupère le buffer brut puis on le redimensionne /
+// compresse avec sharp avant écriture (évite d'écrire l'original lourd sur le
+// disque). Limite d'entrée généreuse (photos de téléphone) ; la sortie WebP
+// est compressée.
 const newsImageUpload = multer({
-  storage: multer.diskStorage({
-    destination: NEWS_IMAGES_DIR,
-    filename: (req, file, cb) => {
-      const ext = (file.originalname.split('.').pop() || 'jpg').toLowerCase();
-      cb(null, `news-${Date.now()}.${ext}`);
-    },
-  }),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     cb(null, /\.(jpg|jpeg|png|webp)$/i.test(file.originalname));
   },
 });
+
+// Supprime (best-effort) une image de couverture du dossier news. On ne traite
+// que le basename d'un chemin /images/news/… pour empêcher toute traversée.
+function deleteNewsImage(imgPath) {
+  if (!imgPath || typeof imgPath !== 'string' || !imgPath.includes('/images/news/')) return;
+  const file = basename(imgPath);
+  if (!file || file === '.' || file === '..') return;
+  try {
+    const full = join(NEWS_IMAGES_DIR, file);
+    if (existsSync(full)) unlinkSync(full);
+  } catch (err) {
+    console.warn('deleteNewsImage failed:', err.message);
+  }
+}
 
 function slugify(text) {
   return String(text || '')
@@ -104,7 +117,15 @@ export function createNewsRouter({ db, cache, adminAuth, csrfProtection }) {
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_news_slug ON news_articles(slug)'); } catch (e) { void e; }
 
   const invalidatePublicCache = () => {
-    try { cache.del('news:public:list'); } catch { /* ignore */ }
+    // Les listes publiques sont mises en cache sous `news:public:list:${limit}`
+    // (clé suffixée par la limite) — il faut donc purger TOUTES les variantes,
+    // pas seulement la clé nue, sinon une actu publiée/modifiée/supprimée reste
+    // invisible sur le site public jusqu'à expiration du TTL (5 min).
+    try {
+      cache.keys()
+        .filter((k) => k.startsWith('news:public:list'))
+        .forEach((k) => cache.del(k));
+    } catch { /* ignore */ }
   };
 
   // ─── PUBLIC ──────────────────────────────────────────────
@@ -262,6 +283,10 @@ export function createNewsRouter({ db, cache, adminAuth, csrfProtection }) {
         newPublishedAt,
         existing.id,
       );
+      // Couverture remplacée : supprime l'ancienne image devenue orpheline.
+      if (cover_image !== undefined && existing.cover_image && (cover_image || null) !== existing.cover_image) {
+        deleteNewsImage(existing.cover_image);
+      }
       logActivity(db, req.admin?.username || 'system', 'news.update', `id=${existing.id}`);
       invalidatePublicCache();
       const row = db.prepare('SELECT * FROM news_articles WHERE id = ?').get(existing.id);
@@ -277,6 +302,7 @@ export function createNewsRouter({ db, cache, adminAuth, csrfProtection }) {
       const row = db.prepare('SELECT * FROM news_articles WHERE id = ?').get(req.params.id);
       if (!row) return res.status(404).json({ error: 'Introuvable' });
       db.prepare('DELETE FROM news_articles WHERE id = ?').run(req.params.id);
+      deleteNewsImage(row.cover_image); // évite les images orphelines sur le disque
       logActivity(db, req.admin?.username || 'system', 'news.delete', `id=${row.id} title="${row.title}"`);
       invalidatePublicCache();
       res.json({ ok: true });
@@ -286,13 +312,23 @@ export function createNewsRouter({ db, cache, adminAuth, csrfProtection }) {
     }
   });
 
-  router.post('/api/admin/news/upload-image', adminAuth, csrfProtection, newsImageUpload.single('image'), (req, res) => {
+  router.post('/api/admin/news/upload-image', adminAuth, csrfProtection, newsImageUpload.single('image'), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
-      res.json({ path: `/images/news/${req.file.filename}` });
+      const filename = `news-${Date.now()}.webp`;
+      const full = join(NEWS_IMAGES_DIR, filename);
+      // Redimensionne (largeur max 1600 px, sans agrandir) + compresse en WebP :
+      // une photo de plusieurs Mo tombe typiquement à ~100–300 Ko. `.rotate()`
+      // applique l'orientation EXIF (photos de téléphone à l'endroit).
+      await sharp(req.file.buffer)
+        .rotate()
+        .resize({ width: 1600, withoutEnlargement: true })
+        .webp({ quality: 82 })
+        .toFile(full);
+      res.json({ path: `/images/news/${filename}` });
     } catch (err) {
       console.error('POST /api/admin/news/upload-image error:', err.message);
-      res.status(500).json({ error: 'Erreur upload' });
+      res.status(500).json({ error: 'Erreur traitement image' });
     }
   });
 

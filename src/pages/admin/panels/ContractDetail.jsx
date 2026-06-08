@@ -4,17 +4,18 @@ import {
   getContract, validateContract, closeContract, deleteContract,
   downloadContractDocument, updateContract, getSignatureUrl,
   sendSignatureEmail, getSignatureStatus, regenerateSignedContract,
+  reopenContract, signContractPhysical, getSignedScan,
 } from '../../../api/contracts';
 import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
   FiPercent, FiFileText, FiCalendar, FiCopy, FiExternalLink, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
-  FiPlus, FiTrash2, FiSend, FiCheck,
+  FiPlus, FiTrash2, FiSend, FiCheck, FiUploadCloud,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import { listContractQuotes, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
-import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES, CONTRACT_VALIDATE_ROLES } from '../../../hooks/useAdminRole';
+import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES, CONTRACT_VALIDATE_ROLES, CONTRACT_REOPEN_ROLES } from '../../../hooks/useAdminRole';
 import './Contracts.css';
 
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
@@ -106,6 +107,10 @@ export default function ContractDetail() {
   const [signUrl, setSignUrl] = useState(null);
   const [sendingSign, setSendingSign] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  // Signature manuscrite (papier) : modale d'attestation + dépôt du scan.
+  const [showPhysicalSign, setShowPhysicalSign] = useState(false);
+  const [physSigning, setPhysSigning] = useState(false);
+  const [physForm, setPhysForm] = useState({ signed_date: new Date().toISOString().slice(0, 10), signer_name: '', file: null });
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [confirmAction, setConfirmAction] = useState(null);
@@ -121,6 +126,8 @@ export default function ContractDetail() {
   const canModify = CONTRACT_WRITE_ROLES.includes(role);
   const canValidateDownload = CONTRACT_VALIDATE_ROLES.includes(role);
   const canManage = CONTRACT_EDIT_ROLES.includes(role);
+  // canReopen : rouvrir un contrat validé en brouillon pour correction — admins seuls.
+  const canReopen = CONTRACT_REOPEN_ROLES.includes(role);
 
   const loadQuotes = () => {
     if (!id) return;
@@ -213,6 +220,35 @@ export default function ContractDetail() {
     } finally { setRegenerating(false); }
   };
 
+  const handleSignPhysical = async () => {
+    if (physSigning) return;
+    if (!physForm.file) { toast.error('Veuillez joindre le scan du contrat signé'); return; }
+    if (!physForm.signed_date) { toast.error('Veuillez indiquer la date de signature'); return; }
+    setPhysSigning(true);
+    try {
+      const fd = new FormData();
+      fd.append('signed_date', physForm.signed_date);
+      if (physForm.signer_name.trim()) fd.append('signer_name', physForm.signer_name.trim());
+      fd.append('scan', physForm.file);
+      await signContractPhysical(id, fd);
+      toast.success('Signature manuscrite enregistrée et scan archivé');
+      setShowPhysicalSign(false);
+      setPhysForm({ signed_date: new Date().toISOString().slice(0, 10), signer_name: '', file: null });
+      getSignatureStatus(id).then(r => setSignStatus(r.data)).catch(() => {});
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de l\'enregistrement de la signature');
+    } finally { setPhysSigning(false); }
+  };
+
+  const handleDownloadScan = async () => {
+    try {
+      const res = await getSignedScan(id);
+      const url = URL.createObjectURL(res.data);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch { toast.error('Scan signé indisponible'); }
+  };
+
   const handleValidate = async () => {
     if (actionLoading) return;
     setActionLoading(true);
@@ -230,6 +266,18 @@ export default function ContractDetail() {
     setActionLoading(true);
     try { await closeContract(id); toast.success('Contrat clôturé'); setConfirmAction(null); await load(); }
     catch (err) { toast.error(err.response?.data?.error || 'Erreur clôture'); }
+    finally { setActionLoading(false); }
+  };
+
+  const handleReopen = async () => {
+    if (actionLoading) return;
+    setActionLoading(true);
+    try {
+      await reopenContract(id);
+      toast.success('Contrat rouvert en brouillon — vous pouvez le corriger puis le re-valider');
+      setConfirmAction(null);
+      await load();
+    } catch (err) { toast.error(err.response?.data?.error || 'Erreur réouverture'); }
     finally { setActionLoading(false); }
   };
 
@@ -313,6 +361,9 @@ export default function ContractDetail() {
                   {canValidateDownload && <button onClick={() => setConfirmAction('validate')} className="ct-btn ct-btn-success"><FiCheckCircle size={14} /> Valider</button>}
                 </>
               )
+            )}
+            {canReopen && contract.status === 1 && (
+              <button onClick={() => setConfirmAction('reopen')} className="ct-btn ct-btn-outline"><FiRefreshCw size={14} /> Rouvrir en brouillon</button>
             )}
             {canManage && contract.status === 1 && (
               <button onClick={() => setConfirmAction('close')} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Clôturer</button>
@@ -511,18 +562,41 @@ export default function ContractDetail() {
             )}
           </div>
 
-          {/* Signature (réservé aux profils éditoriaux) */}
+          {/* Signature (réservé aux profils éditoriaux) — en ligne ou manuscrite */}
           {canManage && contract.status >= 1 && (
             <div className="ct-section">
-              <h3 className="ct-section-title"><FiCheckCircle size={16} /> Signature en ligne</h3>
+              <h3 className="ct-section-title"><FiCheckCircle size={16} /> Signature</h3>
               <div className={`ct-sign-status ${signStatus?.status >= 2 ? 'signed' : 'pending'}`}>
                 <div className="ct-sign-label" style={{ color: signStatus?.status >= 2 ? '#166534' : '#92400e' }}>
                   {signStatus?.label || 'Non signé'}
+                  {signStatus?.method === 'manuscrite' && ' · sur papier'}
+                  {signStatus?.method === 'en_ligne' && ' · en ligne'}
                 </div>
-                {signStatus?.signedBy && (
+
+                {/* Signature en ligne */}
+                {signStatus?.method === 'en_ligne' && signStatus?.signedBy && (
                   <div className="ct-sign-detail">Signé par : {signStatus.signedBy} {signStatus.signedIp ? `(IP: ${signStatus.signedIp})` : ''}</div>
                 )}
-                {signStatus?.status >= 2 && (
+
+                {/* Signature manuscrite : attestation + preuve */}
+                {signStatus?.physical && (
+                  <>
+                    <div className="ct-sign-detail" style={{ marginTop: 4 }}>
+                      Signé sur papier le <strong>{signStatus.physical.signedDate}</strong>
+                      {signStatus.physical.signerName ? ` par ${signStatus.physical.signerName}` : ''}.
+                    </div>
+                    <div className="ct-sign-detail" style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                      Attesté par {signStatus.physical.attestedBy} le {signStatus.physical.attestedAt}
+                    </div>
+                    {signStatus.physical.scanHash && (
+                      <div className="ct-sign-detail" style={{ fontSize: '0.72rem', color: '#94a3b8', wordBreak: 'break-all', marginTop: 2 }}>
+                        Empreinte SHA-256 : {signStatus.physical.scanHash}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {signStatus?.status >= 2 && signStatus?.method !== 'manuscrite' && (
                   signStatus?.certifiedInPdf ? (
                     <div className="ct-sign-detail" style={{ color: '#166534', marginTop: 6 }}>
                       ✓ Certificat intégré au PDF ({signStatus.pdfSignerDate})
@@ -534,10 +608,15 @@ export default function ContractDetail() {
                   )
                 )}
               </div>
+
+              {/* Pas encore signé : proposer en ligne OU papier */}
               {signStatus?.status < 2 && (
                 <div className="ct-sign-actions">
                   <button onClick={handleSendSignature} disabled={sendingSign} className="ct-btn ct-btn-primary" style={{ justifyContent: 'center' }}>
                     {sendingSign ? 'Envoi...' : 'Envoyer le lien à l’auteur'}
+                  </button>
+                  <button onClick={() => setShowPhysicalSign(true)} className="ct-btn ct-btn-outline" style={{ justifyContent: 'center' }}>
+                    <FiUploadCloud size={14} /> Enregistrer une signature papier
                   </button>
                   {signUrl && (
                     <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
@@ -549,11 +628,20 @@ export default function ContractDetail() {
                   )}
                 </div>
               )}
+
+              {/* Signé : actions selon le mode */}
               {signStatus?.status >= 2 && (
                 <div className="ct-sign-actions">
-                  <button onClick={handleRegenerate} disabled={regenerating} className="ct-btn ct-btn-blue" style={{ justifyContent: 'center' }}>
-                    <FiRefreshCw size={14} /> {regenerating ? 'Régénération…' : 'Régénérer le PDF signé'}
-                  </button>
+                  {signStatus?.physical?.hasScan && (
+                    <button onClick={handleDownloadScan} className="ct-btn ct-btn-dark" style={{ justifyContent: 'center' }}>
+                      <FiDownload size={14} /> Voir le scan signé
+                    </button>
+                  )}
+                  {signStatus?.method !== 'manuscrite' && (
+                    <button onClick={handleRegenerate} disabled={regenerating} className="ct-btn ct-btn-blue" style={{ justifyContent: 'center' }}>
+                      <FiRefreshCw size={14} /> {regenerating ? 'Régénération…' : 'Régénérer le PDF signé'}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -569,6 +657,61 @@ export default function ContractDetail() {
           confirmLabel="Valider le contrat"
           loading={actionLoading}
           onConfirm={handleValidate}
+          onCancel={() => setConfirmAction(null)}
+        />
+      )}
+      {showPhysicalSign && (
+        <div className="ct-modal-overlay" onClick={() => !physSigning && setShowPhysicalSign(false)}>
+          <div className="ct-modal" role="dialog" aria-modal="true" aria-labelledby="phys-sign-title" onClick={e => e.stopPropagation()}>
+            <h3 id="phys-sign-title" style={{ margin: '0 0 4px', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <FiUploadCloud size={18} /> Signature manuscrite (papier)
+            </h3>
+            <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 16px' }}>
+              Attestez la réception du contrat signé à la main par l'auteur et archivez-en le scan comme preuve.
+            </p>
+
+            <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>Date de signature *</label>
+            <input
+              type="date"
+              value={physForm.signed_date}
+              max={new Date().toISOString().slice(0, 10)}
+              onChange={e => setPhysForm(f => ({ ...f, signed_date: e.target.value }))}
+              style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8, marginBottom: 12 }}
+            />
+
+            <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>Nom du signataire</label>
+            <input
+              type="text"
+              placeholder="Par défaut : l'auteur du contrat"
+              value={physForm.signer_name}
+              onChange={e => setPhysForm(f => ({ ...f, signer_name: e.target.value }))}
+              style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8, marginBottom: 12 }}
+            />
+
+            <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>Scan du contrat signé * <span style={{ fontWeight: 400, color: '#94a3b8' }}>(PDF, JPG ou PNG — 15 Mo max)</span></label>
+            <input
+              type="file"
+              accept=".pdf,.jpg,.jpeg,.png"
+              onChange={e => setPhysForm(f => ({ ...f, file: e.target.files?.[0] || null }))}
+              style={{ width: '100%', marginBottom: 18, fontSize: '0.85rem' }}
+            />
+
+            <div className="ct-modal-actions">
+              <button onClick={() => setShowPhysicalSign(false)} disabled={physSigning} className="ct-btn ct-btn-outline">Annuler</button>
+              <button onClick={handleSignPhysical} disabled={physSigning || !physForm.file} className="ct-btn ct-btn-success">
+                {physSigning ? 'Enregistrement…' : 'Attester et archiver'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmAction === 'reopen' && (
+        <ConfirmModal
+          title="Rouvrir ce contrat en brouillon ?"
+          message="Le contrat repassera en statut Brouillon afin de corriger une erreur, puis pourra être re-validé (ce qui régénérera le document). La référence est conservée."
+          confirmLabel="Rouvrir en brouillon"
+          loading={actionLoading}
+          onConfirm={handleReopen}
           onCancel={() => setConfirmAction(null)}
         />
       )}

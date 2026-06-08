@@ -11,3 +11,8 @@ export const searchPropalProducts = (q) => api.get('/admin/propals/products/sear
 
 // PDF servi par l'endpoint existant (document-builddoc type='propal').
 export const openPropalPdf = (id) => window.open(`/api/admin/propals/${id}/pdf`, '_blank', 'noopener');
+
+// Proformas POS (devis de caisse stockés en SQLite).
+export const listPosQuotes = (params = {}) => api.get('/admin/propals/pos-quotes', { params });
+export const getPosQuote = (ref) => api.get(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}`);
+export const deletePosQuote = (ref) => api.delete(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}`);

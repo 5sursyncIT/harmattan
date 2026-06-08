@@ -6,6 +6,7 @@ export const ROLES = {
   super_admin:   { label: 'Super Admin',   color: '#7c3aed', fullAccess: true,  manageUsers: true,  description: "Accès total + gestion des utilisateurs et des rôles." },
   admin:         { label: 'Admin',         color: '#10531a', fullAccess: true,  manageUsers: false, description: "Accès total à tous les modules (sauf gestion des utilisateurs)." },
   editor:        { label: 'Éditeur',       color: '#0284c7', description: "Catalogue, manuscrits, contrats, bannières, statistiques." },
+  production:    { label: 'Production éditoriale', color: '#c026d3', description: "Pilotage du pipeline de production : validation éditoriale et conception des couvertures (BAT)." },
   librarian:     { label: 'Libraire & Support', color: '#0891b2', description: "Librairie (livres, stock, factures, BL, dépôt-vente, commandes) + support (messages, FAQ, newsletter, clients, actualités)." },
   gestionnaire_stock: { label: 'Gestionnaire de stock', color: '#b45309', description: "Stock & réapprovisionnement, fournisseurs, catalogue livres, bons de livraison, dépôt-vente." },
   comptable:     { label: 'Comptable',     color: '#0d9488', description: "Comptabilité, paiements, statistiques, devis." },
@@ -69,6 +70,14 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/news(\/.*)?$/,
     /^\/api\/admin\/legal-deposits(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
+  ],
+  // Profil « Production éditoriale » : pilote le pipeline éditorial + couvertures.
+  production: [
+    ...COMMON_PATHS,
+    ...WORKFLOW_READ_PATHS,
+    /^\/api\/admin\/manuscripts\/v2(\/.*)?$/,   // consultation des fiches manuscrits (drill-down « Détail »)
+    /^\/api\/admin\/editorial(\/.*)?$/,
+    /^\/api\/admin\/covers(\/.*)?$/,
   ],
   // Profil fusionné « Libraire & Support » : union des accès librairie + support.
   librarian: [
@@ -201,6 +210,9 @@ export const MODULE_PERMISSIONS = {
     evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud', printing: 'crud',
     contracts: 'crud', slides: 'crud', news: 'crud',
     legal_deposits: 'crud', profile: 'rw',
+  }),
+  production: M({
+    dashboard: 'r', manuscripts: 'r', editorial: 'crud', covers: 'crud', profile: 'rw',
   }),
   // Profil fusionné « Libraire & Support » : union des permissions des deux anciens rôles.
   librarian: M({

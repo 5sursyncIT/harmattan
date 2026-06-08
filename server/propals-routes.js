@@ -22,10 +22,34 @@ const adminApi = axios.create({
   timeout: 30000,
 });
 
-export function createPropalsRouter({ dolibarrPool, csrfProtection }) {
+export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
   const router = Router();
   // No-op si la protection CSRF n'est pas fournie (montage hérité).
   const csrf = csrfProtection || ((req, res, next) => next());
+
+  // Met en forme une ligne pos_quotes (SQLite) pour l'affichage admin / l'impression.
+  const shapePosQuote = (q) => {
+    let items = [];
+    try { items = JSON.parse(q.items || '[]'); } catch { items = []; }
+    const validity = q.validity_days || 30;
+    const created = q.created_at ? String(q.created_at).replace(' ', 'T') + 'Z' : null;
+    let expiry = null;
+    if (q.created_at) {
+      const d = new Date(String(q.created_at).replace(' ', 'T') + 'Z');
+      d.setDate(d.getDate() + validity);
+      expiry = d.toISOString();
+    }
+    return {
+      id: `pos:${q.ref}`, source: 'pos', ref: q.ref,
+      customer_name: q.customer_name || 'Client comptoir',
+      customer_phone: q.customer_phone || null, customer_email: q.customer_email || null,
+      date: created, expiry,
+      status: 'pos', statusLabel: 'Proforma POS',
+      total_ttc: Number(q.total_ttc) || 0,
+      items, validity_days: validity,
+      staff: q.staff_name || null, terminal: q.terminal || null,
+    };
+  };
 
   // ═══════════════════════════════════════════════════════════
   // LISTE
@@ -95,6 +119,69 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection }) {
     } catch (err) {
       console.error('[PROPALS] list error:', err.message);
       res.status(500).json({ error: 'Erreur chargement devis' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // PROFORMAS POS (devis de caisse, stockés en SQLite pos_quotes)
+  // Les proformas POS sont des devis commerciaux distincts des fiches
+  // de fabrication (llx_propal repurposé pour l'éditorial). On les expose
+  // ici pour qu'ils soient visibles dans /admin/devis.
+  // ═══════════════════════════════════════════════════════════
+  router.get('/pos-quotes', (req, res) => {
+    try {
+      if (!db) return res.json({ quotes: [] });
+      const where = [];
+      const params = [];
+      if (req.query.search) {
+        where.push('(ref LIKE ? OR customer_name LIKE ? OR customer_phone LIKE ?)');
+        const pat = `%${req.query.search}%`;
+        params.push(pat, pat, pat);
+      }
+      const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+      const rows = db.prepare(
+        `SELECT * FROM pos_quotes ${whereSql} ORDER BY id DESC LIMIT 500`
+      ).all(...params);
+      const quotes = rows.map(shapePosQuote);
+      res.json({
+        quotes,
+        total: quotes.length,
+        total_amount: quotes.reduce((s, q) => s + q.total_ttc, 0),
+      });
+    } catch (err) {
+      console.error('[PROPALS] pos-quotes list error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement proformas POS' });
+    }
+  });
+
+  router.get('/pos-quotes/:ref', (req, res) => {
+    try {
+      if (!db) return res.status(404).json({ error: 'Indisponible' });
+      const q = db.prepare('SELECT * FROM pos_quotes WHERE ref = ?').get(req.params.ref);
+      if (!q) return res.status(404).json({ error: 'Proforma introuvable' });
+      res.json({ quote: shapePosQuote(q) });
+    } catch (err) {
+      console.error('[PROPALS] pos-quote detail error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement proforma' });
+    }
+  });
+
+  // Suppression d'une proforma POS — réservée aux administrateurs.
+  router.delete('/pos-quotes/:ref', csrf, (req, res) => {
+    try {
+      if (!db) return res.status(404).json({ error: 'Indisponible' });
+      const role = req.admin?.role;
+      if (role !== 'super_admin' && role !== 'admin') {
+        return res.status(403).json({ error: 'Suppression réservée aux administrateurs' });
+      }
+      const q = db.prepare('SELECT ref FROM pos_quotes WHERE ref = ?').get(req.params.ref);
+      if (!q) return res.status(404).json({ error: 'Proforma introuvable' });
+      db.prepare('DELETE FROM pos_quotes WHERE ref = ?').run(req.params.ref);
+      console.log(`[PROPALS] Proforma POS ${req.params.ref} supprimée par ${req.admin?.email || role}`);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[PROPALS] pos-quote delete error:', err.message);
+      res.status(500).json({ error: 'Erreur suppression proforma' });
     }
   });
 

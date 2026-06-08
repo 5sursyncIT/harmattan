@@ -1,5 +1,5 @@
 import { lazy as reactLazy, Suspense } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Layout from './components/layout/Layout';
 import Loader from './components/common/Loader';
@@ -68,8 +68,7 @@ const AdminManuscriptDetail = lazy(() => import('./pages/admin/panels/Manuscript
 const AdminIntervenantsPanel = lazy(() => import('./pages/admin/panels/IntervenantsPanel'));
 const AdminEvaluationsPanel = lazy(() => import('./pages/admin/panels/EvaluationsPanel'));
 const AdminCorrectionsPanel = lazy(() => import('./pages/admin/panels/CorrectionsPanel'));
-const AdminEditorialPanel = lazy(() => import('./pages/admin/panels/EditorialPanel'));
-const AdminCoversPanel = lazy(() => import('./pages/admin/panels/CoversPanel'));
+const AdminProductionPanel = lazy(() => import('./pages/admin/panels/ProductionPanel'));
 const AdminPrintingPanel = lazy(() => import('./pages/admin/panels/PrintingPanel'));
 const AdminNewsletterPanel = lazy(() => import('./pages/admin/panels/NewsletterPanel'));
 const AdminProfilePanel = lazy(() => import('./pages/admin/panels/ProfilePanel'));
@@ -173,8 +172,10 @@ export default function App() {
             <Route path="intervenants" element={<AdminIntervenantsPanel />} />
             <Route path="evaluations" element={<AdminEvaluationsPanel />} />
             <Route path="corrections" element={<AdminCorrectionsPanel />} />
-            <Route path="editorial" element={<AdminEditorialPanel />} />
-            <Route path="covers" element={<AdminCoversPanel />} />
+            <Route path="production" element={<AdminProductionPanel />} />
+            {/* Routes héritées conservées pour les favoris : redirigent vers l'espace unifié */}
+            <Route path="editorial" element={<Navigate to="/admin/production?tab=editorial" replace />} />
+            <Route path="covers" element={<Navigate to="/admin/production?tab=covers" replace />} />
             <Route path="printing" element={<AdminPrintingPanel />} />
             <Route path="newsletter" element={<AdminNewsletterPanel />} />
             <Route path="profile" element={<AdminProfilePanel />} />

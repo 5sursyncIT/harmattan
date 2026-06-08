@@ -7,6 +7,7 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { generateManuscriptRef, transition, STAGE_LABELS, MANUSCRIPT_EVENTS } from './manuscript-workflow.js';
 import { notifyTransition, sendTransitionEmail, getAuthorPreferences } from './manuscript-emails.js';
+import { computeRoyaltyBreakdown } from './royalties.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
@@ -304,7 +305,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
                FROM llx_facturedet fd
                JOIN llx_facture f ON f.rowid = fd.fk_facture
                JOIN llx_product p ON p.rowid = fd.fk_product
-               WHERE f.fk_statut >= 1 AND fd.qty > 0
+               WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                  AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') IN (${placeholders})`,
               isbns,
             );
@@ -322,7 +323,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
                FROM llx_facturedet fd
                JOIN llx_facture f ON f.rowid = fd.fk_facture
                JOIN llx_product p ON p.rowid = fd.fk_product
-               WHERE f.fk_statut >= 1 AND fd.qty > 0
+               WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                  AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') IN (${placeholders})
                  AND f.datef >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)`,
               isbns,
@@ -347,7 +348,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
                  FROM llx_facturedet fd
                  JOIN llx_facture f ON f.rowid = fd.fk_facture
                  JOIN llx_product p ON p.rowid = fd.fk_product
-                 WHERE f.fk_statut >= 1 AND fd.qty > 0
+                 WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                    AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
                    AND f.datef <= ?`,
                 [isbn, dateTo],
@@ -359,7 +360,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
                  FROM llx_facturedet fd
                  JOIN llx_facture f ON f.rowid = fd.fk_facture
                  JOIN llx_product p ON p.rowid = fd.fk_product
-                 WHERE f.fk_statut >= 1 AND fd.qty > 0
+                 WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                    AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
                    AND f.datef BETWEEN ? AND ?`,
                 [isbn, dateFrom, dateTo],
@@ -368,28 +369,31 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
               const grossPeriod = Number(periodRow.gross);
               if (unitsPeriod === 0) continue;
 
-              const threshold = Number(c.threshold) || 0;
-              const freeCopies = Number(c.free_copies) || 0;
-              const rate = Number(c.royalty_rate) || 0;
-              const cumBefore = cumulative - unitsPeriod;
-              const thresholdPlusFree = threshold + freeCopies;
-              let unitsOver = 0;
-              if (cumulative > thresholdPlusFree) {
-                unitsOver = cumBefore >= thresholdPlusFree ? unitsPeriod : (cumulative - thresholdPlusFree);
-              }
-              const avgHt = unitsPeriod > 0 ? grossPeriod / unitsPeriod : 0;
-              const dueAmount = unitsOver * avgHt * (rate / 100);
-              if (dueAmount > 0) {
+              // Calcul via la SOURCE UNIQUE partagée avec la comptabilité
+              // (server/royalties.js) : même seuil (contractuel seul), même mode
+              // cumulatif, et surtout même traitement des paliers DLL (15 % puis 10 %).
+              // Garantit que « Mes droits » affiche exactement ce que la compta paiera.
+              const royalty = computeRoyaltyBreakdown({
+                contractType: c.contract_type,
+                unitsSold: unitsPeriod,
+                grossHt: grossPeriod,
+                cumulativeUnits: cumulative,
+                threshold: Number(c.threshold) || 0,
+                rate: Number(c.royalty_rate) || 0,
+                thresholdMode: 'cumulative',
+              });
+              if (royalty.royaltyDue > 0) {
                 royalties.by_book.push({
                   contract_id: c.id,
                   contract_ref: c.ref,
                   book_title: c.book_title,
                   units_period: unitsPeriod,
-                  units_over_threshold: Math.round(unitsOver * 100) / 100,
-                  rate,
-                  royalty_due: Math.round(dueAmount),
+                  units_over_threshold: Math.round(royalty.unitsOver * 100) / 100,
+                  rate: Number(c.royalty_rate) || 0,
+                  rate_label: royalty.royaltyRateLabel,
+                  royalty_due: Math.round(royalty.royaltyDue),
                 });
-                royalties.total_due += dueAmount;
+                royalties.total_due += royalty.royaltyDue;
               }
             } catch (e) {
               console.warn('[AUTHOR/DASHBOARD] royalty calc:', e.message);

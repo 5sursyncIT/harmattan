@@ -15,6 +15,7 @@
 
 import { Router } from 'express';
 import axios from 'axios';
+import { recordInvoicePayment } from './dolibarr-payments.js';
 
 // Client Dolibarr avec clé admin (opérations d'écriture sur factures).
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -1050,35 +1051,33 @@ function normalizeSplits(body) {
     .filter(s => s.method && s.amount > 0);
 }
 
-// Enregistre N paiements (un par split / méthode) sur une facture via l'API
-// Dolibarr. Chaque appel crée une ligne llx_paiement + llx_paiement_facture + banque.
-//
-// IMPORTANT : il FAUT transmettre `amount` par split. En v21, l'endpoint
-// /payments retombe sinon sur le total_ttc COMPLET de la facture à chaque appel,
-// ce qui impute le total entier autant de fois qu'il y a de méthodes (un
-// règlement fractionné de 104 500 en Wave+OM+Espèces enregistrait 3×104 500).
-// On ne solde la facture (closepaidinvoices) que sur le dernier split, comme le POS.
+// Enregistre N paiements (un par split / méthode) sur une facture, du montant
+// EXACT de chaque split. Passe par recordInvoicePayment (endpoint
+// /invoices/paymentsdistributed) : voir dolibarr-payments.js — l'endpoint
+// /invoices/{id}/payments IGNORE le montant et impute le reste-à-payer complet,
+// d'où le bug de sur-paiement fractionné. On ne solde la facture
+// (closepaidinvoices) que sur le dernier split.
 async function recordSplitPayments(pool, invoiceId, splits, bankAccount, datepUnix, comment) {
   const ids = [];
   for (let i = 0; i < splits.length; i++) {
     const s = splits[i];
-    const isLast = i === splits.length - 1;
     const paymentId = await resolvePaymentId(pool, s.method);
     if (!paymentId) {
       const err = new Error(`Code paiement inconnu dans Dolibarr : ${s.method}`);
       err.statusCode = 400;
       throw err;
     }
-    const r = await adminApi.post(`/invoices/${invoiceId}/payments`, {
-      datepaye: datepUnix,
-      paymentid: paymentId,
-      closepaidinvoices: isLast ? 'yes' : 'no',
-      accountid: bankAccount,
-      num_payment: s.num_payment || undefined,
-      comment,
+    const id = await recordInvoicePayment(adminApi, {
+      invoiceId,
       amount: s.amount,
+      paymentId,
+      accountId: bankAccount,
+      datepaye: datepUnix,
+      isLast: i === splits.length - 1,
+      numPayment: s.num_payment,
+      comment,
     });
-    ids.push(r.data);
+    ids.push(id);
   }
   return ids;
 }

@@ -10,8 +10,14 @@ import { formatPrice } from '../../../utils/formatters';
 import {
   listPropals, getPropal, openPropalPdf,
   createPropal, searchPropalClients, searchPropalProducts,
+  listPosQuotes, deletePosQuote,
 } from '../../../api/propals';
+import POSQuoteReceipt from '../../../components/pos/POSQuoteReceipt';
+import useAdminRole from '../../../hooks/useAdminRole';
 import './Contracts.css';
+
+// Suppression d'une proforma POS réservée aux administrateurs.
+const POS_QUOTE_DELETE_ROLES = ['super_admin', 'admin'];
 
 const STATUS_BADGE = {
   0: { label: 'Brouillon', bg: '#f1f5f9', color: '#475569' },
@@ -293,6 +299,22 @@ export default function DevisPanel() {
   const [filters, setFilters] = useState({ status: '', search: '', page: 1 });
   const [detailId, setDetailId] = useState(null);
   const [creating, setCreating] = useState(false);
+  const [posQuotes, setPosQuotes] = useState([]);
+  const [posQuote, setPosQuote] = useState(null);
+  const role = useAdminRole();
+  const canDeletePos = POS_QUOTE_DELETE_ROLES.includes(role);
+
+  const handleDeletePosQuote = async (q) => {
+    if (!window.confirm(`Supprimer définitivement la proforma ${q.ref} ?`)) return;
+    try {
+      await deletePosQuote(q.ref);
+      setPosQuotes(prev => prev.filter(x => x.ref !== q.ref));
+      if (posQuote?.ref === q.ref) setPosQuote(null);
+      toast.success(`Proforma ${q.ref} supprimée`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de la suppression');
+    }
+  };
 
   const reload = useCallback(() => {
     setLoading(true); setError(false);
@@ -300,6 +322,14 @@ export default function DevisPanel() {
       .then(r => setData(r.data))
       .catch(() => setError(true))
       .finally(() => setLoading(false));
+    // Proformas POS : seulement quand aucun filtre de statut Dolibarr n'est appliqué.
+    if (!filters.status) {
+      listPosQuotes({ search: filters.search })
+        .then(r => setPosQuotes(r.data.quotes || []))
+        .catch(() => setPosQuotes([]));
+    } else {
+      setPosQuotes([]);
+    }
   }, [filters]);
   useEffect(() => { reload(); }, [reload]);
 
@@ -345,6 +375,38 @@ export default function DevisPanel() {
           <option value="4">Facturé</option>
         </select>
       </div>
+
+      {posQuotes.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 8px' }}>
+            <span style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.95rem' }}>Proformas de caisse (POS)</span>
+            <span style={{ padding: '1px 8px', borderRadius: 999, fontSize: '0.72rem', fontWeight: 700, background: '#fff7ed', color: '#c2410c' }}>{posQuotes.length}</span>
+          </div>
+          <div className="admin-table-container">
+            <table className="admin-table">
+              <thead><tr><th>N°</th><th>Client</th><th style={{ textAlign: 'right' }}>Montant</th><th>Statut</th><th>Date</th><th>Validité</th><th></th></tr></thead>
+              <tbody>
+                {posQuotes.map(q => (
+                  <tr key={q.id} style={{ cursor: 'pointer' }} onClick={() => setPosQuote(q)}>
+                    <td><strong style={{ color: '#c2410c', textDecoration: 'underline', textUnderlineOffset: 3 }}>{q.ref}</strong></td>
+                    <td>{q.customer_name}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatPrice(q.total_ttc)}</td>
+                    <td><span style={{ padding: '2px 8px', borderRadius: 6, fontSize: '0.75rem', fontWeight: 700, background: '#fff7ed', color: '#c2410c' }}>{q.statusLabel}</span></td>
+                    <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{fmtDate(q.date)}</td>
+                    <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{q.expiry ? <><FiClock size={11} style={{ verticalAlign: -1, marginRight: 3 }} />{fmtDate(q.expiry)}</> : '—'}</td>
+                    <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                      <button className="ct-btn-ghost" onClick={() => setPosQuote(q)} title="Voir / imprimer"><FiFileText size={16} /></button>
+                      {canDeletePos && (
+                        <button className="ct-btn-ghost" onClick={() => handleDeletePosQuote(q)} title="Supprimer" style={{ color: '#dc2626' }}><FiTrash2 size={16} /></button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {loading ? <Loader /> : error ? (
         <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
@@ -394,6 +456,7 @@ export default function DevisPanel() {
       )}
 
       {detailId && <PropalDetailModal id={detailId} onClose={() => setDetailId(null)} />}
+      {posQuote && <POSQuoteReceipt quote={posQuote} hideOdt onClose={() => setPosQuote(null)} />}
       {creating && (
         <CreatePropalModal
           onClose={() => setCreating(false)}

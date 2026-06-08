@@ -9,7 +9,7 @@ const BANK_INFO = {
   mobile: 'Code marchand OM 413513 ou WAVE 77 242 25 08',
 };
 
-export default function POSQuoteReceipt({ quote, onClose }) {
+export default function POSQuoteReceipt({ quote, onClose, hideOdt = false }) {
   const handlePrint = () => {
     const printContent = document.getElementById('pos-receipt-printable');
     if (!printContent) return;
@@ -97,9 +97,11 @@ export default function POSQuoteReceipt({ quote, onClose }) {
         <button className="quote-btn-print" onClick={handlePrint}>
           <FiPrinter /> Imprimer
         </button>
-        <button className="quote-btn-download" onClick={handleDownloadODT}>
-          <FiDownload /> Telecharger ODT
-        </button>
+        {!hideOdt && (
+          <button className="quote-btn-download" onClick={handleDownloadODT}>
+            <FiDownload /> Telecharger ODT
+          </button>
+        )}
         <button className="quote-btn-close" onClick={onClose}>
           <FiX /> Fermer
         </button>
@@ -230,19 +232,39 @@ export default function POSQuoteReceipt({ quote, onClose }) {
 function numberToWordsFR(n) {
   n = Math.round(n);
   if (n === 0) return 'zéro';
+  if (n < 0) return 'moins ' + numberToWordsFR(-n);
   const units = ['', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix-sept', 'dix-huit', 'dix-neuf'];
   const tens = ['', '', 'vingt', 'trente', 'quarante', 'cinquante', 'soixante', 'soixante', 'quatre-vingt', 'quatre-vingt'];
-  function chunk(num) {
+  // Convertit un nombre 0..999. isFinal = ce groupe termine le nombre (accord de "cent"/"vingt").
+  function chunk(num, isFinal) {
     if (num === 0) return '';
     if (num < 20) return units[num];
     if (num < 70) return tens[Math.floor(num / 10)] + (num % 10 === 1 ? ' et un' : num % 10 ? '-' + units[num % 10] : '');
     if (num < 80) return 'soixante' + (num % 20 === 1 ? ' et onze' : '-' + units[10 + num % 10]);
-    if (num < 100) return 'quatre-vingt' + (num % 20 === 0 ? 's' : '-' + units[num % 20 < 20 ? num % 20 : num % 10]);
-    if (num < 200) return 'cent' + (num % 100 === 0 ? '' : ' ' + chunk(num % 100));
-    if (num < 1000) return units[Math.floor(num / 100)] + ' cent' + (num % 100 === 0 ? 's' : ' ' + chunk(num % 100));
-    if (num < 2000) return 'mille' + (num % 1000 === 0 ? '' : ' ' + chunk(num % 1000));
-    if (num < 1000000) return chunk(Math.floor(num / 1000)) + ' mille' + (num % 1000 === 0 ? '' : ' ' + chunk(num % 1000));
-    return String(num);
+    if (num < 100) return 'quatre-vingt' + (num % 20 === 0 ? (isFinal ? 's' : '') : '-' + units[num % 20 < 20 ? num % 20 : num % 10]);
+    const h = Math.floor(num / 100), r = num % 100;
+    const cent = h === 1 ? 'cent' : units[h] + ' cent';
+    return cent + (r === 0 ? (h > 1 && isFinal ? 's' : '') : ' ' + chunk(r, isFinal));
   }
-  return chunk(n);
+  const scales = [
+    { value: 1e9, sing: 'milliard', plur: 'milliards' },
+    { value: 1e6, sing: 'million', plur: 'millions' },
+    { value: 1e3, sing: 'mille', plur: 'mille' },
+  ];
+  const parts = [];
+  let rest = n;
+  for (const s of scales) {
+    const count = Math.floor(rest / s.value);
+    if (count > 0) {
+      if (s.value === 1e3) {
+        // "mille" est invariable et sans "un" devant.
+        parts.push((count === 1 ? '' : chunk(count, false) + ' ') + 'mille');
+      } else {
+        parts.push(chunk(count, false) + ' ' + (count === 1 ? s.sing : s.plur));
+      }
+      rest %= s.value;
+    }
+  }
+  if (rest > 0) parts.push(chunk(rest, true));
+  return parts.join(' ').trim();
 }

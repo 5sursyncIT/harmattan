@@ -467,7 +467,7 @@ function buildDigitalAnnex(variant) {
   <text:p>L'Éditeur fixe seul le format, la présentation, le prix, la date de mise en vente et les conditions d'accès à l'œuvre. L'Éditeur exploitera l'œuvre dans le respect du droit moral.</text:p>
 
   <text:p text:style-name="ArticleTitle">Article 3 · Rémunération</text:p>
-  <text:p text:style-name="Callout">${esc(editor)} versera à l'Auteur <text:span text:style-name="AccentBold">{object_options_royalty_rate_digital} %</text:span> du chiffre d'affaires net hors taxes provenant de l'exploitation numérique de l'œuvre.</text:p>
+  <text:p text:style-name="Callout">${esc(editor)} versera à l'Auteur <text:span text:style-name="AccentBold">{object_options_royalty_rate_digital} %</text:span> du chiffre d'affaires net provenant de l'exploitation numérique de l'œuvre.</text:p>
   <text:p>Le règlement de cette rémunération par l'Éditeur à l'Auteur interviendra en même temps et dans les mêmes conditions que la reddition générale des comptes de l'Auteur, telle qu'elle est prévue au contrat d'édition. <text:span text:style-name="Bold">Les droits numériques inférieurs à {object_options_royalty_digital_threshold_fcfa} FCFA seront reportés sur l'exercice suivant.</text:span></text:p>
 
   <text:p text:style-name="ArticleTitle">Article 4 · Promotion</text:p>
@@ -523,9 +523,6 @@ function buildAudiovisualAnnex(variant) {
   <text:p text:style-name="ArticleTitle">Article 7 · Différend</text:p>
   <text:p>Tout différend pouvant naître à l'occasion du présent contrat sera soumis à une conciliation, préalablement à tout recours devant les tribunaux. Pour tout litige non résolu de façon amiable, attribution de juridiction est faite aux tribunaux compétents de Dakar.</text:p>
 
-  <text:p text:style-name="ArticleTitle">Article 8 · TVA</text:p>
-  <text:p>Les droits d'auteur issus de l'exécution du présent contrat sont assujettis à la TVA au taux de <text:span text:style-name="Bold">18&#160;%</text:span>, payable par l'Éditeur. En conséquence, les sommes précisées dans le contrat s'entendent nettes.</text:p>
-
 ${buildSignatureBlock()}
 `;
 }
@@ -565,9 +562,6 @@ function buildTheatreAnnex(variant) {
 
   <text:p text:style-name="ArticleTitle">Article 7 · Différend</text:p>
   <text:p>Tout différend pouvant naître à l'occasion du présent contrat sera soumis à une conciliation, préalablement à tout recours devant les tribunaux. Pour tout litige non résolu de façon amiable, attribution de juridiction est faite aux tribunaux compétents de Dakar.</text:p>
-
-  <text:p text:style-name="ArticleTitle">Article 8 · TVA</text:p>
-  <text:p>Les droits d'auteur issus de l'exécution du présent contrat sont assujettis à la TVA au taux de <text:span text:style-name="Bold">18&#160;%</text:span>, payable par l'Éditeur. En conséquence, les sommes précisées dans le contrat s'entendent nettes.</text:p>
 
 ${buildSignatureBlock()}
 `;

@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { FiSearch, FiBook, FiUser } from 'react-icons/fi';
+import { FiSearch, FiUser } from 'react-icons/fi';
 import { authorPublicApi } from '../api/author';
 import Breadcrumb from '../components/common/Breadcrumb';
 import './AuthorsDirectoryPage.css';
@@ -94,20 +94,15 @@ export default function AuthorsDirectoryPage() {
                       key={a.id}
                       to={`/auteur/${a.slug}`}
                       className="author-card"
+                      title={`${a.name} — ${a.book_count} livre${a.book_count > 1 ? 's' : ''}`}
                     >
+                      <h3 className="author-card-name">{a.name}</h3>
                       <div className="author-card-photo">
                         {a.photo_url ? (
                           <img src={a.photo_url} alt={a.name} loading="lazy" />
                         ) : (
                           <span className="author-card-initials">{getInitials(a.name)}</span>
                         )}
-                      </div>
-                      <div className="author-card-info">
-                        <h3>{a.name}</h3>
-                        {a.bio_excerpt && <p className="author-card-bio">{a.bio_excerpt}…</p>}
-                        <p className="author-card-meta">
-                          <FiBook size={12} /> {a.book_count} livre{a.book_count > 1 ? 's' : ''}
-                        </p>
                       </div>
                     </Link>
                   ))}

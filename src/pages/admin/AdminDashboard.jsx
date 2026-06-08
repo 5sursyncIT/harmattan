@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   FiSettings, FiMail, FiFileText, FiUsers, FiLogOut, FiHome, FiImage, FiHelpCircle,
   FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck,
-  FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiCheckSquare, FiLayers,
+  FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiLayers,
   FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss, FiArchive,
   FiTrendingDown, FiBookmark,
 } from 'react-icons/fi';
@@ -13,7 +13,7 @@ import Loader from '../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Admin.css';
 
-const ALL_ROLES = ['super_admin', 'admin', 'editor', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
+const ALL_ROLES = ['super_admin', 'admin', 'editor', 'production', 'librarian', 'comptable', 'vendeur', 'evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
 
 // Navigation regroupée par domaine métier
 // Un groupe dont tous les items sont filtrés (RBAC) est masqué automatiquement.
@@ -45,8 +45,7 @@ const NAV_GROUPS = [
       { path: 'intervenants', label: 'Intervenants', icon: <FiUsers />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'evaluations', label: 'Évaluations', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'corrections', label: 'Corrections', icon: <FiEdit3 />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'editorial', label: 'Éditorial', icon: <FiCheckSquare />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'covers', label: 'Couvertures', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'production', label: 'Production éditoriale', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor', 'production'] },
       { path: 'printing', label: 'Impression', icon: <FiPrinter />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'legal-deposits', label: 'Dépôt légal', icon: <FiBookmark />, roles: ['super_admin', 'admin', 'editor', 'gestionnaire_stock'] },
       { path: 'contracts', label: 'Contrats', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'comptable'] },
@@ -121,8 +120,7 @@ const BADGE_KEYS = {
   manuscripts: 'manuscripts',
   evaluations: 'evaluations',
   corrections: 'corrections',
-  editorial: 'editorial',
-  covers: 'covers',
+  production: 'production',  // somme éditorial + couvertures (calculée côté client)
   printing: 'printing',
 };
 
@@ -175,7 +173,11 @@ export default function AdminDashboard() {
   // Polling des badges de notification (toutes les 30s)
   useEffect(() => {
     if (!admin) return;
-    const fetchBadges = () => getNotificationCounts().then(r => setBadges(r.data)).catch(() => {});
+    const fetchBadges = () => getNotificationCounts().then(r => {
+      const d = r.data || {};
+      // Badge unifié « Production éditoriale » = éditorial + couvertures.
+      setBadges({ ...d, production: (d.editorial || 0) + (d.covers || 0) });
+    }).catch(() => {});
     fetchBadges();
     const interval = setInterval(fetchBadges, 30000);
     return () => clearInterval(interval);
@@ -187,7 +189,11 @@ export default function AdminDashboard() {
     const allTabs = flattenTabs();
     const allowed = allTabs.filter(t => navVisible(t, role, myOverrides));
     const current = location.pathname.replace('/admin', '').replace(/^\//, '');
-    const isAllowed = allowed.some(t => t.path === current || (t.path && current.startsWith(t.path + '/')));
+    // Le drill-down « Détail » d'un manuscrit (/admin/manuscripts/:id) est accessible
+    // à tout profil pilotant le pipeline (Production éditoriale) ou ayant l'onglet Manuscrits.
+    const canDrillManuscripts = allowed.some(t => t.path === 'production' || t.path === 'manuscripts');
+    const isAllowed = allowed.some(t => t.path === current || (t.path && current.startsWith(t.path + '/')))
+      || (canDrillManuscripts && current.startsWith('manuscripts/'));
     if (!isAllowed) {
       const fallback = allowed[0]?.path || 'profile';
       navigate(`/admin/${fallback}`, { replace: true });
