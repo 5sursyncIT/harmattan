@@ -34,7 +34,7 @@ export default function ContractsList() {
   const canCreate = CONTRACT_WRITE_ROLES.includes(role); // création (inclut le comptable)
   const [filters, setFilters] = useState({
     status: '', type: '', author: '', date_from: '', date_to: '',
-    sort: '', order: 'DESC', page: 1,
+    sort: '', order: 'DESC', page: 1, limit: 20,
   });
   const [showFilters, setShowFilters] = useState(false);
 
@@ -51,13 +51,14 @@ export default function ContractsList() {
 
   const update = (key, value) => setFilters(f => ({ ...f, [key]: value, page: 1 }));
   const changePage = (page) => setFilters(f => ({ ...f, page }));
+  const changeLimit = (limit) => setFilters(f => ({ ...f, limit: parseInt(limit) || 20, page: 1 }));
   const toggleSort = (key) => {
     setFilters(f => {
       if (f.sort === key) return { ...f, order: f.order === 'DESC' ? 'ASC' : 'DESC', page: 1 };
       return { ...f, sort: key, order: 'DESC', page: 1 };
     });
   };
-  const resetFilters = () => setFilters({ status: '', type: '', author: '', date_from: '', date_to: '', sort: '', order: 'DESC', page: 1 });
+  const resetFilters = () => setFilters(f => ({ status: '', type: '', author: '', date_from: '', date_to: '', sort: '', order: 'DESC', page: 1, limit: f.limit }));
   const activeFilterCount = [filters.status, filters.type, filters.date_from, filters.date_to].filter(Boolean).length;
 
   const handleExport = async () => {
@@ -225,22 +226,37 @@ export default function ContractsList() {
             ))}
           </div>
 
-          {data.pages > 1 && (
-            <div className="ct-pagination">
-              <button disabled={filters.page <= 1} onClick={() => changePage(filters.page - 1)} className="ct-page-btn">
-                <FiChevronLeft size={16} />
-              </button>
-              {buildPages().map((p, i) => (
-                p === '...' ? <span key={`e${i}`} style={{ padding: '0 6px', color: '#94a3b8' }}>...</span> : (
-                  <button key={p} onClick={() => changePage(p)} className={`ct-page-btn ${filters.page === p ? 'active' : ''}`}>{p}</button>
-                )
-              ))}
-              <button disabled={filters.page >= data.pages} onClick={() => changePage(filters.page + 1)} className="ct-page-btn">
-                <FiChevronRight size={16} />
-              </button>
-              <span className="ct-page-info">Page {filters.page} sur {data.pages}</span>
-            </div>
-          )}
+          <div className="ct-pagination">
+            {data.pages > 1 && (
+              <>
+                <button disabled={filters.page <= 1} onClick={() => changePage(filters.page - 1)} className="ct-page-btn">
+                  <FiChevronLeft size={16} />
+                </button>
+                {buildPages().map((p, i) => (
+                  p === '...' ? <span key={`e${i}`} style={{ padding: '0 6px', color: '#94a3b8' }}>...</span> : (
+                    <button key={p} onClick={() => changePage(p)} className={`ct-page-btn ${filters.page === p ? 'active' : ''}`}>{p}</button>
+                  )
+                ))}
+                <button disabled={filters.page >= data.pages} onClick={() => changePage(filters.page + 1)} className="ct-page-btn">
+                  <FiChevronRight size={16} />
+                </button>
+              </>
+            )}
+            <span className="ct-page-info">
+              {data.total} résultat{data.total > 1 ? 's' : ''} · Page {filters.page} sur {data.pages}
+            </span>
+            <select
+              className="ct-filter-select"
+              style={{ marginLeft: 'auto', width: 'auto' }}
+              value={filters.limit}
+              onChange={e => changeLimit(e.target.value)}
+              aria-label="Contrats par page"
+            >
+              <option value={10}>10 / page</option>
+              <option value={20}>20 / page</option>
+              <option value={50}>50 / page</option>
+            </select>
+          </div>
         </>
       )}
     </div>

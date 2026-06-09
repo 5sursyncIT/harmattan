@@ -44,7 +44,7 @@ const NAV_GROUPS = [
       { path: 'manuscripts', label: 'Manuscrits', icon: <FiFileText />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'intervenants', label: 'Intervenants', icon: <FiUsers />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'evaluations', label: 'Évaluations', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'editor'] },
-      { path: 'corrections', label: 'Corrections', icon: <FiEdit3 />, roles: ['super_admin', 'admin', 'editor'] },
+      { path: 'corrections', label: 'Corrections', icon: <FiEdit3 />, roles: ['super_admin', 'admin', 'editor', 'correcteur'] },
       { path: 'production', label: 'Production éditoriale', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor', 'production'] },
       { path: 'printing', label: 'Impression', icon: <FiPrinter />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'legal-deposits', label: 'Dépôt légal', icon: <FiBookmark />, roles: ['super_admin', 'admin', 'editor', 'gestionnaire_stock'] },
@@ -190,8 +190,10 @@ export default function AdminDashboard() {
     const allowed = allTabs.filter(t => navVisible(t, role, myOverrides));
     const current = location.pathname.replace('/admin', '').replace(/^\//, '');
     // Le drill-down « Détail » d'un manuscrit (/admin/manuscripts/:id) est accessible
-    // à tout profil pilotant le pipeline (Production éditoriale) ou ayant l'onglet Manuscrits.
-    const canDrillManuscripts = allowed.some(t => t.path === 'production' || t.path === 'manuscripts');
+    // à tout profil ayant un onglet du pipeline éditorial (Manuscrits, Production,
+    // Corrections, Évaluations) — leurs tableaux ouvrent la fiche manuscrit.
+    const MANUSCRIPT_DRILL_TABS = ['manuscripts', 'production', 'corrections', 'evaluations'];
+    const canDrillManuscripts = allowed.some(t => MANUSCRIPT_DRILL_TABS.includes(t.path));
     const isAllowed = allowed.some(t => t.path === current || (t.path && current.startsWith(t.path + '/')))
       || (canDrillManuscripts && current.startsWith('manuscripts/'));
     if (!isAllowed) {

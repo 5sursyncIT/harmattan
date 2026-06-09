@@ -281,13 +281,14 @@ export default function ContractDetail() {
     finally { setActionLoading(false); }
   };
 
-  const handleDownload = async () => {
+  const handleDownload = async (format = 'pdf') => {
+    const ext = String(format).toLowerCase();
     try {
-      const res = await downloadContractDocument(id);
+      const res = await downloadContractDocument(id, ext);
       const url = URL.createObjectURL(res.data);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `contrat-${contract.ref || id}.pdf`;
+      a.download = `contrat-${contract.ref || id}.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch { toast.error('Aucun document disponible'); }
@@ -369,7 +370,7 @@ export default function ContractDetail() {
               <button onClick={() => setConfirmAction('close')} className="ct-btn ct-btn-outline"><FiXCircle size={14} /> Clôturer</button>
             )}
             {canValidateDownload && (
-              <button onClick={handleDownload} className="ct-btn ct-btn-dark"><FiDownload size={14} /> Télécharger PDF</button>
+              <button onClick={() => handleDownload('pdf')} className="ct-btn ct-btn-dark"><FiDownload size={14} /> Télécharger PDF</button>
             )}
             {canManage && contract.status === 0 && (
               <button onClick={() => setConfirmAction('delete')} className="ct-btn ct-btn-danger"><FiXCircle size={14} /> Supprimer</button>
@@ -536,7 +537,7 @@ export default function ContractDetail() {
                       <span className="ct-doc-icon" style={{ background: `${iconColor}12`, color: iconColor }}>{ext.toUpperCase()}</span>
                       <span className="ct-doc-name">{d.name}</span>
                     </div>
-                    <button onClick={handleDownload} className="ct-doc-btn" style={{ background: iconColor }}>
+                    <button onClick={() => handleDownload(ext)} className="ct-doc-btn" style={{ background: iconColor }}>
                       <FiDownload size={12} /> {ext.toUpperCase()}
                     </button>
                   </div>

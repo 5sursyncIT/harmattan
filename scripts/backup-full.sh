@@ -97,9 +97,11 @@ fi
 rm -f "$MY_CNF"; trap - EXIT
 
 # ---- 3. Fichiers application (uploads non régénérables) --------------------
-echo "[3/4] Fichiers application (manuscripts/, public/images/)..."
+# contract-signatures/ = scans des contrats signés à la main (preuve légale,
+# non régénérable) ; l'empreinte SHA-256 ne vaut que si le scan est conservé.
+echo "[3/4] Fichiers application (manuscripts/, public/images/, contract-signatures/)..."
 if tar czf "$DEST/files-app.tar.gz" --ignore-failed-read \
-        -C "$APP_DIR" manuscripts public/images 2>>"$LOG"; then
+        -C "$APP_DIR" manuscripts public/images contract-signatures 2>>"$LOG"; then
     echo "    -> files-app.tar.gz ($(du -h "$DEST/files-app.tar.gz" | cut -f1))"
 else
     fail "archive fichiers application"

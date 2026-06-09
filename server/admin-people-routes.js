@@ -13,6 +13,7 @@ import { join, dirname } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { buildSocieteReportPdf } from './societe-report.js';
+import { computeRoyaltyBreakdown } from './royalties.js';
 
 // Convertit un buffer ODT en PDF via LibreOffice headless. Le modèle de devis
 // (module custom devislibrairie) génère de l'ODT, pas du PDF — sans conversion,
@@ -509,7 +510,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
         contractWhere = 's.nom LIKE ?'; contractParams = [`%${displayName.replace(/[%_]/g, '')}%`];
       }
       const [contracts] = await dolibarrPool.query(
-        `SELECT c.rowid AS id, c.ref, ce.book_title, ce.book_isbn,
+        `SELECT c.rowid AS id, c.ref, ce.book_title, ce.book_isbn, ce.contract_type,
                 ce.royalty_rate_print AS rate, ce.royalty_threshold AS threshold, ce.free_author_copies AS free_copies
          FROM llx_contrat c
          JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
@@ -528,7 +529,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
            FROM llx_facturedet fd
            JOIN llx_facture f ON f.rowid = fd.fk_facture
            JOIN llx_product p ON p.rowid = fd.fk_product
-           WHERE f.fk_statut >= 1 AND fd.qty > 0
+           WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
              AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
              AND f.datef <= ?`,
           [isbn, dateTo],
@@ -539,7 +540,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
            FROM llx_facturedet fd
            JOIN llx_facture f ON f.rowid = fd.fk_facture
            JOIN llx_product p ON p.rowid = fd.fk_product
-           WHERE f.fk_statut >= 1 AND fd.qty > 0
+           WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
              AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') = ?
              AND f.datef BETWEEN ? AND ?`,
           [isbn, dateFrom, dateTo],
@@ -547,17 +548,20 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
         const unitsPeriod = Number(periodRow.units);
         if (unitsPeriod === 0) continue;
         const grossPeriod = Number(periodRow.gross);
-        const threshold = Number(c.threshold) || 0;
-        const freeCopies = Number(c.free_copies) || 0;
         const rate = Number(c.rate) || 0;
-        const cumBefore = cumulative - unitsPeriod;
-        const thresholdPlusFree = threshold + freeCopies;
-        let unitsOver = 0;
-        if (cumulative > thresholdPlusFree) {
-          unitsOver = cumBefore >= thresholdPlusFree ? unitsPeriod : (cumulative - thresholdPlusFree);
-        }
-        const avgHt = unitsPeriod > 0 ? grossPeriod / unitsPeriod : 0;
-        const due = Math.round(unitsOver * avgHt * (rate / 100));
+        // Calcul via le module unifié (server/royalties.js) : seuil = threshold SEUL
+        // (jamais +freeCopies), exemplaires gratuits déjà exclus par total_ht>0, et
+        // paliers DLL gérés. Garantit l'égalité montant email = espace auteur = compta.
+        const breakdown = computeRoyaltyBreakdown({
+          contractType: c.contract_type,
+          unitsSold: unitsPeriod,
+          grossHt: grossPeriod,
+          cumulativeUnits: cumulative,
+          threshold: Number(c.threshold) || 0,
+          rate,
+          thresholdMode: 'cumulative',
+        });
+        const due = Math.round(breakdown.royaltyDue);
         if (due > 0) {
           rows.push({ book: c.book_title, ref: c.ref, units: unitsPeriod, rate, due });
           totalDue += due;

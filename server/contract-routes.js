@@ -423,7 +423,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
     try {
       const { status, type, author, ref, title, isbn, date_from, date_to, page = 1, limit = 20, sort, order } = req.query;
       const pageInt = Math.max(1, parseInt(page));
-      const limitInt = Math.min(50, parseInt(limit) || 20);
+      const limitInt = Math.min(50, Math.max(1, parseInt(limit) || 20));
       const offset = (pageInt - 1) * limitInt;
 
       const sortMap = { date: 'c.date_contrat', ref: 'c.ref', author: 's.nom', status: 'c.statut', title: 'ce.book_title', type: 'ce.contract_type' };
@@ -963,6 +963,19 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         return res.status(409).json({ error: 'Seul un contrat validé (actif) peut être rouvert en brouillon' });
       }
 
+      // Garde signature : refuser la réouverture d'un contrat DÉJÀ SIGNÉ (papier ou
+      // en ligne). Rouvrir puis modifier/re-valider désynchroniserait le contrat
+      // numérique du scan/attestation signé — preuve légale qui fait foi (audit 2026-06).
+      const [[sig]] = await dolibarrPool.query(
+        'SELECT signed_status, online_sign_name FROM llx_contrat WHERE rowid = ?', [id]
+      );
+      const hasAttestation = db.prepare('SELECT 1 AS x FROM contract_signatures WHERE contract_id = ?').get(id);
+      if ((sig && (Number(sig.signed_status) > 0 || sig.online_sign_name)) || hasAttestation) {
+        return res.status(409).json({
+          error: "Ce contrat est signé : sa réouverture invaliderait la concordance avec la signature archivée. Annulez d'abord la signature si une correction est indispensable.",
+        });
+      }
+
       // Réplique fidèle de Contrat::reopen() — garde statut = 1 dans le WHERE
       // pour rester idempotent face à un double-clic concurrent.
       const [result] = await dolibarrPool.query(
@@ -1357,12 +1370,17 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       const expectedSuffix = tplMatch ? `_${tplMatch[1]}.` : null; // ex. "_harmattan_2024_edition_complete."
       const matchesTemplate = (name) => expectedSuffix && name.includes(expectedSuffix);
 
+      // Format explicitement demandé (?format=odt|pdf) : l'UI propose un bouton
+      // par document (PDF et ODT) ; sans ce paramètre, on tombait toujours sur le
+      // PDF, d'où « je télécharge l'ODT mais j'obtiens le PDF ».
+      const wantExt = String(req.query.format || '').toLowerCase().replace(/^\./, '');
       const pickDoc = (docs) => {
         const byExt = (ext) => {
           const all = docs.filter(d => d.name.endsWith(ext));
           // Priorité au fichier dont le nom correspond au template courant.
           return all.find(d => matchesTemplate(d.name)) || all[0];
         };
+        if (wantExt) return byExt(`.${wantExt}`) || byExt('.pdf') || byExt('.odt') || docs[0];
         return byExt('.pdf') || byExt('.odt') || docs[0];
       };
 

@@ -297,7 +297,7 @@ function buildStyles(variant) {
     <text:p text:style-name="HeaderRef">Contrat d'édition · Réf. <text:span text:style-name="Bold">{object_ref}</text:span> · {__THIRDPARTY_NAME__} — {object_options_book_title}</text:p>
    </style:header>
    <style:footer>
-    <text:p text:style-name="FooterCenter">${esc(cfg.editorShort.toUpperCase())} · Page <text:page-number/> / <text:page-count/></text:p>
+    <text:p text:style-name="FooterCenter">${esc(cfg.editorShort.toUpperCase())} · Page <text:page-number text:select-page="current">1</text:page-number> / <text:page-count>1</text:page-count></text:p>
     <text:p text:style-name="FooterLegal">${esc(cfg.footer)}</text:p>
    </style:footer>
   </style:master-page>
@@ -331,7 +331,7 @@ function buildOpening(variant) {
 
   <text:p>Dans le cadre du présent traité, l'Auteur cède ${esc(editorDative)} <text:span text:style-name="Upper">le droit exclusif d'imprimer, publier, reproduire et vendre</text:span> ledit ouvrage sous forme d'éditions de tous formats, ordinaires, illustrés, de luxe, à tirage limité ou non.</text:p>
 
-  <text:p>De son côté, ${esc(editor)} s'engage à assurer à ses frais la publication en librairie de cet ouvrage et s'emploiera à lui procurer, par une diffusion dans le public et auprès des tiers susceptibles d'être intéressés, les conditions favorables à son exploitation sous toutes les formes.</text:p>
+  <text:p>De son côté, ${esc(editor)} s'engage à assurer la publication en librairie de cet ouvrage et s'emploiera à lui procurer, par une diffusion dans le public et auprès des tiers susceptibles d'être intéressés, les conditions favorables à son exploitation sous toutes les formes.</text:p>
 
   <text:p>En considération du risque pris par ${esc(editor)} en assurant, ainsi qu'il s'y engage, la publication de l'ouvrage dans les conditions prévues ci-dessous, estimant qu'une telle publication est susceptible d'apporter à l'ouvrage un champ d'exploitation étendu, et en vue des avantages que peut offrir l'unité de gestion, l'Auteur cède ${esc(editorDative)}, outre le droit d'édition graphique, les droits patrimoniaux&#160;:</text:p>
   <text:p text:style-name="ListItem">–  de reproduction&#160;;</text:p>
@@ -339,6 +339,8 @@ function buildOpening(variant) {
   <text:p>afférant à l'ouvrage sans aucune exception ni réserve et dans les conditions prévues aux articles 5, 6 et 7 ci-après.</text:p>
 
   <text:p>La présente cession est consentie pour avoir effet en tous lieux et pour tout le temps que durera la propriété littéraire de l'Auteur et de ses ayants droit, et d'après les législations tant sénégalaises qu'étrangères et les conventions internationales actuelles ou futures, y compris les prolongations qui pourraient être apportées à cette durée.</text:p>
+
+  <text:p>La propriété intellectuelle étant inaliénable, l'Auteur peut demander la rétrocession de ses droits cédés selon un accord à l'amiable à définir avec l'éditeur.</text:p>
 
   <text:p>L'Auteur garantit à ${esc(editor)} la jouissance entière et libre de toute servitude des droits cédés, contre tous troubles, revendications et évictions quelconques.</text:p>
 `;
@@ -356,7 +358,7 @@ function buildArticle4Classic(editor) {
 
   <text:p text:style-name="SubArticle">1. Cession à titre onéreux</text:p>
   <text:p>La cession des droits, objet du présent contrat, est consentie expressément par l'Auteur à titre onéreux à partir du premier (01) exemplaire vendu.</text:p>
-  <text:p text:style-name="Callout">${esc(editor)} versera à l'Auteur un taux de <text:span text:style-name="AccentBold">{object_options_royalty_rate_print} %</text:span> du chiffre d'affaires réalisé sur les exemplaires vendus au-delà de la barre des <text:span text:style-name="AccentBold">{object_options_royalty_threshold} exemplaires</text:span>.</text:p>
+  <text:p text:style-name="Callout">${esc(editor)} versera à l'Auteur à compter du premier (01) exemplaire vendu un taux de <text:span text:style-name="AccentBold">{object_options_royalty_rate_print} %</text:span> du chiffre d'affaires réalisé à la vente du livre, une fois la barre des <text:span text:style-name="AccentBold">{object_options_royalty_threshold} exemplaires</text:span> vendus atteinte.</text:p>
   <text:p>Ces versements ont pour assiette le prix de vente public au Sénégal.</text:p>
   <text:p>Les droits d'auteur ne portent pas sur les exemplaires remis gratuitement à l'Auteur, ni sur ceux réservés au Service de Presse dont le nombre sera fixé par l'Éditeur (<text:span text:style-name="Bold">{object_options_exemplaires_sp}</text:span> exemplaires), ni sur les exemplaires cédés à prix réduit (remise supérieure à 50&#160;% du prix public), à l'Auteur ou à des tiers dans l'intérêt de la diffusion de l'ouvrage.</text:p>
 
@@ -406,7 +408,7 @@ ${buildOpening(variant)}
   <text:p text:style-name="ArticleTitle">Article 2 · Tirages et formats</text:p>
   <text:p>Les formats, les présentations et les prix de vente des volumes seront déterminés par l'Éditeur.</text:p>
   <text:p>Vu les évolutions techniques, après un premier tirage à <text:span text:style-name="Bold">{object_options_tirage_initial} exemplaires</text:span>, le retirage se fait en continu. L'Éditeur s'engage à maintenir l'ouvrage toujours disponible.</text:p>
-  <text:p>À titre indicatif, l'ouvrage paraîtra au format <text:span text:style-name="Bold">{object_options_format_ouvrage}</text:span>, pour environ {object_options_nombre_pages_estime} pages, à un prix public prévisionnel de <text:span text:style-name="Bold">{object_options_prix_public_previsionnel} €</text:span>.</text:p>
+  <text:p>À titre indicatif, l'ouvrage paraîtra au format <text:span text:style-name="Bold">{object_options_format_ouvrage}</text:span>, pour environ {object_options_nombre_pages_estime} pages, à un prix public prévisionnel de <text:span text:style-name="Bold">{object_options_prix_public_previsionnel} €</text:span> qui peut varier en fonction de la version finale du livre.</text:p>
 
   <text:p text:style-name="ArticleTitle">Article 3 · Obligations de l'Éditeur</text:p>
   <text:p>L'Éditeur s'engage à publier l'œuvre dans le délai de trois (3) mois à compter de la remise du texte définitif et complet, sauf retard imputable à l'Auteur.</text:p>
@@ -577,7 +579,7 @@ function buildAuthorPurchaseAnnex() {
 
   <text:p text:style-name="Preamble">Par contrat conclu en date du {object_date}, l'Auteur a cédé à l'Éditeur le droit exclusif d'imprimer, publier, reproduire et vendre l'ouvrage intitulé <text:span text:style-name="Bold">« {object_options_book_title} »</text:span>.</text:p>
 
-  <text:p text:style-name="Callout">Si l'engagement d'achat de l'Auteur est activé pour ce contrat, l'Auteur s'engage à acheter <text:span text:style-name="AccentBold">{object_options_author_purchase_qty} exemplaires</text:span> de son ouvrage, sur la base du <text:span text:style-name="Bold">prix public moins {object_options_author_purchase_discount} %</text:span>. Les exemplaires achetés par l'Auteur sur ces bases seront comptabilisés pour le calcul des droits.</text:p>
+  <text:p text:style-name="Callout">L'Auteur s'engage à acheter <text:span text:style-name="AccentBold">{object_options_author_purchase_qty} exemplaires</text:span> de son ouvrage, sur la base du <text:span text:style-name="Bold">prix public moins {object_options_author_purchase_discount} %</text:span>. Les exemplaires achetés par l'Auteur sur ces bases seront comptabilisés pour le calcul des droits.</text:p>
 
   <text:p text:style-name="AuthorInlineSign">(Signature de l'Auteur&#160;: ………………….)</text:p>
 

@@ -7,6 +7,7 @@ export const ROLES = {
   admin:         { label: 'Admin',         color: '#10531a', fullAccess: true,  manageUsers: false, description: "Accès total à tous les modules (sauf gestion des utilisateurs)." },
   editor:        { label: 'Éditeur',       color: '#0284c7', description: "Catalogue, manuscrits, contrats, bannières, statistiques." },
   production:    { label: 'Production éditoriale', color: '#c026d3', description: "Pilotage du pipeline de production : validation éditoriale et conception des couvertures (BAT)." },
+  correcteur:    { label: 'Correcteur',    color: '#14b8a6', description: "Correction des manuscrits qui lui sont affectés." },
   librarian:     { label: 'Libraire & Support', color: '#0891b2', description: "Librairie (livres, stock, factures, BL, dépôt-vente, commandes) + support (messages, FAQ, newsletter, clients, actualités)." },
   gestionnaire_stock: { label: 'Gestionnaire de stock', color: '#b45309', description: "Stock & réapprovisionnement, fournisseurs, catalogue livres, bons de livraison, dépôt-vente." },
   comptable:     { label: 'Comptable',     color: '#0d9488', description: "Comptabilité, paiements, statistiques, devis." },
@@ -17,7 +18,6 @@ export const ROLES = {
   // afficher l'historique d'affectation des anciens manuscrits (badges), mais
   // on n'attribue plus ces rôles à de nouveaux comptes (voir DEPRECATED_ACTOR_ROLES).
   evaluateur:    { label: 'Évaluateur',    color: '#9333ea', deprecated: true, description: "Évaluation des manuscrits soumis (intervenant externe, sans compte)." },
-  correcteur:    { label: 'Correcteur',    color: '#14b8a6', deprecated: true, description: "Correction des manuscrits validés (intervenant externe, sans compte)." },
   infographiste: { label: 'Infographiste', color: '#c026d3', deprecated: true, description: "Création des couvertures (intervenant externe, sans compte)." },
   imprimeur:     { label: 'Imprimeur',     color: '#854d0e', deprecated: true, description: "Suivi de l'impression (intervenant externe, sans compte)." },
 };

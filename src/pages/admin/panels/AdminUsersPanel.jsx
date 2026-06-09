@@ -77,6 +77,17 @@ export default function AdminUsersPanel() {
   // carnet d'intervenants. Ils restent visibles en filtre/badge pour l'historique.
   const assignableRoles = useMemo(() => rolesArray.filter((r) => !r.deprecated), [rolesArray]);
 
+  // Liste du filtre « Tous les rôles » : rôles attribuables + uniquement les rôles
+  // dépréciés réellement portés par au moins un compte existant (suffixés « (déprécié) »).
+  // Évite d'encombrer le filtre avec des rôles d'acteurs que plus personne ne porte.
+  const filterableRoles = useMemo(() => {
+    const usedRoles = new Set(users.map((u) => u.role));
+    const legacy = rolesArray
+      .filter((r) => r.deprecated && usedRoles.has(r.value))
+      .map((r) => ({ ...r, label: `${r.label} (déprécié)` }));
+    return [...assignableRoles, ...legacy];
+  }, [assignableRoles, rolesArray, users]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     let list = users.filter((u) => {
@@ -278,7 +289,7 @@ export default function AdminUsersPanel() {
               </div>
               <select value={filterRole} onChange={(e) => setFilterRole(e.target.value)} style={{ padding: 8, border: '1px solid #d1d5db', borderRadius: 6 }}>
                 <option value="">Tous les rôles</option>
-                {rolesArray.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                {filterableRoles.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
               </select>
               <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ padding: 8, border: '1px solid #d1d5db', borderRadius: 6 }}>
                 <option value="">Tous les statuts</option>
