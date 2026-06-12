@@ -10,6 +10,9 @@ import api from '../../api/dolibarr';
 import './Header.css';
 
 const getNavClass = ({ isActive }) => isActive ? 'active' : undefined;
+// « Se faire éditer » : l'édition est le cœur de métier → toujours mis en avant
+// (style CTA), pas seulement quand la page est active.
+const getEditerNavClass = ({ isActive }) => `nav-cta${isActive ? ' active' : ''}`;
 
 export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -78,7 +81,7 @@ export default function Header() {
               <li><NavLink to="/" end className={getNavClass} onClick={closeMenu}>Accueil</NavLink></li>
               <li><NavLink to="/catalogue" className={getNavClass} onClick={closeMenu}>Catalogue</NavLink></li>
               <li><NavLink to="/auteurs" className={getNavClass} onClick={closeMenu}>Auteurs</NavLink></li>
-              <li><NavLink to="/se-faire-editer" className={getNavClass} onClick={closeMenu}>Se faire éditer</NavLink></li>
+              <li className="nav-cta-item"><NavLink to="/se-faire-editer" className={getEditerNavClass} onClick={closeMenu}>Se faire éditer</NavLink></li>
               <li><NavLink to="/actualites" className={getNavClass} onClick={closeMenu}>Actualités</NavLink></li>
               <li><NavLink to="/contact" className={getNavClass} onClick={closeMenu}>Contacts</NavLink></li>
             </ul>

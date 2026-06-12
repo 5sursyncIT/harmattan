@@ -356,12 +356,12 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
       // CA 12 mois (pour graphique)
       const [monthly] = await dolibarrPool.query(
         `SELECT DATE_FORMAT(datef, '%Y-%m') AS month, SUM(total_ttc) AS ca
-         FROM llx_facture WHERE fk_statut >= 1 AND datef >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+         FROM llx_facture WHERE fk_statut >= 1 AND datef >= DATE_SUB(UTC_DATE(), INTERVAL 12 MONTH)
          GROUP BY month ORDER BY month ASC`
       );
       const [monthlyPayments] = await dolibarrPool.query(
         `SELECT DATE_FORMAT(datep, '%Y-%m') AS month, SUM(amount) AS total
-         FROM llx_paiement WHERE datep >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+         FROM llx_paiement WHERE datep >= DATE_SUB(UTC_DATE(), INTERVAL 12 MONTH)
          GROUP BY month ORDER BY month ASC`
       );
       const paymentsByMonth = new Map(monthlyPayments.map(p => [p.month, Number(p.total)]));
@@ -621,7 +621,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
            SUM(remaining) AS total, COUNT(*) AS nb
          FROM (
            SELECT f.rowid, (f.total_ttc - COALESCE(pf.paid, 0)) AS remaining,
-                  DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) AS days_overdue
+                  DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) AS days_overdue
            FROM llx_facture f
            LEFT JOIN (SELECT fk_facture, SUM(amount) AS paid FROM llx_paiement_facture GROUP BY fk_facture) pf
              ON pf.fk_facture = f.rowid
@@ -635,11 +635,11 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
 
       if (bucket) {
         const ranges = {
-          current: 'AND DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) <= 0',
-          '0_30': 'AND DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) BETWEEN 1 AND 30',
-          '30_60': 'AND DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) BETWEEN 31 AND 60',
-          '60_90': 'AND DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) BETWEEN 61 AND 90',
-          '90_plus': 'AND DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) > 90',
+          current: 'AND DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) <= 0',
+          '0_30': 'AND DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) BETWEEN 1 AND 30',
+          '30_60': 'AND DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) BETWEEN 31 AND 60',
+          '60_90': 'AND DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) BETWEEN 61 AND 90',
+          '90_plus': 'AND DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) > 90',
         };
         if (ranges[bucket]) where += ' ' + ranges[bucket];
       }
@@ -660,7 +660,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
         const [customerRows] = await dolibarrPool.query(
           `SELECT s.rowid AS id, s.nom AS name, s.email, COUNT(f.rowid) AS nb_invoices,
                   SUM(f.total_ttc - COALESCE(pf.paid, 0)) AS total_due,
-                  MAX(DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef))) AS max_days_overdue
+                  MAX(DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef))) AS max_days_overdue
            FROM llx_facture f
            LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
            LEFT JOIN (SELECT fk_facture, SUM(amount) AS paid FROM llx_paiement_facture GROUP BY fk_facture) pf ON pf.fk_facture = f.rowid
@@ -689,7 +689,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           `SELECT f.rowid AS id, f.ref, f.datef, f.date_lim_reglement, f.total_ttc,
                   COALESCE(pf.paid, 0) AS paid,
                   (f.total_ttc - COALESCE(pf.paid, 0)) AS remaining,
-                  DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) AS days_overdue,
+                  DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) AS days_overdue,
                   s.rowid AS customer_id, s.nom AS customer, s.email
            FROM llx_facture f
            LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
@@ -762,7 +762,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
                 SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS inflow,
                 SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) AS outflow
          FROM llx_bank
-         WHERE datev >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+         WHERE datev >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
          GROUP BY fk_account, DATE(datev) ORDER BY d ASC`
       );
 
@@ -1053,7 +1053,7 @@ export function createAccountingRouter({ db, dolibarrPool, cache, auth, csrfProt
           `SELECT f.ref, f.datef, f.date_lim_reglement, f.total_ttc,
                   COALESCE(pf.paid, 0) AS paid,
                   (f.total_ttc - COALESCE(pf.paid, 0)) AS remaining,
-                  DATEDIFF(CURDATE(), COALESCE(f.date_lim_reglement, f.datef)) AS days_overdue,
+                  DATEDIFF(UTC_DATE(), COALESCE(f.date_lim_reglement, f.datef)) AS days_overdue,
                   s.nom AS customer, s.email
            FROM llx_facture f
            LEFT JOIN llx_societe s ON s.rowid = f.fk_soc

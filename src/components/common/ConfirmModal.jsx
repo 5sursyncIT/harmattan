@@ -5,9 +5,11 @@ import './ConfirmModal.css';
  * Modale de confirmation accessible.
  * - role="dialog", aria-modal, aria-labelledby/describedby
  * - Focus trap Tab/Shift+Tab
- * - Esc pour fermer
+ * - Esc pour fermer (sauf pendant `loading`)
  * - Restauration du focus au démontage
  * - autoFocus sur le bouton confirm
+ * - `loading` : désactive les boutons et affiche « Traitement… » pendant
+ *   une action asynchrone (la modale ne doit pas se fermer/relancer).
  */
 export default function ConfirmModal({
   title,
@@ -15,12 +17,17 @@ export default function ConfirmModal({
   confirmLabel = 'Confirmer',
   cancelLabel = 'Annuler',
   danger = false,
+  loading = false,
   onConfirm,
   onCancel,
 }) {
   const modalRef = useRef(null);
   const confirmBtnRef = useRef(null);
   const previouslyFocused = useRef(null);
+  // Ref miroir de `loading` : le listener clavier est posé une seule fois
+  // (effet dépendant d'onCancel uniquement) et doit voir la valeur courante.
+  const loadingRef = useRef(loading);
+  useEffect(() => { loadingRef.current = loading; }, [loading]);
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement;
@@ -29,7 +36,7 @@ export default function ConfirmModal({
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onCancel();
+        if (!loadingRef.current) onCancel();
       } else if (e.key === 'Tab') {
         const root = modalRef.current;
         if (!root) return;
@@ -58,7 +65,7 @@ export default function ConfirmModal({
   }, [onCancel]);
 
   return (
-    <div className="confirm-modal-overlay" onClick={onCancel} role="presentation">
+    <div className="confirm-modal-overlay" onClick={() => !loading && onCancel()} role="presentation">
       <div
         className="confirm-modal"
         onClick={(e) => e.stopPropagation()}
@@ -71,7 +78,7 @@ export default function ConfirmModal({
         <h3 id="confirm-modal-title">{title}</h3>
         <p id="confirm-modal-message">{message}</p>
         <div className="confirm-modal-actions">
-          <button type="button" className="btn btn-outline" onClick={onCancel}>
+          <button type="button" className="btn btn-outline" onClick={onCancel} disabled={loading}>
             {cancelLabel}
           </button>
           <button
@@ -79,8 +86,9 @@ export default function ConfirmModal({
             ref={confirmBtnRef}
             className={danger ? 'btn-icon danger' : 'btn btn-primary'}
             onClick={onConfirm}
+            disabled={loading}
           >
-            {confirmLabel}
+            {loading ? 'Traitement…' : confirmLabel}
           </button>
         </div>
       </div>

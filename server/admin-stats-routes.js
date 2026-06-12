@@ -14,6 +14,12 @@ const CACHE_TOP_TTL = 300;       // 5 min
 export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
   const router = Router();
 
+  // ⚠️ Fuseau horaire : le serveur MySQL tourne en CEST (UTC+2) alors que l'activité
+  // est à Dakar (UTC+0). Dolibarr écrit ses dates (datef, datep, datec, …) en heure
+  // de Dakar. On utilise donc UTC_DATE()/UTC_TIMESTAMP() (= heure de Dakar, sans heure
+  // d'été) et JAMAIS CURDATE()/NOW() (= CEST) : sinon, entre 22h et minuit à Dakar, le
+  // serveur est déjà « demain » et le « CA aujourd'hui » retombe à 0.
+
   // ══════════════════════════════════════════════════════════
   // GET /api/admin/stats/main — KPIs agrégés
   // ══════════════════════════════════════════════════════════
@@ -27,30 +33,30 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
       const [todayRow] = await dolibarrPool.query(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS revenue
          FROM llx_facture
-         WHERE fk_statut >= 1 AND DATE(datef) = CURDATE()`
+         WHERE fk_statut >= 1 AND DATE(datef) = UTC_DATE()`
       );
       const [yesterdayRow] = await dolibarrPool.query(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS revenue
          FROM llx_facture
-         WHERE fk_statut >= 1 AND DATE(datef) = CURDATE() - INTERVAL 1 DAY`
+         WHERE fk_statut >= 1 AND DATE(datef) = UTC_DATE() - INTERVAL 1 DAY`
       );
       const [monthRow] = await dolibarrPool.query(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS revenue
          FROM llx_facture
          WHERE fk_statut >= 1
-           AND YEAR(datef) = YEAR(CURDATE()) AND MONTH(datef) = MONTH(CURDATE())`
+           AND YEAR(datef) = YEAR(UTC_DATE()) AND MONTH(datef) = MONTH(UTC_DATE())`
       );
       const [prevMonthRow] = await dolibarrPool.query(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS revenue
          FROM llx_facture
          WHERE fk_statut >= 1
-           AND YEAR(datef) = YEAR(CURDATE() - INTERVAL 1 MONTH)
-           AND MONTH(datef) = MONTH(CURDATE() - INTERVAL 1 MONTH)`
+           AND YEAR(datef) = YEAR(UTC_DATE() - INTERVAL 1 MONTH)
+           AND MONTH(datef) = MONTH(UTC_DATE() - INTERVAL 1 MONTH)`
       );
       const [yearRow] = await dolibarrPool.query(
         `SELECT COALESCE(SUM(total_ttc), 0) AS revenue
          FROM llx_facture
-         WHERE fk_statut >= 1 AND YEAR(datef) = YEAR(CURDATE())`
+         WHERE fk_statut >= 1 AND YEAR(datef) = YEAR(UTC_DATE())`
       );
       const [arRow] = await dolibarrPool.query(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(total_ttc), 0) AS amount
@@ -88,12 +94,12 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
       const [active30Row] = await dolibarrPool.query(
         `SELECT COUNT(DISTINCT fk_soc) AS cnt
          FROM llx_facture
-         WHERE fk_statut >= 1 AND datef >= CURDATE() - INTERVAL 30 DAY`
+         WHERE fk_statut >= 1 AND datef >= UTC_DATE() - INTERVAL 30 DAY`
       );
       const [newMonthRow] = await dolibarrPool.query(
         `SELECT COUNT(*) AS cnt FROM llx_societe
          WHERE client IN (1, 2, 3)
-           AND YEAR(datec) = YEAR(CURDATE()) AND MONTH(datec) = MONTH(CURDATE())`
+           AND YEAR(datec) = YEAR(UTC_DATE()) AND MONTH(datec) = MONTH(UTC_DATE())`
       );
 
       // ── POS Today ─────────────────────────────────────────
@@ -102,7 +108,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
                 COUNT(DISTINCT pos_source) AS terminals
          FROM llx_facture
          WHERE fk_statut >= 1 AND module_source = 'takepos'
-           AND DATE(datef) = CURDATE()`
+           AND DATE(datef) = UTC_DATE()`
       );
 
       // Top cashier today (via note_private pattern "POS Terminal X | Name")
@@ -113,7 +119,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
            SUM(total_ttc) AS revenue
          FROM llx_facture
          WHERE fk_statut >= 1 AND module_source = 'takepos'
-           AND DATE(datef) = CURDATE()
+           AND DATE(datef) = UTC_DATE()
            AND note_private LIKE 'POS Terminal%'
          GROUP BY cashier
          ORDER BY revenue DESC
@@ -147,7 +153,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
            FROM llx_contratdet cd
            INNER JOIN llx_contrat c ON c.rowid = cd.fk_contrat
            WHERE c.statut = 1 AND cd.date_fin_validite IS NOT NULL
-             AND cd.date_fin_validite BETWEEN CURDATE() AND CURDATE() + INTERVAL 60 DAY`
+             AND cd.date_fin_validite BETWEEN UTC_DATE() AND UTC_DATE() + INTERVAL 60 DAY`
         );
         contractsExpiring = c2[0][0]?.c || 0;
       } catch { /* tables may not exist */ }
@@ -267,7 +273,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
       const [dailyRows] = await dolibarrPool.query(
         `SELECT DATE(datef) AS date, COUNT(*) AS cnt, SUM(total_ttc) AS revenue
          FROM llx_facture
-         WHERE fk_statut >= 1 AND datef >= CURDATE() - INTERVAL 30 DAY
+         WHERE fk_statut >= 1 AND datef >= UTC_DATE() - INTERVAL 30 DAY
          GROUP BY DATE(datef)
          ORDER BY date ASC`
       );
@@ -275,7 +281,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
       const [monthlyRows] = await dolibarrPool.query(
         `SELECT DATE_FORMAT(datef, '%Y-%m') AS month, COUNT(*) AS cnt, SUM(total_ttc) AS revenue
          FROM llx_facture
-         WHERE fk_statut >= 1 AND datef >= CURDATE() - INTERVAL 12 MONTH
+         WHERE fk_statut >= 1 AND datef >= UTC_DATE() - INTERVAL 12 MONTH
          GROUP BY month
          ORDER BY month ASC`
       );
@@ -321,7 +327,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
            COUNT(*) AS cnt,
            SUM(total_ttc) AS revenue
          FROM llx_facture
-         WHERE fk_statut >= 1 AND datef >= CURDATE() - INTERVAL 30 DAY
+         WHERE fk_statut >= 1 AND datef >= UTC_DATE() - INTERVAL 30 DAY
          GROUP BY label
          ORDER BY revenue DESC`
       );
@@ -332,7 +338,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
          INNER JOIN llx_paiement p ON p.rowid = pf.fk_paiement
          INNER JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
          INNER JOIN llx_facture f ON f.rowid = pf.fk_facture
-         WHERE f.fk_statut >= 1 AND f.datef >= CURDATE() - INTERVAL 30 DAY
+         WHERE f.fk_statut >= 1 AND f.datef >= UTC_DATE() - INTERVAL 30 DAY
          GROUP BY cp.code, cp.libelle
          ORDER BY amount DESC
          LIMIT 10`
@@ -389,7 +395,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
          INNER JOIN llx_facture f ON f.rowid = fd.fk_facture
          INNER JOIN llx_product p ON p.rowid = fd.fk_product
          WHERE f.fk_statut >= 1
-           AND YEAR(f.datef) = YEAR(CURDATE()) AND MONTH(f.datef) = MONTH(CURDATE())
+           AND YEAR(f.datef) = YEAR(UTC_DATE()) AND MONTH(f.datef) = MONTH(UTC_DATE())
          GROUP BY p.rowid, p.label, p.ref
          ORDER BY revenue DESC
          LIMIT 5`
@@ -403,7 +409,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
          INNER JOIN llx_facture f ON f.rowid = fd.fk_facture
          INNER JOIN llx_product_extrafields pe ON pe.fk_object = fd.fk_product
          WHERE f.fk_statut >= 1
-           AND YEAR(f.datef) = YEAR(CURDATE()) AND MONTH(f.datef) = MONTH(CURDATE())
+           AND YEAR(f.datef) = YEAR(UTC_DATE()) AND MONTH(f.datef) = MONTH(UTC_DATE())
            AND pe.auteur IS NOT NULL AND pe.auteur != ''
          GROUP BY pe.auteur
          ORDER BY revenue DESC
@@ -419,7 +425,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
          INNER JOIN llx_categorie_product cp ON cp.fk_product = fd.fk_product
          INNER JOIN llx_categorie c ON c.rowid = cp.fk_categorie
          WHERE f.fk_statut >= 1
-           AND YEAR(f.datef) = YEAR(CURDATE()) AND MONTH(f.datef) = MONTH(CURDATE())
+           AND YEAR(f.datef) = YEAR(UTC_DATE()) AND MONTH(f.datef) = MONTH(UTC_DATE())
            AND c.label NOT IN (${excludedCategorySqlList()})
          GROUP BY c.label
          ORDER BY revenue DESC
@@ -433,7 +439,7 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
            COUNT(*) AS sales_count, SUM(total_ttc) AS revenue
          FROM llx_facture
          WHERE fk_statut >= 1 AND module_source = 'takepos'
-           AND YEAR(datef) = YEAR(CURDATE()) AND MONTH(datef) = MONTH(CURDATE())
+           AND YEAR(datef) = YEAR(UTC_DATE()) AND MONTH(datef) = MONTH(UTC_DATE())
            AND note_private LIKE 'POS Terminal%'
          GROUP BY name
          ORDER BY revenue DESC

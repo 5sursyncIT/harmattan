@@ -1942,7 +1942,8 @@ app.get('/api/products', async (req, res) => {
     }
 
     // Simple query — use Dolibarr API directly
-    const apiParams = { limit: limitInt, page: pageInt, sortfield: sort, sortorder: order };
+    // pagination_data=true : Dolibarr renvoie { data: [...], pagination: { total, ... } }
+    const apiParams = { limit: limitInt, page: pageInt, sortfield: sort, sortorder: order, pagination_data: true };
     // tosell=1 : exclure les produits masqués par l'admin (filtre inconditionnel)
     const tosellFilter = `(t.tosell:=:1)`;
     if (q) {
@@ -1954,9 +1955,14 @@ app.get('/api/products', async (req, res) => {
     const prodRes = await dolibarrApi.get('/products', { params: apiParams });
     data = prodRes.data;
 
-    const products = (Array.isArray(data) ? data : []).map((p) => enrichProduct(p, cache.get(`img:${p.ref}`) || false));
+    // Réponse paginée { data, pagination } ou tableau brut (compat)
+    const rawProducts = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+    const total = Array.isArray(data) ? undefined : data?.pagination?.total;
+
+    const products = rawProducts.map((p) => enrichProduct(p, cache.get(`img:${p.ref}`) || false));
 
     const result = { products, page: pageInt, limit: limitInt };
+    if (typeof total === 'number') result.total = total;
     cache.set(cacheKey, result, 300);
     res.json(result);
   } catch (err) {

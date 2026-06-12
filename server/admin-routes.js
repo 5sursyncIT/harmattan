@@ -901,6 +901,24 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
           errors: { file: 'Veuillez joindre votre manuscrit.' },
         });
       }
+      if (synopsis && String(synopsis).length > 1200) {
+        return res.status(400).json({
+          error: 'Le synopsis ne doit pas dépasser 1200 caractères.',
+          errors: { synopsis: 'Le synopsis ne doit pas dépasser 1200 caractères.' },
+        });
+      }
+      if (!biography || !String(biography).trim()) {
+        return res.status(400).json({
+          error: 'La biographie de l’auteur est obligatoire.',
+          errors: { biography: 'Veuillez renseigner une courte biographie de l’auteur.' },
+        });
+      }
+      if (String(biography).length > 400) {
+        return res.status(400).json({
+          error: 'La biographie ne doit pas dépasser 400 caractères.',
+          errors: { biography: 'La biographie ne doit pas dépasser 400 caractères.' },
+        });
+      }
 
       const cleanEmail = email.trim().toLowerCase();
       const cleanFirstname = firstname.trim();

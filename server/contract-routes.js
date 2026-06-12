@@ -6,9 +6,10 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, mkdirSync, createReadStream, readFileSync, statSync } from 'fs';
+import { existsSync, mkdirSync, createReadStream, readFileSync, statSync, rmSync, unlinkSync } from 'fs';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { makeAdminAuth } from './admin-auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,12 +32,33 @@ const signatureUpload = multer({
     },
     filename: (req, file, cb) => {
       const m = (file.originalname || '').match(/\.(pdf|jpe?g|png)$/i);
-      cb(null, `signed${(m ? m[0] : '.pdf').toLowerCase()}`);
+      // Nom unique : multer écrit le fichier AVANT les gardes du handler. Avec un
+      // nom fixe (« signed.pdf »), un re-dépôt refusé aurait déjà écrasé le scan
+      // précédent (preuve légale). L'ancien fichier n'est supprimé qu'après
+      // enregistrement réussi de la nouvelle attestation.
+      cb(null, `signed-${Date.now()}${(m ? m[0] : '.pdf').toLowerCase()}`);
     },
   }),
   limits: { fileSize: 15 * 1024 * 1024 },
   fileFilter: (req, file, cb) => cb(null, /\.(pdf|jpe?g|png)$/i.test(file.originalname || '')),
 });
+
+// Wrapper multer : transforme les erreurs d'upload en réponses JSON claires
+// (sans lui, dépasser 15 Mo produisait une erreur Express générique).
+const scanUpload = (req, res, next) => signatureUpload.single('scan')(req, res, (err) => {
+  if (!err) return next();
+  if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Scan trop volumineux : 15 Mo maximum' });
+  return res.status(400).json({ error: 'Téléversement invalide (PDF, JPG ou PNG attendu)' });
+});
+
+// Content-Type des scans servi d'après l'EXTENSION contrôlée côté serveur —
+// jamais d'après le mimetype déclaré par le client (un fichier HTML renommé
+// .png avec un mimetype forgé serait sinon servi en text/html : XSS stocké).
+const SCAN_MIME = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
+const scanContentType = (filename) => {
+  const ext = (String(filename).match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+  return SCAN_MIME[ext] || 'application/octet-stream';
+};
 
 // ─── Shared admin Dolibarr API client ────────────────────
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -217,6 +239,14 @@ function intOr(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// Échappement HTML pour les valeurs interpolées dans les emails (un titre
+// d'ouvrage ou un nom de tiers contenant du HTML ne doit pas s'injecter).
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 // Convertit une date (ISO "YYYY-MM-DD", Date, timestamp…) en epoch secondes.
 // L'API Dolibarr v21 exige un epoch entier pour les extrafields de type `date` ;
 // envoyer une chaîne ISO provoque un rejet/une perte silencieuse (régression v13→v21).
@@ -296,33 +326,27 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   // Réouverture d'un contrat validé en brouillon : action de correction
   // exceptionnelle, réservée aux seuls administrateurs (ni éditeur, ni comptable).
   const CONTRACT_REOPEN_ROLES = ['super_admin', 'admin'];
-  function makeAuth(allowedRoles) {
-    return function (req, res, next) {
-      const session = req.cookies?.admin_session;
-      if (!session) return res.status(401).json({ error: 'Non authentifié' });
-      // Le token brut du cookie est haché avant lookup — la base stocke sha256(token).
-      const tokenHash = crypto.createHash('sha256').update(String(session)).digest('hex');
-      const admin = db.prepare(
-        "SELECT * FROM admin_users WHERE session_token = ? AND (session_expires_at IS NULL OR session_expires_at > datetime('now'))"
-      ).get(tokenHash);
-      if (!admin) return res.status(401).json({ error: 'Session invalide' });
-      if (!allowedRoles.includes(admin.role || 'admin')) {
-        return res.status(403).json({ error: 'Accès non autorisé pour votre profil' });
-      }
-      req.admin = admin;
-      next();
-    };
-  }
+  const makeAuth = (allowedRoles) => makeAdminAuth(db, allowedRoles);
   const auth = makeAuth(CONTRACT_ALLOWED_ROLES);    // cycle de vie sensible (clôture, suppression, signature, export)
   const authWrite = makeAuth(CONTRACT_WRITE_ROLES); // création + modification (inclut le comptable)
   const authValidate = makeAuth(CONTRACT_VALIDATE_ROLES); // validation + téléchargement PDF (inclut le comptable)
   const authRead = makeAuth(CONTRACT_READ_ROLES);   // lecture de navigation (inclut le comptable)
   const authReopen = makeAuth(CONTRACT_REOPEN_ROLES); // réouverture en brouillon (admins uniquement)
 
-  // SQL filter sanitizer
+  // SQL filter sanitizer — UNIQUEMENT pour les valeurs interpolées dans un
+  // sqlfilters Dolibarr (chaîne construite). Ne JAMAIS l'appliquer à un
+  // paramètre préparé (?) : doubler les apostrophes y corrompt la valeur
+  // (« N'Diaye » devenait « N''Diaye » → zéro résultat de recherche).
   function safeSql(value) {
     if (typeof value !== 'string') return '';
     return value.replace(/'/g, "''").replace(/[()]/g, '').slice(0, 200);
+  }
+
+  // Borne une valeur destinée à un paramètre LIKE bindé. mysql2 gère
+  // l'échappement des quotes ; on ne fait que limiter la longueur.
+  function likeParam(value) {
+    if (typeof value !== 'string') return '';
+    return value.slice(0, 200);
   }
 
   // Liste les documents Dolibarr d'un contrat. Dolibarr renvoie une 404 quand
@@ -382,7 +406,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         SELECT COUNT(DISTINCT c.rowid) as count
         FROM llx_contratdet cd
         JOIN llx_contrat c ON c.rowid = cd.fk_contrat
-        WHERE cd.date_fin_validite BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 90 DAY)
+        WHERE cd.date_fin_validite BETWEEN UTC_TIMESTAMP() AND DATE_ADD(UTC_TIMESTAMP(), INTERVAL 90 DAY)
           AND cd.statut IN (0, 4)
       `);
 
@@ -443,19 +467,19 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       }
       if (author) {
         where += ' AND s.nom LIKE ?';
-        params.push(`%${safeSql(author)}%`);
+        params.push(`%${likeParam(author)}%`);
       }
       if (ref) {
         where += ' AND c.ref LIKE ?';
-        params.push(`%${safeSql(ref)}%`);
+        params.push(`%${likeParam(ref)}%`);
       }
       if (title) {
         where += ' AND ce.book_title LIKE ?';
-        params.push(`%${safeSql(title)}%`);
+        params.push(`%${likeParam(title)}%`);
       }
       if (isbn) {
         where += ' AND ce.book_isbn LIKE ?';
-        params.push(`%${safeSql(isbn)}%`);
+        params.push(`%${likeParam(isbn)}%`);
       }
       if (date_from) {
         where += ' AND c.date_contrat >= ?';
@@ -524,7 +548,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         JOIN llx_contrat c ON c.rowid = cd.fk_contrat
         LEFT JOIN llx_societe s ON s.rowid = c.fk_soc
         LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
-        WHERE cd.date_fin_validite BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL ? DAY)
+        WHERE cd.date_fin_validite BETWEEN UTC_TIMESTAMP() AND DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? DAY)
           AND cd.statut IN (0, 4)
         GROUP BY c.rowid
         ORDER BY earliest_expiry ASC`, [days]
@@ -553,7 +577,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       const params = [];
       if (status !== undefined && status !== '') { where += ' AND c.statut = ?'; params.push(parseInt(status)); }
       if (type) { where += ' AND ce.contract_type = ?'; params.push(type); }
-      if (author) { where += ' AND s.nom LIKE ?'; params.push(`%${safeSql(author)}%`); }
+      if (author) { where += ' AND s.nom LIKE ?'; params.push(`%${likeParam(author)}%`); }
       if (date_from) { where += ' AND c.date_contrat >= ?'; params.push(date_from); }
       if (date_to) { where += ' AND c.date_contrat <= ?'; params.push(date_to + ' 23:59:59'); }
 
@@ -570,7 +594,15 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
          ORDER BY c.date_contrat DESC`, params
       );
 
-      const escCsv = (v) => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s; };
+      const escCsv = (v) => {
+        let s = String(v ?? '');
+        // Neutralise l'injection de formule : Excel/LibreOffice ÉVALUENT les
+        // cellules commençant par = + - @ (un nom d'auteur « =HYPERLINK(...) »
+        // s'exécuterait à l'ouverture de l'export). Le préfixe apostrophe les
+        // force en texte ; les nombres légitimes (taux, seuils) sont épargnés.
+        if (/^[=+\-@\t\r]/.test(s) && !Number.isFinite(Number(s))) s = `'${s}`;
+        return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+      };
       const header = 'Référence,Statut,Date,Auteur,Email auteur,Titre,ISBN,Type,Royalties print %,Royalties digital %,Seuil,Ex. gratuits';
       const lines = rows.map(r =>
         [r.ref, STATUS_LABELS[r.statut], r.date_contrat ? new Date(r.date_contrat).toLocaleDateString('fr-FR') : '',
@@ -848,29 +880,33 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         if (data.book_isbn && !validateISBN(data.book_isbn)) return res.status(400).json({ error: 'Format ISBN invalide' });
         arrayOptions.options_book_isbn = (data.book_isbn || '').replace(/[-\s]/g, '');
       }
-      if (data.royalty_rate_print !== undefined) {
-        const v = parseFloat(data.royalty_rate_print);
-        if (v < 0 || v > 50) return res.status(400).json({ error: 'Taux royalties print entre 0 et 50%' });
-        arrayOptions.options_royalty_rate_print = v;
-      }
-      if (data.royalty_rate_digital !== undefined) {
-        const v = parseFloat(data.royalty_rate_digital);
-        if (v < 0 || v > 50) return res.status(400).json({ error: 'Taux royalties digital entre 0 et 50%' });
-        arrayOptions.options_royalty_rate_digital = v;
-      }
-      if (data.royalty_threshold !== undefined) arrayOptions.options_royalty_threshold = parseInt(data.royalty_threshold);
-      if (data.royalty_digital_threshold_fcfa !== undefined) arrayOptions.options_royalty_digital_threshold_fcfa = parseInt(data.royalty_digital_threshold_fcfa);
-      if (data.free_author_copies !== undefined) arrayOptions.options_free_author_copies = parseInt(data.free_author_copies);
+      // Champs numériques : un champ fourni mais non numérique (champ vidé dans
+      // le formulaire → "") doit être REJETÉ, jamais écrit. parseFloat("") = NaN,
+      // et NaN < 0 / NaN > 50 valent false : sans garde Number.isFinite, le NaN
+      // passait la validation et effaçait silencieusement la valeur au contrat
+      // (taux de royalties → null → droits d'auteur faussés).
+      const numErrors = [];
+      const numField = (raw, label, { min = 0, max = Infinity, int = false } = {}) => {
+        const v = int ? parseInt(raw, 10) : parseFloat(raw);
+        if (!Number.isFinite(v) || v < min || v > max) { numErrors.push(label); return null; }
+        return v;
+      };
+      if (data.royalty_rate_print !== undefined) arrayOptions.options_royalty_rate_print = numField(data.royalty_rate_print, 'Taux royalties print entre 0 et 50%', { max: 50 });
+      if (data.royalty_rate_digital !== undefined) arrayOptions.options_royalty_rate_digital = numField(data.royalty_rate_digital, 'Taux royalties digital entre 0 et 50%', { max: 50 });
+      if (data.royalty_threshold !== undefined) arrayOptions.options_royalty_threshold = numField(data.royalty_threshold, 'Seuil exemplaires doit être un entier positif', { int: true });
+      if (data.royalty_digital_threshold_fcfa !== undefined) arrayOptions.options_royalty_digital_threshold_fcfa = numField(data.royalty_digital_threshold_fcfa, 'Seuil digital (FCFA) doit être un entier positif', { int: true });
+      if (data.free_author_copies !== undefined) arrayOptions.options_free_author_copies = numField(data.free_author_copies, 'Exemplaires gratuits entre 0 et 100', { int: true, max: 100 });
       if (data.author_purchase_enabled !== undefined) arrayOptions.options_author_purchase_enabled = data.author_purchase_enabled ? 1 : 0;
       if (data.author_purchase_qty !== undefined) arrayOptions.options_author_purchase_qty = parseInt(data.author_purchase_qty) || 0;
       if (data.author_purchase_discount !== undefined) arrayOptions.options_author_purchase_discount = parseFloat(data.author_purchase_discount) || 0;
 
       // Nouvelles variables v2
-      if (data.tirage_initial !== undefined) arrayOptions.options_tirage_initial = parseInt(data.tirage_initial);
+      if (data.tirage_initial !== undefined) arrayOptions.options_tirage_initial = numField(data.tirage_initial, 'Tirage initial doit être un entier positif', { int: true });
       if (data.format_ouvrage !== undefined) arrayOptions.options_format_ouvrage = (data.format_ouvrage || '').trim();
-      if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = parseFloat(data.prix_public_previsionnel);
-      if (data.nombre_pages_estime !== undefined) arrayOptions.options_nombre_pages_estime = parseInt(data.nombre_pages_estime);
-      if (data.exemplaires_sp !== undefined) arrayOptions.options_exemplaires_sp = parseInt(data.exemplaires_sp);
+      if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = numField(data.prix_public_previsionnel, 'Prix public prévisionnel doit être un nombre positif');
+      if (data.nombre_pages_estime !== undefined) arrayOptions.options_nombre_pages_estime = numField(data.nombre_pages_estime, 'Nombre de pages doit être un entier positif', { int: true });
+      if (data.exemplaires_sp !== undefined) arrayOptions.options_exemplaires_sp = numField(data.exemplaires_sp, 'Exemplaires SP doit être un entier positif', { int: true });
+      if (numErrors.length > 0) return res.status(400).json({ error: numErrors.join('. ') });
       if (data.date_signature !== undefined) arrayOptions.options_date_signature = toEpochDate(data.date_signature);
       if (data.editeur_signataire_nom !== undefined) arrayOptions.options_editeur_signataire_nom = (data.editeur_signataire_nom || '').trim();
       if (data.editeur_signataire_qualite !== undefined) arrayOptions.options_editeur_signataire_qualite = (data.editeur_signataire_qualite || '').trim();
@@ -1068,6 +1104,40 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
 
       await adminApi.delete(`/contracts/${id}`);
 
+      // Nettoyage des données locales rattachées au contrat supprimé. Sans lui,
+      // un manuscrit restait pointé vers un contrat fantôme (contract_id mort →
+      // le cron de détection de signature requêtait un rowid inexistant à chaque
+      // passage) et les devis/attestations devenaient des orphelins invisibles.
+      try {
+        // La table de liens est créée paresseusement à la première liaison :
+        // on la garantit ici pour que le DELETE ne fasse pas échouer la transaction.
+        db.exec(`CREATE TABLE IF NOT EXISTS contract_manuscript_links (
+          contract_id INTEGER, manuscript_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (contract_id, manuscript_id)
+        )`);
+        const linkedManuscripts = db.prepare('SELECT id, ref FROM manuscripts WHERE contract_id = ?').all(id);
+        db.transaction(() => {
+          db.prepare('DELETE FROM contract_manuscript_links WHERE contract_id = ?').run(id);
+          db.prepare('UPDATE manuscripts SET contract_id = NULL WHERE contract_id = ?').run(id);
+          db.prepare('DELETE FROM contract_quotes WHERE contract_id = ?').run(id);
+          // Défensif : un brouillon ne peut pas être signé, mais on purge quand même.
+          db.prepare('DELETE FROM contract_signatures WHERE contract_id = ?').run(id);
+        })();
+        const scanDir = join(CONTRACT_SIG_DIR, String(id));
+        if (existsSync(scanDir)) rmSync(scanDir, { recursive: true, force: true });
+        // Trace sur la frise des manuscrits détachés (le stage n'est pas régressé
+        // automatiquement — décision éditoriale — mais l'évènement est visible).
+        for (const m of linkedManuscripts) {
+          try {
+            logManuscriptEvent(db, m.id, 'contract_deleted',
+              { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+              `Contrat brouillon #${id} supprimé — manuscrit détaché`);
+          } catch (evtErr) { console.warn('Manuscript event (contract_deleted) warning:', evtErr.message); }
+        }
+      } catch (cleanErr) {
+        console.warn('[CONTRACTS] Nettoyage SQLite post-suppression warning:', cleanErr.message);
+      }
+
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'delete_contract', `Contrat brouillon #${id} supprimé`);
 
@@ -1114,7 +1184,9 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   // Get signature URL for a contract
   router.get('/:id/signature-url', auth, async (req, res) => {
     try {
-      const contract = await adminApi.get(`/contracts/${req.params.id}`);
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+      const contract = await adminApi.get(`/contracts/${id}`);
       const ref = contract.data.ref;
       if (!ref || ref.startsWith('(PROV')) return res.status(400).json({ error: 'Le contrat doit être validé avant de pouvoir être signé' });
 
@@ -1129,7 +1201,9 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   // Send signature link by email to author
   router.post('/:id/send-signature', auth, csrfProtection, async (req, res) => {
     try {
-      const contract = await adminApi.get(`/contracts/${req.params.id}`);
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+      const contract = await adminApi.get(`/contracts/${id}`);
       const ref = contract.data.ref;
       if (!ref || ref.startsWith('(PROV')) return res.status(400).json({ error: 'Le contrat doit être validé' });
 
@@ -1149,8 +1223,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         to: email,
         subject: `Contrat d'édition ${ref} — Signature en ligne`,
         html: `
-          <p>Bonjour ${authorRes.data.name},</p>
-          <p>Votre contrat d'édition pour l'ouvrage <strong>« ${bookTitle} »</strong> (réf. ${ref}) est prêt pour signature.</p>
+          <p>Bonjour ${escapeHtml(authorRes.data.name)},</p>
+          <p>Votre contrat d'édition pour l'ouvrage <strong>« ${escapeHtml(bookTitle)} »</strong> (réf. ${escapeHtml(ref)}) est prêt pour signature.</p>
           <p>Veuillez cliquer sur le lien ci-dessous pour signer le contrat en ligne :</p>
           <p><a href="${url}" style="display:inline-block;background:#10531a;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;">Signer le contrat</a></p>
           <p>Ce lien est personnel et sécurisé.</p>
@@ -1168,8 +1242,9 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
     }
   });
 
-  // Get signature status
-  router.get('/:id/signature-status', auth, async (req, res) => {
+  // Get signature status — lecture pure : mêmes rôles que la fiche contrat et
+  // le scan signé (le comptable voyait le scan mais pas le statut, incohérent).
+  router.get('/:id/signature-status', authRead, async (req, res) => {
     try {
       const [rows] = await dolibarrPool.query(
         `SELECT c.signed_status, c.online_sign_ip, c.online_sign_name, c.tms AS signed_tms,
@@ -1197,7 +1272,10 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         method: phys ? 'manuscrite' : (c.online_sign_name ? 'en_ligne' : null),
         signedBy: c.online_sign_name,
         signedIp: c.online_sign_ip,
-        signedAt: c.signed_tms,
+        // Date réelle de signature (extrafield figé à la 1re génération du PDF,
+        // ou date déclarée pour le papier) ; repli sur tms pour les contrats
+        // signés avant ce correctif et jamais régénérés.
+        signedAt: c.signature_auteur_date || c.signed_tms,
         // Les extrafields sont renseignés après régénération du PDF signé
         certifiedInPdf: !!c.signature_auteur_nom && !!c.signature_auteur_date,
         pdfSignerName: c.signature_auteur_nom,
@@ -1247,36 +1325,70 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   // SCAN comme preuve, avec une empreinte SHA-256 garantissant son intégrité.
   // Le contrat passe alors en « signé par l'auteur » (signed_status=2), et les
   // extrafields nom/date alimentent le PDF comme pour la signature en ligne.
-  router.post('/:id/sign-physical', authWrite, csrfProtection, signatureUpload.single('scan'), async (req, res) => {
+  // Attester une signature = action de cycle de vie sensible (même famille que
+  // « envoi en signature ») : rôles éditoriaux uniquement, comme documenté sur
+  // les constantes de rôles — le comptable n'atteste pas.
+  router.post('/:id/sign-physical', auth, csrfProtection, scanUpload, async (req, res) => {
+    // multer a déjà écrit le scan sur disque : tout refus doit le supprimer,
+    // sinon chaque tentative rejetée laisse un fichier orphelin non référencé.
+    const discardUpload = () => {
+      if (req.file?.path) { try { unlinkSync(req.file.path); } catch { /* déjà absent */ } }
+    };
     try {
       const id = parseInt(req.params.id, 10);
-      if (!id) return res.status(400).json({ error: 'Identifiant de contrat invalide' });
+      if (!id) { discardUpload(); return res.status(400).json({ error: 'Identifiant de contrat invalide' }); }
       if (!req.file) return res.status(400).json({ error: 'Le scan du contrat signé est requis (PDF, JPG ou PNG)' });
 
       const signedDate = (req.body?.signed_date || '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(signedDate)) {
+        discardUpload();
         return res.status(400).json({ error: 'Date de signature invalide (format AAAA-MM-JJ attendu)' });
       }
 
       // Le contrat doit exister et être validé (un brouillon n'est pas signable).
+      // On récupère aussi le nom du tiers et l'éventuelle signature en ligne en
+      // une seule requête.
       const [[contract]] = await dolibarrPool.query(
-        'SELECT rowid, ref, statut, fk_soc FROM llx_contrat WHERE rowid = ?', [id]
+        `SELECT c.rowid, c.ref, c.statut, c.fk_soc, c.signed_status, c.online_sign_name, s.nom AS soc_nom
+           FROM llx_contrat c
+           LEFT JOIN llx_societe s ON s.rowid = c.fk_soc
+          WHERE c.rowid = ?`, [id]
       );
-      if (!contract) return res.status(404).json({ error: 'Contrat introuvable' });
+      if (!contract) { discardUpload(); return res.status(404).json({ error: 'Contrat introuvable' }); }
       if (parseInt(contract.statut) < 1) {
+        discardUpload();
         return res.status(409).json({ error: 'Le contrat doit être validé avant d\'enregistrer une signature' });
+      }
+      // Une signature EN LIGNE déjà enregistrée (horodatage + IP Dolibarr) ne doit
+      // pas être écrasée par une attestation papier : c'est la preuve la plus forte.
+      if (contract.online_sign_name && [2, 9].includes(parseInt(contract.signed_status))) {
+        discardUpload();
+        return res.status(409).json({ error: `Ce contrat est déjà signé en ligne par ${contract.online_sign_name} — l'attestation papier est inutile` });
       }
 
       // Nom du signataire : fourni, sinon nom de l'auteur (tiers) du contrat.
-      let signerName = (req.body?.signer_name || '').trim();
-      if (!signerName) {
-        const [[soc]] = await dolibarrPool.query('SELECT nom FROM llx_societe WHERE rowid = ?', [contract.fk_soc]);
-        signerName = soc?.nom || '';
-      }
+      const signerName = (req.body?.signer_name || '').trim() || contract.soc_nom || '';
 
       // Empreinte d'intégrité du scan (preuve qu'il n'a pas été substitué).
       const buf = readFileSync(req.file.path);
       const hash = crypto.createHash('sha256').update(buf).digest('hex');
+
+      // Scan précédent éventuel (re-dépôt) : supprimé seulement après succès complet.
+      const previous = db.prepare('SELECT scan_filename FROM contract_signatures WHERE contract_id = ?').get(id);
+
+      // Ordre des écritures : Dolibarr (MySQL) D'ABORD, attestation SQLite ensuite.
+      // Si MySQL échoue, rien n'est écrit nulle part (le scan est supprimé) ; si
+      // SQLite échoue après MySQL, le contrat est signé côté Dolibarr et un
+      // re-dépôt suffit à compléter l'attestation. L'ordre inverse laissait un
+      // contrat « attesté signé » localement mais non signé dans Dolibarr.
+      await dolibarrPool.query(
+        `INSERT INTO llx_contrat_extrafields (fk_object, signature_auteur_nom, signature_auteur_date)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE signature_auteur_nom = VALUES(signature_auteur_nom),
+                                 signature_auteur_date = VALUES(signature_auteur_date)`,
+        [id, signerName, signedDate]
+      );
+      await dolibarrPool.query('UPDATE llx_contrat SET signed_status = 2 WHERE rowid = ?', [id]);
 
       // Enregistre l'attestation (une par contrat — REPLACE en cas de re-dépôt).
       db.prepare(`
@@ -1293,15 +1405,11 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         by: req.admin.username,
       });
 
-      // Reflète l'état dans Dolibarr : signé par l'auteur + nom/date pour le PDF.
-      await dolibarrPool.query('UPDATE llx_contrat SET signed_status = 2 WHERE rowid = ?', [id]);
-      await dolibarrPool.query(
-        `INSERT INTO llx_contrat_extrafields (fk_object, signature_auteur_nom, signature_auteur_date)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE signature_auteur_nom = VALUES(signature_auteur_nom),
-                                 signature_auteur_date = VALUES(signature_auteur_date)`,
-        [id, signerName, signedDate]
-      );
+      // L'ancienne version du scan n'est purgée qu'une fois la nouvelle référencée.
+      if (previous?.scan_filename && previous.scan_filename !== req.file.filename) {
+        try { unlinkSync(join(CONTRACT_SIG_DIR, String(id), previous.scan_filename)); }
+        catch (rmErr) { console.warn('[CONTRACTS] Purge ancien scan warning:', rmErr.message); }
+      }
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'sign_contract_physical',
@@ -1309,6 +1417,7 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
 
       res.json({ success: true, method: 'manuscrite', signer_name: signerName, signed_date: signedDate, scan_hash: hash });
     } catch (err) {
+      discardUpload();
       console.error('Physical signature error:', err.message);
       res.status(500).json({ error: 'Erreur lors de l\'enregistrement de la signature manuscrite' });
     }
@@ -1323,7 +1432,8 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       if (!row || !row.scan_filename) return res.status(404).json({ error: 'Aucun scan signé pour ce contrat' });
       const filePath = join(CONTRACT_SIG_DIR, String(id), row.scan_filename);
       if (!existsSync(filePath)) return res.status(404).json({ error: 'Fichier scan introuvable' });
-      res.setHeader('Content-Type', row.scan_mime || 'application/octet-stream');
+      res.setHeader('Content-Type', scanContentType(row.scan_filename));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Content-Disposition', `inline; filename="${row.contract_ref || 'contrat'}-signe-${row.scan_filename}"`);
       createReadStream(filePath).pipe(res);
     } catch (err) {
@@ -1485,8 +1595,9 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       const address = String(req.body.address || '').trim();
 
       // Un auteur est un particulier : nom + prénom + email OBLIGATOIRE (nécessaire
-      // pour l'envoi du contrat à signer). Le téléphone reste optionnel.
+      // pour l'envoi du contrat à signer) + téléphone OBLIGATOIRE (suivi du contrat).
       if (!email) return res.status(400).json({ error: "L'adresse email est obligatoire pour créer un auteur" });
+      if (!phone) return res.status(400).json({ error: "Le numéro de téléphone est obligatoire pour créer un auteur" });
       const vErr = validateTierIdentity({ name, firstname, email, phone, isCompany: false });
       if (vErr) return res.status(400).json({ error: vErr });
 

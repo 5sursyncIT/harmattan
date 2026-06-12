@@ -23,7 +23,7 @@ export async function calculateDemandAvg(dolibarrPool, productId, days = 30) {
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
      WHERE fd.fk_product = ? AND f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0
-       AND f.datef >= DATE_SUB(NOW(), INTERVAL ? DAY)`,
+       AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)`,
     [productId, days]
   );
   return (rows[0]?.total_sold || 0) / days;
@@ -38,7 +38,7 @@ export async function calculateDemandBatch(dolibarrPool, days = 30) {
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
      WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
-       AND f.datef >= DATE_SUB(NOW(), INTERVAL ? DAY)
+       AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
      GROUP BY fd.fk_product`,
     [days]
   );
@@ -56,7 +56,7 @@ export async function calculateDemandStdDev(dolibarrPool, productId, days = 90) 
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
      WHERE fd.fk_product = ? AND f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0
-       AND f.datef >= DATE_SUB(NOW(), INTERVAL ? DAY)
+       AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
      GROUP BY DATE(f.datef)`,
     [productId, days]
   );
@@ -347,12 +347,12 @@ export async function calculateCoverageAndRotation(dolibarrPool, limit = 100, op
      LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
      LEFT JOIN (
        SELECT fd.fk_product,
-              SUM(CASE WHEN f.datef >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN fd.qty ELSE 0 END) AS total_30,
+              SUM(CASE WHEN f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY) THEN fd.qty ELSE 0 END) AS total_30,
               SUM(fd.qty) AS total_90
        FROM llx_facturedet fd
        JOIN llx_facture f ON f.rowid = fd.fk_facture
        WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0
-         AND f.datef >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+         AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 90 DAY)
        GROUP BY fd.fk_product
      ) sales ON sales.fk_product = p.rowid
      WHERE p.tosell = 1${whereExtra}
@@ -552,7 +552,7 @@ export async function runClassificationBatch(dolibarrPool, db) {
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
      WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
-       AND f.datef >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+       AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 90 DAY)
      GROUP BY fd.fk_product`
   );
 
@@ -566,7 +566,7 @@ export async function runClassificationBatch(dolibarrPool, db) {
      FROM llx_facturedet fd
      JOIN llx_facture f ON f.rowid = fd.fk_facture
      WHERE f.fk_statut IN (1, 2) AND f.type = 0 AND fd.qty > 0 AND fd.fk_product IS NOT NULL
-       AND f.datef >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+       AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 90 DAY)
      GROUP BY fd.fk_product, DATE(f.datef)`
   );
 

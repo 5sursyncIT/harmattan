@@ -5,60 +5,14 @@ import { FiArrowLeft, FiArrowRight, FiCheck, FiSearch, FiUser, FiAlertCircle, Fi
 import toast from 'react-hot-toast';
 import './Contracts.css';
 import useAdminRole, { CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
+import { CONTRACT_MODEL_CHOICES, RIGHTS_SCOPE_CHOICES } from '../../../utils/contractTypes';
 
-const CONTRACT_MODELS = [
-  {
-    value: 'harmattan_2024',
-    label: 'Harmattan · classique',
-    desc: 'Contrat standard L\'Harmattan Sénégal',
-    icon: FiBookOpen,
-    color: '#10531a',
-    defaults: { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
-  },
-  {
-    value: 'harmattan_dll',
-    label: 'Harmattan · DLL',
-    desc: 'DLL : 15 % sur les 1 000 premiers ex., puis 10 % au-delà',
-    icon: FiLayers,
-    color: '#0284c7',
-    defaults: { royalty_rate_print: 15, royalty_rate_digital: 10, royalty_threshold: 1000, free_author_copies: 55 },
-  },
-  {
-    value: 'tamarinier',
-    label: 'Le Tamarinier',
-    desc: 'Collection Le Tamarinier (s/c L\'Harmattan Sénégal)',
-    icon: FiFilm,
-    color: '#7c3aed',
-    defaults: { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
-  },
-];
-
-const RIGHTS_SCOPES = [
-  {
-    value: 'edition_simple',
-    label: 'Édition · papier seul',
-    desc: 'Sans avenant numérique, audiovisuel ni théâtral',
-    icon: FiBookOpen,
-    color: '#475569',
-    defaults: { royalty_rate_digital: 0 },
-  },
-  {
-    value: 'edition_numerique',
-    label: 'Édition · papier + numérique',
-    desc: 'Contrat principal + avenant droits numériques',
-    icon: FiLayers,
-    color: '#0d9488',
-    defaults: { royalty_rate_digital: 10 },
-  },
-  {
-    value: 'edition_complete',
-    label: 'Édition · complète',
-    desc: 'Papier + numérique + adaptations audiovisuelle & théâtrale',
-    icon: FiFilm,
-    color: '#7c3aed',
-    defaults: { royalty_rate_digital: 10 },
-  },
-];
+// Données (labels, couleurs, defaults) centralisées dans utils/contractTypes.js ;
+// seules les icônes — détail de présentation de ce wizard — restent locales.
+const MODEL_ICONS = { harmattan_2024: FiBookOpen, harmattan_dll: FiLayers, tamarinier: FiFilm };
+const SCOPE_ICONS = { edition_simple: FiBookOpen, edition_numerique: FiLayers, edition_complete: FiFilm };
+const CONTRACT_MODELS = CONTRACT_MODEL_CHOICES.map(c => ({ ...c, icon: MODEL_ICONS[c.value] }));
+const RIGHTS_SCOPES = RIGHTS_SCOPE_CHOICES.map(c => ({ ...c, icon: SCOPE_ICONS[c.value] }));
 
 const TYPE_GUIDE = [
   'Cadre du contrat : Harmattan classique, DLL ou Le Tamarinier.',
@@ -114,7 +68,7 @@ function Field({ label, required, error, children, hint }) {
     <div className={`ct-field ${error ? 'has-error' : ''}`}>
       <label>{label}{required && <span style={{ color: '#ef4444' }}> *</span>}</label>
       {children}
-      {hint && !error && <span style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: 2 }}>{hint}</span>}
+      {hint && !error && <span style={{ fontSize: '0.75rem', color: '#64748b', marginTop: 2 }}>{hint}</span>}
       {error && <span className="ct-field-error"><FiAlertCircle size={12} /> {error}</span>}
     </div>
   );
@@ -189,15 +143,59 @@ export default function ContractCreate() {
     manuscript_id: searchParams.get('manuscript_id') || '',
   });
 
-  // Pre-fill from manuscript query params
+  // ── Brouillon local : ~20 champs saisis ne doivent pas disparaître sur un
+  // refresh, un retour navigateur ou une coupure réseau mobile. ─────────────
+  const DRAFT_KEY = 'contract-create-draft';
+  // État vierge de référence (1er rendu, avant toute restauration) pour le
+  // calcul « dirty » : brouillon à sauver / garde de sortie à armer.
+  const initialFormRef = useRef(form);
+  const isDirty = () => !!selectedAuthor || JSON.stringify(form) !== JSON.stringify(initialFormRef.current);
+
+  // Restauration au montage — sauf en arrivée depuis un manuscrit (les query
+  // params définissent un nouveau contexte qui prime sur un vieux brouillon).
+  useEffect(() => {
+    if (searchParams.get('manuscript_id') || searchParams.get('author') || searchParams.get('title')) return;
+    try {
+      const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+      if (!draft?.form) return;
+      setForm(f => ({ ...f, ...draft.form }));
+      if (draft.selectedAuthor) setSelectedAuthor(draft.selectedAuthor);
+      if (draft.step >= 1 && draft.step <= 3) setStep(draft.step);
+      toast('Brouillon restauré — vos saisies ont été conservées', { icon: '📝' });
+    } catch { localStorage.removeItem(DRAFT_KEY); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sauvegarde auto (débouncée) à chaque modification.
+  useEffect(() => {
+    if (submitting || !isDirty()) return undefined;
+    const t = setTimeout(() => {
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ form, selectedAuthor, step })); } catch { /* stockage plein/indispo : tant pis */ }
+    }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form, selectedAuthor, step, submitting]);
+
+  // Garde de sortie : couvre la fenêtre de debounce et signale le travail en cours.
+  useEffect(() => {
+    const handler = (e) => {
+      if (!isDirty()) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form, selectedAuthor]);
+
+  // Pre-fill from manuscript query params.
+  // On pré-remplit la recherche SANS sélectionner : avec les patronymes très
+  // homonymes (Diop, Ndiaye, Fall…), auto-sélectionner le premier résultat
+  // pouvait rattacher le contrat au mauvais tiers. L'utilisateur voit les
+  // résultats et clique le bon.
   const authorName = searchParams.get('author');
   useEffect(() => {
-    if (authorName) {
-      setAuthorQuery(authorName);
-      searchAuthors(authorName).then(r => {
-        if (r.data?.length > 0) setSelectedAuthor(r.data[0]);
-      }).catch(() => {});
-    }
+    if (authorName) handleAuthorSearch(authorName);
   }, [authorName]);
 
   const handleAuthorSearch = (q) => {
@@ -243,8 +241,12 @@ export default function ContractCreate() {
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) {
       errs.email = 'Email invalide';
     }
-    // Téléphone optionnel, mais validé s'il est renseigné.
-    if (data.phone?.trim() && data.phone.trim().replace(/[\s.\-()]/g, '').length < 6) errs.phone = 'Téléphone invalide';
+    // Téléphone obligatoire pour un nouvel auteur.
+    if (!data.phone?.trim()) {
+      errs.phone = 'Téléphone requis';
+    } else if (data.phone.trim().replace(/[\s.\-()]/g, '').length < 6) {
+      errs.phone = 'Téléphone invalide';
+    }
     return errs;
   };
 
@@ -352,6 +354,7 @@ export default function ContractCreate() {
     try {
       const payload = { ...form, contract_type: buildContractType(form.contract_model, form.rights_scope) };
       const res = await createContract({ thirdparty_id: selectedAuthor.id, ...payload });
+      localStorage.removeItem(DRAFT_KEY); // contrat créé : le brouillon local n'a plus lieu d'être
       toast.success('Contrat créé avec succès');
       navigate(`/admin/contracts/${res.data.id}`);
     } catch (err) {
@@ -415,7 +418,7 @@ export default function ContractCreate() {
                 </Field>
               </div>
               <div className="ct-form-row cols-2">
-                <Field label="Téléphone" error={newAuthorErrors.phone} hint="Optionnel">
+                <Field label="Téléphone" required error={newAuthorErrors.phone} hint="Pour le suivi du contrat">
                   <input type="tel" value={newAuthor.phone}
                     onChange={e => setNewAuthor(a => ({ ...a, phone: e.target.value }))}
                     placeholder="+221 ..." maxLength={30} />
@@ -594,7 +597,10 @@ export default function ContractCreate() {
               <input type="number" value={form.nombre_pages_estime} onChange={e => set('nombre_pages_estime', e.target.value)}
                 onBlur={() => handleBlur('nombre_pages_estime')} min={10} />
             </Field>
-            <Field label="Prix public (€)" error={errors.prix_public_previsionnel}>
+            <Field label="Prix public (€)" error={errors.prix_public_previsionnel}
+              hint={parseFloat(form.prix_public_previsionnel) > 0
+                ? `Prix catalogue Paris ≈ ${Math.round(parseFloat(form.prix_public_previsionnel) * 655.957).toLocaleString('fr-FR')} FCFA`
+                : 'Prix catalogue Paris (en euros)'}>
               <input type="number" value={form.prix_public_previsionnel} onChange={e => set('prix_public_previsionnel', e.target.value)}
                 onBlur={() => handleBlur('prix_public_previsionnel')} min={0} step={0.5} />
             </Field>

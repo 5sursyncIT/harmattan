@@ -385,23 +385,51 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
   });
 
   // PUT /api/admin/authors/:id — édition du profil public (admin)
-  router.put('/authors/:id', auth, requireRoles('super_admin', 'admin', 'editor'), csrfProtection, (req, res) => {
+  router.put('/authors/:id', auth, requireRoles('super_admin', 'admin', 'editor'), csrfProtection, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const author = db.prepare('SELECT id, firstname, lastname, slug FROM authors WHERE id = ?').get(id);
+      const author = db.prepare(
+        'SELECT id, firstname, lastname, email, phone, slug, dolibarr_thirdparty_id FROM authors WHERE id = ?'
+      ).get(id);
       if (!author) return res.status(404).json({ error: 'Auteur introuvable' });
 
       const {
+        firstname, lastname, email, phone,
         display_name, bio, photo_url, website,
         social_twitter, social_instagram, social_linkedin, social_facebook,
         public_listed, slug: customSlug,
       } = req.body;
 
+      // ── Identité (prénom / nom / email / téléphone) — éditable par les admins ──
+      // Une clé absente du body = champ inchangé (compat sauvegardes "profil public" seul).
+      const finalFirstname = firstname !== undefined ? String(firstname).trim() : (author.firstname || '');
+      const finalLastname = lastname !== undefined ? String(lastname).trim() : (author.lastname || '');
+      if (!`${finalFirstname} ${finalLastname}`.trim()) {
+        return res.status(400).json({ error: 'Le nom de l’auteur ne peut pas être vide' });
+      }
+
+      let finalEmail = author.email;
+      if (email !== undefined) {
+        const e = String(email).trim().toLowerCase();
+        if (e) {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) {
+            return res.status(400).json({ error: 'Adresse email invalide' });
+          }
+          const clash = db.prepare('SELECT id FROM authors WHERE LOWER(email) = ? AND id != ?').get(e, id);
+          if (clash) return res.status(409).json({ error: 'Cet email est déjà utilisé par un autre auteur' });
+          finalEmail = e;
+        } else {
+          finalEmail = null; // email effacé (auteur sans compte de connexion)
+        }
+      }
+
+      const finalPhone = phone !== undefined ? (String(phone).trim() || null) : author.phone;
+
       // Slug : si fourni explicitement, on l'utilise (unique). Sinon, dérivé du display_name.
       let finalSlug = author.slug;
       let finalDisplay = display_name && String(display_name).trim()
         ? String(display_name).trim()
-        : `${author.firstname} ${author.lastname}`.trim();
+        : `${finalFirstname} ${finalLastname}`.trim();
 
       const desiredSlug = customSlug ? slugify(customSlug) : (author.slug || slugify(finalDisplay));
       if (desiredSlug && desiredSlug !== author.slug) {
@@ -412,11 +440,16 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
 
       db.prepare(
         `UPDATE authors SET
+           firstname = ?, lastname = ?, email = ?, phone = ?,
            display_name = ?, slug = ?, bio = ?, photo_url = ?, website = ?,
            social_twitter = ?, social_instagram = ?, social_linkedin = ?, social_facebook = ?,
            public_listed = ?
          WHERE id = ?`
       ).run(
+        finalFirstname,
+        finalLastname,
+        finalEmail,
+        finalPhone,
         finalDisplay,
         finalSlug,
         bio || null,
@@ -430,10 +463,35 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
         id,
       );
 
-      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-        .run(req.admin?.username || 'unknown', 'author_update_public_profile', `#${id} ${finalDisplay} (slug=${finalSlug}, public=${public_listed ? 1 : 0})`);
+      // ── Synchronisation vers la fiche tiers Dolibarr liée (nom / email / téléphone) ──
+      // Le nom corrigé doit apparaître sur contrats, factures et droits d'auteur.
+      let dolibarrSynced = null; // null = pas de tiers lié ; true/false sinon
+      if (author.dolibarr_thirdparty_id && dolibarrPool) {
+        const dolibarrName = `${finalFirstname} ${finalLastname}`.trim() || finalDisplay;
+        try {
+          await dolibarrPool.query(
+            'UPDATE llx_societe SET nom = ?, email = ?, phone = ?, tms = NOW() WHERE rowid = ?',
+            [dolibarrName, finalEmail, finalPhone, author.dolibarr_thirdparty_id]
+          );
+          dolibarrSynced = true;
+        } catch (syncErr) {
+          console.error('Author→Dolibarr sync error:', syncErr.message);
+          dolibarrSynced = false;
+        }
+      }
 
-      res.json({ success: true, id, slug: finalSlug, display_name: finalDisplay });
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(
+          req.admin?.username || 'unknown',
+          'author_update_profile',
+          `#${id} ${finalDisplay} (slug=${finalSlug}, public=${public_listed ? 1 : 0}, dolibarr_sync=${dolibarrSynced})`,
+        );
+
+      res.json({
+        success: true, id, slug: finalSlug, display_name: finalDisplay,
+        firstname: finalFirstname, lastname: finalLastname, email: finalEmail, phone: finalPhone,
+        dolibarr_synced: dolibarrSynced,
+      });
     } catch (err) {
       console.error('Author update error:', err.message);
       res.status(500).json({ error: 'Erreur mise à jour auteur' });
@@ -918,7 +976,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
         `SELECT DATE_FORMAT(datef, '%Y-%m') AS ym, COALESCE(SUM(total_ttc), 0) AS ttc, COUNT(*) AS cnt
          FROM llx_facture
          WHERE fk_soc = ? AND type <> 2 AND fk_statut IN (1, 2)
-           AND datef >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 11 MONTH), '%Y-%m-01')
+           AND datef >= DATE_FORMAT(DATE_SUB(UTC_DATE(), INTERVAL 11 MONTH), '%Y-%m-01')
          GROUP BY ym ORDER BY ym`, [id]
       );
 

@@ -64,6 +64,10 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
         if (cancelled) return;
         setData(r.data);
         setForm({
+          firstname: r.data.author.firstname || '',
+          lastname: r.data.author.lastname || '',
+          email: r.data.author.email || '',
+          phone: r.data.author.phone || '',
           display_name: r.data.author.display_name || `${r.data.author.firstname} ${r.data.author.lastname}`.trim(),
           slug: r.data.author.slug || '',
           bio: r.data.author.bio || '',
@@ -99,6 +103,9 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
     try {
       const res = await updateAdminAuthor(id, form);
       toast.success(`Profil mis à jour (slug: ${res.data.slug})`);
+      if (res.data.dolibarr_synced === false) {
+        toast.error('Fiche locale mise à jour, mais la synchronisation Dolibarr a échoué (nom inchangé sur contrats/factures).');
+      }
       setEditing(false);
       load();
       onSaved?.();
@@ -204,7 +211,7 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
             <section className="admin-modal-section">
               <h4>
                 <FiGlobe /> Profil public
-                {data.author.public_listed && data.author.slug && (
+                {!!data.author.public_listed && data.author.slug && (
                   <span style={{ marginLeft: 12, fontSize: 12, color: '#10531a', fontWeight: 600 }}>
                     Visible · <a href={`/auteur/${data.author.slug}`} target="_blank" rel="noreferrer" style={{ color: '#10531a' }}>/auteur/{data.author.slug}</a>
                   </span>
@@ -223,6 +230,29 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
                 </div>
               ) : (
                 <form onSubmit={handleSave} style={{ display: 'grid', gap: 14 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <label>
+                      <strong style={{ display: 'block', marginBottom: 4 }}>Prénom</strong>
+                      <input type="text" value={form.firstname} onChange={handleChange('firstname')} style={{ width: '100%' }} />
+                    </label>
+                    <label>
+                      <strong style={{ display: 'block', marginBottom: 4 }}>Nom</strong>
+                      <input type="text" value={form.lastname} onChange={handleChange('lastname')} style={{ width: '100%' }} />
+                    </label>
+                    <label>
+                      <strong style={{ display: 'block', marginBottom: 4 }}>Email</strong>
+                      <input type="email" value={form.email} onChange={handleChange('email')} placeholder="email@exemple.com" style={{ width: '100%' }} />
+                    </label>
+                    <label>
+                      <strong style={{ display: 'block', marginBottom: 4 }}>Téléphone</strong>
+                      <input type="tel" value={form.phone} onChange={handleChange('phone')} style={{ width: '100%' }} />
+                    </label>
+                  </div>
+                  {data.author.dolibarr_thirdparty_id && (
+                    <small style={{ color: '#6b7280', marginTop: -6 }}>
+                      Nom, email et téléphone seront aussi mis à jour sur la fiche Dolibarr liée (#{data.author.dolibarr_thirdparty_id}).
+                    </small>
+                  )}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <label>
                       <strong style={{ display: 'block', marginBottom: 4 }}>Nom d'affichage</strong>
@@ -302,7 +332,7 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
 
             <div className="admin-modal-actions">
               {!editing && (
-                <button className="btn btn-primary" onClick={() => setEditing(true)}><FiEdit2 /> Éditer profil public</button>
+                <button className="btn btn-primary" onClick={() => setEditing(true)}><FiEdit2 /> Éditer le profil</button>
               )}
               <button className="btn btn-outline" onClick={handleNotifyRoyalties} disabled={notifyLoading}>
                 <FiDollarSign /> {notifyLoading ? 'Envoi…' : 'Envoyer récap royalties'}

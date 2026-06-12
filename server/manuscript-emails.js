@@ -415,6 +415,34 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
   }).catch((err) => console.error('[WORKFLOW] Email error:', err.message));
 }
 
+/**
+ * Notifie le comptable (par défaut Issa NDIAYE) lorsqu'un manuscrit reçoit une
+ * évaluation favorable, afin qu'il élabore le contrat d'édition et le devis.
+ * opts = { manuscript, authorName, accountantEmail, accountantName, siteUrl }
+ */
+export function sendAccountantEvaluationEmail(transporter, { manuscript, authorName, accountantEmail, accountantName, siteUrl }) {
+  if (!transporter || !accountantEmail) return Promise.resolve();
+
+  const msTitle = escapeHtml(manuscript.title || 'le manuscrit');
+  const msRef = escapeHtml(manuscript.ref || '');
+  const author = escapeHtml(authorName || '');
+  const contractsUrl = `${siteUrl || ''}/admin/contracts`;
+
+  const subject = `[Contrat & Devis] ${msTitle} — Évaluation favorable`;
+  const body = header('Évaluation favorable — contrat & devis à élaborer')
+    + `<p>Bonjour ${escapeHtml(accountantName || 'cher collègue')},</p>`
+    + `<p>Le manuscrit <strong>« ${msTitle} »</strong>${msRef ? ` (réf. ${msRef})` : ''}${author ? `, de <strong>${author}</strong>,` : ''} vient de recevoir une <strong>évaluation favorable</strong>.</p>`
+    + `<p>Merci de bien vouloir procéder à l'<strong>élaboration du contrat d'édition et du devis</strong> correspondants.</p>`
+    + btn('Élaborer le contrat', contractsUrl);
+
+  return transporter.sendMail({
+    from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+    to: accountantEmail,
+    subject,
+    html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+  }).catch((err) => console.error('[WORKFLOW] Accountant email error:', err.message));
+}
+
 const ROLE_LABELS = {
   evaluateur: { label: 'évaluateur', task: "à évaluer", adminTab: 'evaluations' },
   correcteur: { label: 'correcteur', task: "à corriger", adminTab: 'corrections' },
@@ -504,7 +532,7 @@ export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recip
  */
 export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl) {
   // 1. Auteur : notification in-app (toujours) + email (selon préférences)
-  const author = db.prepare('SELECT id, email, firstname FROM authors WHERE id = ?').get(manuscript.author_id);
+  const author = db.prepare('SELECT id, email, firstname, lastname FROM authors WHERE id = ?').get(manuscript.author_id);
   if (author?.id) {
     // Notification in-app — toujours créée, même sans transporter et même si email opt-out
     createAuthorNotification(db, manuscript, toStage, author, siteUrl);
@@ -602,5 +630,20 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
         }, siteUrl);
       }
     } catch (err) { /* fallback silencieux */ void err; }
+  }
+
+  // 4. Comptable : élaboration du contrat et du devis dès l'évaluation favorable.
+  //    Destinataire configurable, par défaut Issa NDIAYE (demande direction).
+  if (toStage === 'evaluation_positive') {
+    const accountantEmail = process.env.MANUSCRIPT_ACCOUNTANT_EMAIL || 'issa.ndiaye@senharmattan.sn';
+    const accountantName = process.env.MANUSCRIPT_ACCOUNTANT_NAME || 'Issa NDIAYE';
+    if (accountantEmail) {
+      try {
+        const authorName = author ? `${author.firstname || ''} ${author.lastname || ''}`.trim() : '';
+        sendAccountantEvaluationEmail(transporter, {
+          manuscript, authorName, accountantEmail, accountantName, siteUrl,
+        });
+      } catch (err) { console.warn('[WORKFLOW] accountant notify error:', err.message); }
+    }
   }
 }

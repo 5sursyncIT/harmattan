@@ -1,20 +1,13 @@
-import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { getContracts, exportContractsCsv } from '../../../api/contracts';
 import { FiSearch, FiPlus, FiChevronLeft, FiChevronRight, FiArrowLeft, FiFilter, FiX, FiCalendar, FiBookOpen, FiDownload, FiArrowUp, FiArrowDown } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Contracts.css';
-import { contractTypeLabel, CONTRACT_TYPE_FILTER_GROUPS } from '../../../utils/contractTypes';
+import { contractTypeLabel, contractTypeColor, CONTRACT_TYPE_FILTER_GROUPS } from '../../../utils/contractTypes';
 import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
 
-const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
-// Couleur de pastille par modèle (le type stocké commence par la clé du modèle)
-const MODEL_COLORS = { harmattan_dll: '#0284c7', tamarinier: '#7c3aed', harmattan_2024: '#10531a' };
-const typeColor = (type) => {
-  const key = Object.keys(MODEL_COLORS).find(m => String(type || '').startsWith(m));
-  return MODEL_COLORS[key] || '#10531a';
-};
 const SORT_OPTIONS = [
   { key: 'date', label: 'Date' },
   { key: 'ref', label: 'Ref' },
@@ -24,41 +17,81 @@ const SORT_OPTIONS = [
 ];
 
 export default function ContractsList() {
-  const navigate = useNavigate();
   const [data, setData] = useState({ contracts: [], total: 0, pages: 1 });
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);   // première charge uniquement (Loader plein écran)
+  const [fetching, setFetching] = useState(false); // rafraîchissements (liste estompée, pas de flash)
   const [loadError, setLoadError] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0); // bouton « Réessayer »
   const role = useAdminRole();
   const canEdit = CONTRACT_EDIT_ROLES.includes(role);   // export CSV (éditeurs/admin)
   const canCreate = CONTRACT_WRITE_ROLES.includes(role); // création (inclut le comptable)
-  const [filters, setFilters] = useState({
-    status: '', type: '', author: '', date_from: '', date_to: '',
-    sort: '', order: 'DESC', page: 1, limit: 20,
-  });
+
+  // Filtres/tri/page dans l'URL : ils survivent à l'aller-retour liste ↔ détail
+  // (auparavant en useState, consulter un contrat ramenait page 1 sans filtres).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filters = useMemo(() => ({
+    status: searchParams.get('status') ?? '',
+    type: searchParams.get('type') ?? '',
+    author: searchParams.get('author') ?? '',
+    date_from: searchParams.get('from') ?? '',
+    date_to: searchParams.get('to') ?? '',
+    sort: searchParams.get('sort') ?? '',
+    order: searchParams.get('order') === 'ASC' ? 'ASC' : 'DESC',
+    page: Math.max(1, parseInt(searchParams.get('page'), 10) || 1),
+    limit: [10, 20, 50].includes(parseInt(searchParams.get('limit'), 10)) ? parseInt(searchParams.get('limit'), 10) : 20,
+  }), [searchParams]);
+
+  // Seules les valeurs non par défaut sont écrites dans l'URL (URLs propres).
+  // replace:true — la frappe et les changements de page ne polluent pas
+  // l'historique ; « retour » ramène à l'écran précédent, pas à chaque filtre.
+  const updateParams = (patch) => {
+    const next = { ...filters, ...patch };
+    const p = {};
+    if (next.status !== '') p.status = next.status;
+    if (next.type) p.type = next.type;
+    if (next.author) p.author = next.author;
+    if (next.date_from) p.from = next.date_from;
+    if (next.date_to) p.to = next.date_to;
+    if (next.sort) { p.sort = next.sort; p.order = next.order; }
+    if (next.page > 1) p.page = String(next.page);
+    if (next.limit !== 20) p.limit = String(next.limit);
+    setSearchParams(p, { replace: true });
+  };
+
+  // Recherche debouncée (300 ms) : l'input répond localement à la frappe, le
+  // fetch ne part qu'à la pause — fini les 10 requêtes + clignotements pour
+  // taper « Sow Fall » sur une connexion mobile.
+  const [searchInput, setSearchInput] = useState(filters.author);
+  useEffect(() => {
+    if (searchInput === filters.author) return undefined;
+    const t = setTimeout(() => updateParams({ author: searchInput, page: 1 }), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput]);
+
   const [showFilters, setShowFilters] = useState(false);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    if (hasLoadedRef.current) setFetching(true); else setLoading(true);
     setLoadError(false);
     getContracts(filters)
-      .then((r) => { if (!cancelled) setData(r.data); })
+      .then((r) => { if (!cancelled) { setData(r.data); hasLoadedRef.current = true; } })
       .catch(() => { if (!cancelled) setLoadError(true); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => { if (!cancelled) { setLoading(false); setFetching(false); } });
     return () => { cancelled = true; };
-  }, [filters]);
+  }, [filters, reloadKey]);
 
-  const update = (key, value) => setFilters(f => ({ ...f, [key]: value, page: 1 }));
-  const changePage = (page) => setFilters(f => ({ ...f, page }));
-  const changeLimit = (limit) => setFilters(f => ({ ...f, limit: parseInt(limit) || 20, page: 1 }));
+  const update = (key, value) => updateParams({ [key]: value, page: 1 });
+  const changePage = (page) => updateParams({ page });
+  const changeLimit = (limit) => updateParams({ limit: parseInt(limit, 10) || 20, page: 1 });
   const toggleSort = (key) => {
-    setFilters(f => {
-      if (f.sort === key) return { ...f, order: f.order === 'DESC' ? 'ASC' : 'DESC', page: 1 };
-      return { ...f, sort: key, order: 'DESC', page: 1 };
-    });
+    if (filters.sort === key) updateParams({ order: filters.order === 'DESC' ? 'ASC' : 'DESC', page: 1 });
+    else updateParams({ sort: key, order: 'DESC', page: 1 });
   };
-  const resetFilters = () => setFilters(f => ({ status: '', type: '', author: '', date_from: '', date_to: '', sort: '', order: 'DESC', page: 1, limit: f.limit }));
+  const resetFilters = () => { setSearchInput(''); updateParams({ status: '', type: '', author: '', date_from: '', date_to: '', sort: '', order: 'DESC', page: 1 }); };
   const activeFilterCount = [filters.status, filters.type, filters.date_from, filters.date_to].filter(Boolean).length;
 
   const handleExport = async () => {
@@ -105,14 +138,14 @@ export default function ContractsList() {
       {/* Header */}
       <div className="ct-list-header">
         <div className="ct-list-title-group">
-          <Link to="/admin/contracts" style={{ color: '#666', display: 'flex' }}><FiArrowLeft size={18} /></Link>
+          <Link to="/admin/contracts" aria-label="Retour au tableau de bord contrats" style={{ color: '#666', display: 'flex' }}><FiArrowLeft size={18} /></Link>
           <div>
             <h2 className="ct-list-title">Contrats d'&eacute;dition</h2>
             <span className="ct-list-subtitle">{data.total} contrat{data.total > 1 ? 's' : ''}</span>
           </div>
         </div>
         <div className="ct-list-actions">
-          <button onClick={() => setShowFilters(!showFilters)} className={`ct-toggle-btn ${showFilters ? 'active' : ''}`}>
+          <button onClick={() => setShowFilters(!showFilters)} aria-expanded={showFilters} className={`ct-toggle-btn ${showFilters ? 'active' : ''}`}>
             <FiFilter size={14} /> Filtres
             {activeFilterCount > 0 && <span className="ct-toggle-badge">{activeFilterCount}</span>}
           </button>
@@ -129,7 +162,8 @@ export default function ContractsList() {
       <div className="ct-search-wrap">
         <FiSearch size={16} className="ct-search-icon" />
         <input type="text" className="ct-search-input" placeholder="Rechercher par nom d'auteur..."
-          value={filters.author} onChange={e => update('author', e.target.value)} />
+          aria-label="Rechercher par nom d'auteur"
+          value={searchInput} onChange={e => setSearchInput(e.target.value)} />
       </div>
 
       {/* Filters */}
@@ -189,7 +223,7 @@ export default function ContractsList() {
           <FiX size={48} className="ct-empty-icon" style={{ color: '#ef4444' }} />
           <h3>Erreur de chargement</h3>
           <p>Impossible de récupérer les contrats.</p>
-          <button onClick={() => setFilters(f => ({ ...f })) } className="ct-btn ct-btn-primary" style={{ marginTop: 8 }}>Réessayer</button>
+          <button onClick={() => setReloadKey(k => k + 1)} className="ct-btn ct-btn-primary" style={{ marginTop: 8 }}>Réessayer</button>
         </div>
       ) : data.contracts.length === 0 ? (
         <div className="ct-empty">
@@ -199,15 +233,15 @@ export default function ContractsList() {
         </div>
       ) : (
         <>
-          <div className="ct-card-list">
+          <div className="ct-card-list" aria-busy={fetching}>
             {data.contracts.map(c => (
-              <div key={c.id} className="ct-card" onClick={() => navigate(`/admin/contracts/${c.id}`)}>
+              <Link key={c.id} className="ct-card" to={`/admin/contracts/${c.id}`}>
                 <div style={{ minWidth: 0 }}>
                   <div className="ct-card-badges">
                     <span className="ct-card-ref">{c.ref}</span>
                     <span className={`ct-badge ${statusClass(c.status)}`}>{c.statusLabel}</span>
                     {c.type && (
-                      <span className="ct-badge" style={{ background: `${typeColor(c.type)}10`, color: typeColor(c.type) }}>
+                      <span className="ct-badge" style={{ background: `${contractTypeColor(c.type)}10`, color: contractTypeColor(c.type) }}>
                         {c.typeLabel || contractTypeLabel(c.type)}
                       </span>
                     )}
@@ -222,7 +256,7 @@ export default function ContractsList() {
                   <div className="ct-card-date"><FiCalendar size={12} />{formatDate(c.date)}</div>
                   {c.royaltyPrint != null && <span style={{ fontSize: '0.78rem', color: '#64748b' }}>{c.royaltyPrint}% print</span>}
                 </div>
-              </div>
+              </Link>
             ))}
           </div>
 

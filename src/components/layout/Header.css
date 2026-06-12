@@ -71,6 +71,55 @@
   color: var(--color-green);
 }
 
+/* « Se faire éditer » — cœur de métier : mis en évidence en bouton plein (CTA),
+   toujours visible (pas seulement à l'état actif). */
+.nav-links li a.nav-cta {
+  margin: 0 6px;
+  padding: 11px 20px;
+  color: var(--color-white);
+  background: var(--color-green);
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.32);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  /* Pulsation continue : anneau vert qui s'étend et s'estompe pour attirer
+     l'œil sur le cœur de métier (n'affecte pas la mise en page). */
+  animation: nav-cta-pulse 2.2s ease-out infinite;
+}
+
+@keyframes nav-cta-pulse {
+  0% {
+    box-shadow: 0 4px 12px rgba(5, 150, 105, 0.32), 0 0 0 0 rgba(5, 150, 105, 0.5);
+  }
+  70% {
+    box-shadow: 0 4px 12px rgba(5, 150, 105, 0.32), 0 0 0 12px rgba(5, 150, 105, 0);
+  }
+  100% {
+    box-shadow: 0 4px 12px rgba(5, 150, 105, 0.32), 0 0 0 0 rgba(5, 150, 105, 0);
+  }
+}
+
+.nav-links li a.nav-cta:hover,
+.nav-links li a.nav-cta.active {
+  color: var(--color-white);
+  background: var(--color-green-deep);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(5, 150, 105, 0.45);
+  /* Au survol, on fige la pulsation pour un retour visuel net. */
+  animation-play-state: paused;
+}
+
+.nav-links li a.nav-cta:focus-visible {
+  outline: 2px solid var(--color-green-deep);
+  outline-offset: 2px;
+}
+
+/* Accessibilité : pas d'animation pour qui préfère les mouvements réduits. */
+@media (prefers-reduced-motion: reduce) {
+  .nav-links li a.nav-cta {
+    animation: none;
+  }
+}
+
 /* Social links */
 .header-socials {
   display: flex;
@@ -339,6 +388,25 @@
   .nav-links li a.active {
     background: #f0fdf4;
     color: var(--color-green);
+  }
+
+  /* CTA « Se faire éditer » en mobile : bouton plein, contenu (pas pleine
+     largeur étirée), bien détaché des autres entrées. */
+  .nav-links li a.nav-cta {
+    margin: 10px 24px;
+    padding: 13px 20px;
+    text-align: center;
+    color: var(--color-white);
+    background: var(--color-green);
+    border-bottom: none;
+    border-radius: 999px;
+    box-shadow: 0 4px 12px rgba(5, 150, 105, 0.32);
+  }
+
+  .nav-links li a.nav-cta:hover,
+  .nav-links li a.nav-cta.active {
+    background: var(--color-green-deep);
+    color: var(--color-white);
   }
 
   .search-close {

@@ -211,7 +211,7 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
          AND p.rowid NOT IN (
            SELECT DISTINCT fd.fk_product FROM llx_facturedet fd
            JOIN llx_facture f ON f.rowid = fd.fk_facture
-           WHERE f.fk_statut > 0 AND fd.qty > 0 AND f.datef >= DATE_SUB(NOW(), INTERVAL 180 DAY)
+           WHERE f.fk_statut > 0 AND fd.qty > 0 AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 180 DAY)
          )`
       );
 

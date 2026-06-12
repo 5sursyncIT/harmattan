@@ -325,7 +325,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
                JOIN llx_product p ON p.rowid = fd.fk_product
                WHERE f.fk_statut >= 1 AND fd.qty > 0 AND fd.total_ht > 0
                  AND REPLACE(REPLACE(p.barcode, '-', ''), ' ', '') IN (${placeholders})
-                 AND f.datef >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)`,
+                 AND f.datef >= DATE_SUB(UTC_DATE(), INTERVAL 12 MONTH)`,
               isbns,
             );
             salesStats.last_12_months_units = Number(recent.units);

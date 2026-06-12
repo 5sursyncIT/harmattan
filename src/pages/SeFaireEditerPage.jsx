@@ -69,11 +69,11 @@ const steps = [
     number: '03',
     title: 'Devis et contrat',
     description:
-      'Si votre manuscrit est retenu, vous recevez un devis détaillé et un contrat expliquant clairement le modèle de coédition avant tout engagement.',
+      'Si votre manuscrit est retenu, vous recevez un devis détaillé et un contrat d’édition clair avant tout engagement.',
     details: [
       'Devis transparent et détaillé',
       'Contrat d’édition clair',
-      'Modèle de coédition expliqué avant validation',
+      'Conditions d’édition expliquées avant validation',
     ],
   },
   {
@@ -93,7 +93,7 @@ const steps = [
 const heroHighlights = [
   { icon: <FiClock />, value: '12 semaines max', label: 'pour une première réponse éditoriale' },
   { icon: <FiFileText />, value: 'PDF, DOC, DOCX', label: 'formats acceptés pour le dépôt' },
-  { icon: <FiShield />, value: 'Coédition expliquée', label: 'devis détaillé et contrat transparent' },
+  { icon: <FiShield />, value: 'Accompagnement éditorial', label: 'de la soumission jusqu’à la publication' },
 ];
 
 const preparationChecklist = [
@@ -123,7 +123,7 @@ const criteriaCards = [
   {
     title: 'Points de réassurance',
     items: [
-      'Le modèle de coédition est présenté avant tout engagement',
+      'Les conditions d’édition sont présentées avant tout engagement',
       'Les formats acceptés sont rappelés dans le formulaire',
       'Vous pouvez contacter l’équipe avant ou après le dépôt',
     ],
@@ -158,8 +158,8 @@ const faqItems = [
     answer: 'Un manuscrit complet est préférable, mais une version de travail avancée accompagnée d’un synopsis clair peut déjà être étudiée pour un premier échange.',
   },
   {
-    question: 'Comment fonctionne la coédition ?',
-    answer: 'Si votre manuscrit est retenu, vous recevez un devis détaillé ainsi qu’un contrat d’édition expliquant la répartition des frais entre l’éditeur et l’auteur avant toute validation.',
+    question: 'Que se passe-t-il si mon manuscrit est retenu ?',
+    answer: 'Vous recevez un devis détaillé ainsi qu’un contrat d’édition clair, présentés avant toute validation pour que vous vous engagiez en toute connaissance de cause.',
   },
   {
     question: 'Puis-je poser une question avant de soumettre ?',
@@ -206,6 +206,14 @@ function getValidationErrors(form, file) {
     nextErrors.synopsis = 'Ajoutez un court synopsis pour aider le comité à évaluer votre projet.';
   } else if (form.synopsis.trim().length < 80) {
     nextErrors.synopsis = 'Le synopsis doit comporter au moins 80 caractères.';
+  } else if (form.synopsis.length > 1200) {
+    nextErrors.synopsis = 'Le synopsis ne doit pas dépasser 1200 caractères.';
+  }
+
+  if (!form.biography.trim()) {
+    nextErrors.biography = 'Veuillez renseigner une courte biographie de l’auteur.';
+  } else if (form.biography.length > 400) {
+    nextErrors.biography = 'La biographie ne doit pas dépasser 400 caractères.';
   }
 
   if (!file) {
@@ -593,16 +601,17 @@ function ManuscriptForm() {
             onChange={handleChange}
             onBlur={handleBlur}
             rows={5}
+            maxLength={1200}
             placeholder="Décrivez brièvement votre ouvrage : thème, intrigue, objectif, public visé..."
             aria-invalid={isVisibleError('synopsis')}
             aria-describedby={isVisibleError('synopsis') ? 'synopsis-error' : 'synopsis-help'}
           />
-          <p className="editer-field-help" id="synopsis-help">Un bon synopsis aide le comité à qualifier plus vite votre projet. Minimum : 80 caractères.</p>
+          <p className="editer-field-help" id="synopsis-help">Un bon synopsis aide le comité à qualifier plus vite votre projet. Minimum : 80 caractères, maximum : 1200 ({form.synopsis.length}/1200).</p>
           {isVisibleError('synopsis') && <p className="editer-field-error" id="synopsis-error"><FiAlertCircle /> {errors.synopsis}</p>}
         </div>
 
         <div className="editer-field">
-          <label htmlFor="biography"><FiUser size={14} /> Biographie de l’auteur</label>
+          <label htmlFor="biography"><FiUser size={14} /> Biographie de l’auteur <span>*</span></label>
           <textarea
             id="biography"
             name="biography"
@@ -610,12 +619,15 @@ function ManuscriptForm() {
             onChange={handleChange}
             onBlur={handleBlur}
             rows={4}
+            maxLength={400}
             placeholder="Présentez-vous en quelques lignes : parcours, formation, expériences marquantes, précédentes publications…"
-            aria-describedby="biography-help"
+            aria-invalid={isVisibleError('biography')}
+            aria-describedby={isVisibleError('biography') ? 'biography-error' : 'biography-help'}
           />
           <p className="editer-field-help" id="biography-help">
-            Une courte biographie (3 à 5 lignes) aide le comité à mieux comprendre votre démarche et figurera, après publication, sur la 4ᵉ de couverture.
+            Une courte biographie (3 à 5 lignes) aide le comité à mieux comprendre votre démarche et figurera, après publication, sur la 4ᵉ de couverture. Maximum : 400 caractères ({form.biography.length}/400).
           </p>
+          {isVisibleError('biography') && <p className="editer-field-error" id="biography-error"><FiAlertCircle /> {errors.biography}</p>}
         </div>
 
         <div className="editer-field">
@@ -718,7 +730,7 @@ export default function SeFaireEditerPage() {
             <span className="editer-hero-eyebrow">Accompagnement éditorial</span>
             <h1>Publiez votre manuscrit avec un parcours clair, des critères explicites et une réponse éditoriale en 12 semaines maximum.</h1>
             <p className="editer-hero-subtitle">
-              Vous avez un manuscrit ? L&apos;Harmattan Sénégal vous accompagne de la soumission jusqu&apos;à la publication avec un parcours lisible, un modèle de coédition transparent et un point de contact avant chaque décision.
+              Vous avez un manuscrit ? L&apos;Harmattan Sénégal vous accompagne de la soumission jusqu&apos;à la publication avec un parcours lisible, des conditions d&apos;édition transparentes et un point de contact avant chaque décision.
             </p>
             <div className="editer-hero-actions">
               <a href="#soumettre" className="btn btn-primary btn-lg">Soumettre mon manuscrit</a>

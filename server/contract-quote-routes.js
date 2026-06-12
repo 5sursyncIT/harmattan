@@ -1,12 +1,25 @@
 import { Router } from 'express';
-import crypto from 'crypto';
-import { execFileSync } from 'child_process';
+import { execFile as execFileCb } from 'child_process';
+import { promisify } from 'util';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { logManuscriptEvent } from './manuscript-workflow.js';
+import { makeAdminAuth } from './admin-auth.js';
+
+const execFile = promisify(execFileCb);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Une seule conversion soffice à la fois : chaque instance headless pèse
+// plusieurs centaines de Mo ; des rendus concurrents pourraient saturer la RAM
+// du serveur. Les appels suivants attendent leur tour sans bloquer l'event loop.
+let sofficeQueue = Promise.resolve();
+function enqueueSoffice(task) {
+  const run = sofficeQueue.then(task, task);
+  sofficeQueue = run.catch(() => {});
+  return run;
+}
 
 const FCFA_PER_EUR = 655.957;
 const DEFAULT_AUTHOR_DISCOUNT = 30;  // remise auteur par défaut (%) si non renseignée au contrat
@@ -95,20 +108,8 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
   // (la suppression reste réservée aux rôles éditoriaux — cf. route DELETE).
   const ALLOWED_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
   const QUOTE_DELETE_ROLES = ['super_admin', 'admin', 'editor'];
-  function auth(req, res, next) {
-    const session = req.cookies?.admin_session;
-    if (!session) return res.status(401).json({ error: 'Non authentifié' });
-    const tokenHash = crypto.createHash('sha256').update(String(session)).digest('hex');
-    const admin = db.prepare(
-      "SELECT * FROM admin_users WHERE session_token = ? AND (session_expires_at IS NULL OR session_expires_at > datetime('now'))"
-    ).get(tokenHash);
-    if (!admin) return res.status(401).json({ error: 'Session invalide' });
-    if (!ALLOWED_ROLES.includes(admin.role || 'admin')) {
-      return res.status(403).json({ error: 'Accès non autorisé' });
-    }
-    req.admin = admin;
-    next();
-  }
+  const auth = makeAdminAuth(db, ALLOWED_ROLES);
+  const authDelete = makeAdminAuth(db, QUOTE_DELETE_ROLES);
 
   function generateRef() {
     const now = new Date();
@@ -213,6 +214,39 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     }
   });
 
+  // GET /api/quotes/defaults?pages=70&price_eur=11&qty=50&color=0&discount=30
+  // Helper to compute suggested line items from contract data.
+  // IMPORTANT : doit être déclarée AVANT /quotes/:id, sinon Express matche
+  // « defaults » comme un :id (NaN) et la route renvoie 404 systématiquement.
+  router.get('/quotes/defaults', auth, (req, res) => {
+    const pages = Math.max(0, parseInt(req.query.pages) || 0);
+    const priceEur = Math.max(0, parseFloat(req.query.price_eur) || 0);
+    const qty = Math.max(0, parseInt(req.query.qty) || 50);
+    const color = String(req.query.color) === '1';
+    // Remise auteur (%) issue du contrat ; repli sur le défaut si absente/invalide.
+    const rawDiscount = parseFloat(req.query.discount);
+    const discountPct = Number.isFinite(rawDiscount) && rawDiscount >= 0 && rawDiscount <= 100
+      ? rawDiscount
+      : DEFAULT_AUTHOR_DISCOUNT;
+
+    const items = [];
+    if (pages > 0) {
+      items.push({ key: 'relecture', label: '1 - Contribution au frais de relecture et au report de correction', price: pages * 1500 });
+      items.push({ key: 'pao', label: '2 - Contribution à la mise en pages et réalisation du Prêt-à-clicher', price: pages * 1000 });
+    }
+    if (priceEur > 0 && qty > 0) {
+      // L'auteur paie (100 − remise) % du prix public converti en FCFA.
+      const achatPrice = Math.round(priceEur * qty * FCFA_PER_EUR * (1 - discountPct / 100));
+      items.push({ key: 'achat', label: `4 - Achat de ${qty} exemplaires contractuels`, price: achatPrice });
+    }
+    if (color) {
+      // Prix fixe pour la contribution à l'impression couleur
+      items.push({ key: 'couleur', label: '6 - Contribution à l\'impression Couleur', price: 852000 });
+    }
+
+    res.json({ items });
+  });
+
   // GET /api/quotes/:id — get full quote
   router.get('/quotes/:id', auth, (req, res) => {
     try {
@@ -228,7 +262,7 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
   });
 
   // GET /api/quotes/:id/pdf — render PDF
-  router.get('/quotes/:id/pdf', auth, (req, res) => {
+  router.get('/quotes/:id/pdf', auth, async (req, res) => {
     let tmpDir;
     try {
       const quote = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
@@ -241,9 +275,11 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       tmpDir = join('/tmp', `quote-${quote.id}-${Date.now()}`);
       mkdirSync(tmpDir, { recursive: true });
 
-      // Unzip template — execFileSync (pas de shell) : aucun risque d'injection
+      // Unzip template — execFile (pas de shell) : aucun risque d'injection
       // même si un chemin venait à contenir des métacaractères shell.
-      execFileSync('unzip', ['-oq', templatePath], { cwd: tmpDir });
+      // Asynchrone : la conversion peut durer plusieurs secondes, l'event loop
+      // doit rester disponible (POS, paiements…).
+      await execFile('unzip', ['-oq', templatePath], { cwd: tmpDir });
 
       let content = readFileSync(join(tmpDir, 'content.xml'), 'utf-8');
 
@@ -294,8 +330,8 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       const odtPath = join(tmpDir, 'output.odt');
       const hasPictures = existsSync(join(tmpDir, 'Pictures'));
       // mimetype d'abord, non compressé (-0), puis le reste — sans shell.
-      execFileSync('zip', ['-q', '-X', '-0', odtPath, 'mimetype'], { cwd: tmpDir });
-      execFileSync('zip', [
+      await execFile('zip', ['-q', '-X', '-0', odtPath, 'mimetype'], { cwd: tmpDir });
+      await execFile('zip', [
         '-q', '-r', '-X', odtPath,
         'META-INF', 'content.xml', 'styles.xml', 'meta.xml',
         ...(hasPictures ? ['Pictures'] : []),
@@ -306,11 +342,11 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       // tente d'écrire son profil dans $HOME/.config et plante "Unspecified Application Error".
       const sofficeProfile = join(tmpDir, 'soffice-profile');
       mkdirSync(sofficeProfile, { recursive: true });
-      execFileSync('soffice', [
+      await enqueueSoffice(() => execFile('soffice', [
         '--headless', '--norestore', '--nologo', '--nofirststartwizard',
         `-env:UserInstallation=file://${sofficeProfile}`,
         '--convert-to', 'pdf', '--outdir', tmpDir, odtPath,
-      ], { stdio: 'pipe', timeout: 60000 });
+      ], { timeout: 60000 }));
       const pdfPath = join(tmpDir, 'output.pdf');
       if (!existsSync(pdfPath)) throw new Error('Conversion PDF échouée');
 
@@ -354,12 +390,9 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     }
   });
 
-  // DELETE /api/quotes/:id — draft only
-  router.delete('/quotes/:id', auth, csrfProtection, (req, res) => {
+  // DELETE /api/quotes/:id — draft only (rôles éditoriaux : contrôle en middleware)
+  router.delete('/quotes/:id', authDelete, csrfProtection, (req, res) => {
     try {
-      if (!QUOTE_DELETE_ROLES.includes(req.admin.role || 'admin')) {
-        return res.status(403).json({ error: 'Suppression non autorisée pour votre profil' });
-      }
       const quote = db.prepare('SELECT id, ref, contract_id, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
       if (quote.status !== 'draft') return res.status(400).json({ error: 'Seuls les brouillons peuvent être supprimés' });
@@ -382,37 +415,6 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       console.error('Delete quote error:', err.message);
       res.status(500).json({ error: 'Erreur suppression devis' });
     }
-  });
-
-  // GET /api/quotes/defaults?pages=70&price_eur=11&qty=50&color=0&discount=30
-  // Helper to compute suggested line items from contract data
-  router.get('/quotes/defaults', auth, (req, res) => {
-    const pages = Math.max(0, parseInt(req.query.pages) || 0);
-    const priceEur = Math.max(0, parseFloat(req.query.price_eur) || 0);
-    const qty = Math.max(0, parseInt(req.query.qty) || 50);
-    const color = String(req.query.color) === '1';
-    // Remise auteur (%) issue du contrat ; repli sur le défaut si absente/invalide.
-    const rawDiscount = parseFloat(req.query.discount);
-    const discountPct = Number.isFinite(rawDiscount) && rawDiscount >= 0 && rawDiscount <= 100
-      ? rawDiscount
-      : DEFAULT_AUTHOR_DISCOUNT;
-
-    const items = [];
-    if (pages > 0) {
-      items.push({ key: 'relecture', label: '1 - Contribution au frais de relecture et au report de correction', price: pages * 1500 });
-      items.push({ key: 'pao', label: '2 - Contribution à la mise en pages et réalisation du Prêt-à-clicher', price: pages * 1000 });
-    }
-    if (priceEur > 0 && qty > 0) {
-      // L'auteur paie (100 − remise) % du prix public converti en FCFA.
-      const achatPrice = Math.round(priceEur * qty * FCFA_PER_EUR * (1 - discountPct / 100));
-      items.push({ key: 'achat', label: `4 - Achat de ${qty} exemplaires contractuels`, price: achatPrice });
-    }
-    if (color) {
-      // Prix fixe pour la contribution à l'impression couleur
-      items.push({ key: 'couleur', label: '6 - Contribution à l\'impression Couleur', price: 852000 });
-    }
-
-    res.json({ items });
   });
 
   return router;

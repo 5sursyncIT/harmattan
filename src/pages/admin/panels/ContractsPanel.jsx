@@ -63,10 +63,11 @@ function IsbnQueueCard({ canEdit }) {
                 type="text"
                 inputMode="numeric"
                 placeholder="ISBN (10 ou 13 chiffres)"
+                aria-label={`ISBN du contrat ${c.ref}`}
                 value={drafts[c.id] || ''}
                 onChange={e => setDrafts(prev => ({ ...prev, [c.id]: e.target.value }))}
                 onKeyDown={e => { if (e.key === 'Enter') save(c.id); }}
-                style={{ width: 200, padding: '6px 8px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: '0.85rem' }}
+                className="ct-isbn-input"
               />
               <button
                 onClick={() => save(c.id)}
@@ -86,7 +87,6 @@ function IsbnQueueCard({ canEdit }) {
   );
 }
 
-const STATUS_COLORS = { 0: '#f59e0b', 1: '#10b981', 2: '#6b7280' };
 
 function StatCard({ icon, label, value, color = '#10531a' }) {
   return (
@@ -115,12 +115,15 @@ export default function ContractsPanel() {
     setLoading(true);
     Promise.all([
       getContractStats().then(r => r.data),
-      getExpiringContracts(30).then(r => r.data).catch(() => []),
+      // Même horizon (90 j) que la StatCard et le COUNT du backend : la carte
+      // affichait « sous 90j » mais la liste chargeait 30 j → compte et liste
+      // incohérents. null = erreur réseau (à distinguer de « aucun »).
+      getExpiringContracts(90).then(r => r.data || []).catch(() => null),
     ])
       .then(([statsData, expiringData]) => {
         if (cancelled) return;
         setStats(statsData);
-        setExpiring(expiringData || []);
+        setExpiring(expiringData);
       })
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -179,9 +182,11 @@ export default function ContractsPanel() {
       <div className="ct-dashboard-cols">
         <div className="admin-card">
           <h4 style={{ margin: '0 0 12px', display: 'flex', alignItems: 'center', gap: 6, color: '#ef4444' }}>
-            <FiAlertTriangle size={16} /> Expirent sous 30 jours
+            <FiAlertTriangle size={16} /> Expirent sous 90 jours
           </h4>
-          {expiring.length === 0 ? (
+          {expiring === null ? (
+            <p style={{ color: '#ef4444', fontSize: '0.85rem' }}>Impossible de charger les expirations — rechargez la page.</p>
+          ) : expiring.length === 0 ? (
             <p style={{ color: '#888', fontSize: '0.85rem' }}>Aucun contrat n'expire prochainement</p>
           ) : (
             expiring.map(c => (

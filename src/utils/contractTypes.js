@@ -63,3 +63,76 @@ export const CONTRACT_TYPE_FILTER_GROUPS = Object.entries(CONTRACT_MODELS).map(
     })),
   })
 );
+
+// Statuts Dolibarr d'un contrat (llx_contrat.statut).
+export const CONTRACT_STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
+
+// Options <select> des 9 types actifs avec libellé complet (édition du détail).
+export const CONTRACT_TYPE_OPTIONS = Object.entries(CONTRACT_MODELS).flatMap(
+  ([model, modelLabel]) =>
+    Object.entries(RIGHTS_SCOPES).map(([scope, scopeLabel]) => ({
+      value: `${model}_${scope}`,
+      label: `${modelLabel} · ${scopeLabel}`,
+    }))
+);
+
+// Libellé + couleur d'un type (combiné, legacy ou inconnu) en un seul appel.
+export function contractTypeMeta(type) {
+  if (!type) return { label: '—', color: '#888' };
+  for (const model of Object.keys(CONTRACT_MODELS)) {
+    const prefix = `${model}_`;
+    if (String(type).startsWith(prefix)) {
+      const scope = type.slice(prefix.length);
+      return {
+        label: `${CONTRACT_MODELS[model]} · ${RIGHTS_SCOPES[scope] || scope}`,
+        color: CONTRACT_MODEL_COLORS[model] || '#888',
+      };
+    }
+  }
+  return { label: CONTRACT_TYPE_LABELS[type] || type, color: CONTRACT_MODEL_COLORS[type] || '#888' };
+}
+
+// ── Choix du wizard de création (cartes modèle / périmètre) ─────────────────
+// Libellés et couleurs DÉRIVÉS des maps ci-dessus (jamais redéclarés) ;
+// les defaults doivent rester alignés sur server/contract-routes.js.
+export const CONTRACT_MODEL_CHOICES = [
+  {
+    value: 'harmattan_2024',
+    desc: 'Contrat standard L\'Harmattan Sénégal',
+    defaults: { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
+  },
+  {
+    value: 'harmattan_dll',
+    desc: 'DLL : 15 % sur les 1 000 premiers ex., puis 10 % au-delà',
+    defaults: { royalty_rate_print: 15, royalty_rate_digital: 10, royalty_threshold: 1000, free_author_copies: 55 },
+  },
+  {
+    value: 'tamarinier',
+    desc: 'Collection Le Tamarinier (s/c L\'Harmattan Sénégal)',
+    defaults: { royalty_rate_print: 10, royalty_rate_digital: 10, royalty_threshold: 500, free_author_copies: 5 },
+  },
+].map(c => ({ ...c, label: CONTRACT_MODELS[c.value], color: CONTRACT_MODEL_COLORS[c.value] }));
+
+export const RIGHTS_SCOPE_CHOICES = [
+  {
+    value: 'edition_simple',
+    label: 'Édition · papier seul',
+    desc: 'Sans avenant numérique, audiovisuel ni théâtral',
+    color: '#475569',
+    defaults: { royalty_rate_digital: 0 },
+  },
+  {
+    value: 'edition_numerique',
+    label: 'Édition · papier + numérique',
+    desc: 'Contrat principal + avenant droits numériques',
+    color: '#0d9488',
+    defaults: { royalty_rate_digital: 10 },
+  },
+  {
+    value: 'edition_complete',
+    label: 'Édition · complète',
+    desc: 'Papier + numérique + adaptations audiovisuelle & théâtrale',
+    color: '#7c3aed',
+    defaults: { royalty_rate_digital: 10 },
+  },
+];

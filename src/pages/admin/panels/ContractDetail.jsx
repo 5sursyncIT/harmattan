@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   getContract, validateContract, closeContract, deleteContract,
@@ -8,57 +8,17 @@ import {
 } from '../../../api/contracts';
 import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
-  FiPercent, FiFileText, FiCalendar, FiCopy, FiExternalLink, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
+  FiPercent, FiFileText, FiCalendar, FiCopy, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
   FiPlus, FiTrash2, FiSend, FiCheck, FiUploadCloud,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
+import ConfirmModal from '../../../components/common/ConfirmModal';
 import toast from 'react-hot-toast';
 import { listContractQuotes, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
 import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES, CONTRACT_VALIDATE_ROLES, CONTRACT_REOPEN_ROLES } from '../../../hooks/useAdminRole';
+import { CONTRACT_STATUS_LABELS, CONTRACT_TYPE_OPTIONS, contractTypeMeta } from '../../../utils/contractTypes';
 import './Contracts.css';
-
-const STATUS_LABELS = { 0: 'Brouillon', 1: 'Actif', 2: 'Clos' };
-const CONTRACT_MODEL_LABELS = {
-  harmattan_2024: 'Harmattan classique',
-  harmattan_dll: 'Harmattan DLL',
-  tamarinier: 'Le Tamarinier',
-};
-const RIGHTS_SCOPE_LABELS = {
-  edition_simple: 'papier seul',
-  edition_numerique: 'papier + numérique',
-  edition_complete: 'complète',
-};
-const TYPE_LABELS = {
-  harmattan_2024: 'Harmattan classique',
-  harmattan_dll: 'Harmattan DLL',
-  tamarinier: 'Le Tamarinier',
-  edition_simple: 'Édition · papier',
-  edition_numerique: 'Édition · papier + numérique',
-  edition_complete: 'Édition · complète',
-};
-const TYPE_COLORS = { harmattan_2024: '#10531a', harmattan_dll: '#0284c7', tamarinier: '#7c3aed' };
-const TYPE_OPTIONS = Object.keys(CONTRACT_MODEL_LABELS).flatMap(model =>
-  Object.keys(RIGHTS_SCOPE_LABELS).map(scope => ({
-    value: `${model}_${scope}`,
-    label: `${CONTRACT_MODEL_LABELS[model]} · ${RIGHTS_SCOPE_LABELS[scope]}`,
-  }))
-);
-
-function getTypeMeta(type) {
-  if (!type) return { label: '—', color: '#888' };
-  for (const model of Object.keys(CONTRACT_MODEL_LABELS)) {
-    const prefix = `${model}_`;
-    if (type.startsWith(prefix)) {
-      const scope = type.slice(prefix.length);
-      return {
-        label: `${CONTRACT_MODEL_LABELS[model]} · ${RIGHTS_SCOPE_LABELS[scope] || scope}`,
-        color: TYPE_COLORS[model] || '#888',
-      };
-    }
-  }
-  return { label: TYPE_LABELS[type] || type, color: TYPE_COLORS[type] || '#888' };
-}
 
 function InfoRow({ icon, label, value, mono = false }) {
   return (
@@ -66,34 +26,6 @@ function InfoRow({ icon, label, value, mono = false }) {
       <span className="ct-info-icon">{icon}</span>
       <span className="ct-info-label">{label}</span>
       <span className={`ct-info-value ${mono ? 'mono' : ''}`}>{value || '—'}</span>
-    </div>
-  );
-}
-
-function ConfirmModal({ title, message, confirmLabel = 'Confirmer', danger = false, loading = false, onConfirm, onCancel }) {
-  const cancelRef = useRef(null);
-
-  // Accessibilité : fermeture au clavier (Échap) + focus initial sur « Annuler »
-  // (choix par défaut sûr pour une action potentiellement destructive).
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape' && !loading) onCancel?.(); };
-    document.addEventListener('keydown', onKey);
-    cancelRef.current?.focus();
-    return () => document.removeEventListener('keydown', onKey);
-  }, [loading, onCancel]);
-
-  return (
-    <div className="ct-modal-overlay" onClick={() => !loading && onCancel?.()}>
-      <div className="ct-modal" role="dialog" aria-modal="true" aria-labelledby="ct-modal-title" onClick={e => e.stopPropagation()}>
-        <h3 id="ct-modal-title">{title}</h3>
-        <p>{message}</p>
-        <div className="ct-modal-actions">
-          <button ref={cancelRef} className="ct-btn ct-btn-outline" onClick={onCancel} disabled={loading}>Annuler</button>
-          <button className={`ct-btn ${danger ? 'ct-btn-danger' : 'ct-btn-primary'}`} onClick={onConfirm} disabled={loading}>
-            {loading ? 'Traitement…' : confirmLabel}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -111,6 +43,14 @@ export default function ContractDetail() {
   const [showPhysicalSign, setShowPhysicalSign] = useState(false);
   const [physSigning, setPhysSigning] = useState(false);
   const [physForm, setPhysForm] = useState({ signed_date: new Date().toISOString().slice(0, 10), signer_name: '', file: null });
+
+  // Fermeture au clavier de la modale signature papier (parité avec ConfirmModal).
+  useEffect(() => {
+    if (!showPhysicalSign) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape' && !physSigning) setShowPhysicalSign(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [showPhysicalSign, physSigning]);
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [confirmAction, setConfirmAction] = useState(null);
@@ -137,25 +77,28 @@ export default function ContractDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadQuotes(); }, [id]);
 
-  const handleDeleteQuote = async (quote) => {
-    if (!window.confirm(`Supprimer le devis ${quote.ref} ?`)) return;
-    try {
-      await deleteQuote(quote.id);
-      toast.success('Devis supprimé');
-      loadQuotes();
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur suppression');
-    }
-  };
+  // Confirmation des actions devis via la même modale accessible que le reste
+  // (window.confirm natif : pas de focus trap, pas stylé, bloquant).
+  const [confirmQuote, setConfirmQuote] = useState(null); // { action: 'delete'|'send', quote }
+  const [quoteActionLoading, setQuoteActionLoading] = useState(false);
 
-  const handleSendQuote = async (quote) => {
-    if (!window.confirm(`Marquer le devis ${quote.ref} comme envoyé à l'auteur ?\n(Pensez à lui transmettre le PDF par email.)`)) return;
+  const runQuoteAction = async () => {
+    if (!confirmQuote || quoteActionLoading) return;
+    setQuoteActionLoading(true);
     try {
-      await markQuoteSent(quote.id);
-      toast.success('Devis marqué comme envoyé');
+      if (confirmQuote.action === 'delete') {
+        await deleteQuote(confirmQuote.quote.id);
+        toast.success('Devis supprimé');
+      } else {
+        await markQuoteSent(confirmQuote.quote.id);
+        toast.success('Devis marqué comme envoyé');
+      }
+      setConfirmQuote(null);
       loadQuotes();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur envoi');
+      toast.error(err.response?.data?.error || (confirmQuote.action === 'delete' ? 'Erreur suppression' : 'Erreur envoi'));
+    } finally {
+      setQuoteActionLoading(false);
     }
   };
 
@@ -223,6 +166,9 @@ export default function ContractDetail() {
   const handleSignPhysical = async () => {
     if (physSigning) return;
     if (!physForm.file) { toast.error('Veuillez joindre le scan du contrat signé'); return; }
+    // Vérification de taille AVANT l'upload : sur 3G, envoyer 20 Mo pour se
+    // faire rejeter par le serveur est une vraie perte de temps utilisateur.
+    if (physForm.file.size > 15 * 1024 * 1024) { toast.error('Scan trop volumineux : 15 Mo maximum'); return; }
     if (!physForm.signed_date) { toast.error('Veuillez indiquer la date de signature'); return; }
     setPhysSigning(true);
     try {
@@ -320,7 +266,7 @@ export default function ContractDetail() {
   if (!contract) return <div className="ct-empty"><FiAlertCircle size={48} className="ct-empty-icon" /><h3>Contrat introuvable</h3></div>;
 
   const ef = contract.extrafields || {};
-  const typeMeta = getTypeMeta(ef.contractType);
+  const typeMeta = contractTypeMeta(ef.contractType);
   const typeColor = typeMeta.color;
   const statusClass = contract.status === 0 ? 'ct-badge-draft' : contract.status === 1 ? 'ct-badge-active' : 'ct-badge-closed';
 
@@ -342,7 +288,7 @@ export default function ContractDetail() {
             <h2 style={{ margin: 0, fontSize: '1.4rem', color: '#0f172a' }}>{contract.ref || `Contrat #${id}`}</h2>
             <button onClick={copyRef} className="ct-btn-ghost" title="Copier la référence"><FiCopy size={14} /></button>
             <span className={`ct-badge ${statusClass}`} style={{ padding: '4px 12px', borderRadius: 8, fontSize: '0.82rem' }}>
-              {STATUS_LABELS[contract.status]}
+              {CONTRACT_STATUS_LABELS[contract.status]}
             </span>
           </div>
           {ef.bookTitle && <p style={{ margin: '4px 0 0', fontSize: '1rem', color: '#475569' }}>{ef.bookTitle}</p>}
@@ -400,7 +346,7 @@ export default function ContractDetail() {
                 <div className="ct-field"><label>ISBN</label><input type="text" value={editForm.book_isbn} onChange={e => setEditForm({ ...editForm, book_isbn: e.target.value })} /></div>
                 <div className="ct-field"><label>Type de contrat</label>
                   <select value={editForm.contract_type} onChange={e => setEditForm({ ...editForm, contract_type: e.target.value })}>
-                    {TYPE_OPTIONS.map(option => (
+                    {CONTRACT_TYPE_OPTIONS.map(option => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
                   </select>
@@ -411,7 +357,7 @@ export default function ContractDetail() {
                 <InfoRow icon={<FiBook size={14} />} label="Titre" value={ef.bookTitle} />
                 <InfoRow icon={<FiFileText size={14} />} label="ISBN" value={ef.bookIsbn} mono />
                 <InfoRow icon={<FiCalendar size={14} />} label="Date contrat" value={formatDate(contract.date)} />
-                <InfoRow icon={<FiExternalLink size={14} />} label="Type" value={
+                <InfoRow icon={<FiFileText size={14} />} label="Type" value={
                   ef.contractType ? <span className="ct-badge" style={{ padding: '2px 10px', background: `${typeColor}10`, color: typeColor }}>{typeMeta.label}</span> : '—'
                 } />
               </>
@@ -506,12 +452,12 @@ export default function ContractDetail() {
                         <FiDownload size={12} /> PDF
                       </button>
                       {canManage && q.status !== 'sent' && (
-                        <button onClick={() => handleSendQuote(q)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Marquer comme envoyé à l'auteur">
+                        <button onClick={() => setConfirmQuote({ action: 'send', quote: q })} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Marquer comme envoyé à l'auteur">
                           <FiSend size={12} /> Envoyé
                         </button>
                       )}
                       {canManage && q.status === 'draft' && (
-                        <button onClick={() => handleDeleteQuote(q)} className="ct-btn-ghost" title="Supprimer le devis">
+                        <button onClick={() => setConfirmQuote({ action: 'delete', quote: q })} className="ct-btn-ghost" aria-label={`Supprimer le devis ${q.ref}`} title="Supprimer le devis">
                           <FiTrash2 size={14} />
                         </button>
                       )}
@@ -590,9 +536,10 @@ export default function ContractDetail() {
                       Attesté par {signStatus.physical.attestedBy} le {signStatus.physical.attestedAt}
                     </div>
                     {signStatus.physical.scanHash && (
-                      <div className="ct-sign-detail" style={{ fontSize: '0.72rem', color: '#94a3b8', wordBreak: 'break-all', marginTop: 2 }}>
-                        Empreinte SHA-256 : {signStatus.physical.scanHash}
-                      </div>
+                      <details className="ct-sign-detail" style={{ fontSize: '0.75rem', color: '#64748b', marginTop: 2 }}>
+                        <summary style={{ cursor: 'pointer' }}>Empreinte d'intégrité du scan (SHA-256)</summary>
+                        <code style={{ wordBreak: 'break-all', fontSize: '0.72rem' }}>{signStatus.physical.scanHash}</code>
+                      </details>
                     )}
                   </>
                 )}
@@ -674,6 +621,7 @@ export default function ContractDetail() {
             <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>Date de signature *</label>
             <input
               type="date"
+              autoFocus
               value={physForm.signed_date}
               max={new Date().toISOString().slice(0, 10)}
               onChange={e => setPhysForm(f => ({ ...f, signed_date: e.target.value }))}
@@ -736,6 +684,19 @@ export default function ContractDetail() {
           loading={actionLoading}
           onConfirm={handleDelete}
           onCancel={() => setConfirmAction(null)}
+        />
+      )}
+      {confirmQuote && (
+        <ConfirmModal
+          title={confirmQuote.action === 'delete' ? `Supprimer le devis ${confirmQuote.quote.ref} ?` : `Marquer le devis ${confirmQuote.quote.ref} comme envoyé ?`}
+          message={confirmQuote.action === 'delete'
+            ? 'Le devis sera définitivement supprimé.'
+            : 'Le devis sera marqué comme transmis à l\'auteur. Pensez à lui envoyer le PDF par email.'}
+          confirmLabel={confirmQuote.action === 'delete' ? 'Supprimer' : 'Marquer envoyé'}
+          danger={confirmQuote.action === 'delete'}
+          loading={quoteActionLoading}
+          onConfirm={runQuoteAction}
+          onCancel={() => setConfirmQuote(null)}
         />
       )}
       {showQuoteModal && (
