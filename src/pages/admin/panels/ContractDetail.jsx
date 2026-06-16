@@ -9,13 +9,24 @@ import {
 import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
   FiPercent, FiFileText, FiCalendar, FiCopy, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
-  FiPlus, FiTrash2, FiSend, FiCheck, FiUploadCloud,
+  FiPlus, FiTrash2, FiSend, FiCheck, FiUploadCloud, FiDollarSign,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import ConfirmModal from '../../../components/common/ConfirmModal';
 import toast from 'react-hot-toast';
 import { listContractQuotes, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
+import QuotePaymentModal from '../../../components/admin/QuotePaymentModal';
+import { formatPrice } from '../../../utils/formatters';
+
+// Statuts d'un devis de contribution (document → comptable).
+const QUOTE_STATUS = {
+  draft: { label: 'Brouillon', bg: '#f1f5f9', color: '#475569' },
+  sent: { label: 'Envoyé', bg: '#10531a14', color: '#10531a' },
+  invoiced: { label: 'Facturé', bg: '#eff6ff', color: '#1e40af' },
+  partial: { label: 'Acompte versé', bg: '#fffbeb', color: '#92400e' },
+  paid: { label: 'Payé', bg: '#f0fdf4', color: '#166534' },
+};
 import useAdminRole, { CONTRACT_EDIT_ROLES, CONTRACT_WRITE_ROLES, CONTRACT_VALIDATE_ROLES, CONTRACT_REOPEN_ROLES } from '../../../hooks/useAdminRole';
 import { CONTRACT_STATUS_LABELS, CONTRACT_TYPE_OPTIONS, contractTypeMeta } from '../../../utils/contractTypes';
 import './Contracts.css';
@@ -68,6 +79,9 @@ export default function ContractDetail() {
   const canManage = CONTRACT_EDIT_ROLES.includes(role);
   // canReopen : rouvrir un contrat validé en brouillon pour correction — admins seuls.
   const canReopen = CONTRACT_REOPEN_ROLES.includes(role);
+  // canPay : encaisser un devis (acte comptable) — profils financiers.
+  const canPay = ['super_admin', 'admin', 'comptable'].includes(role);
+  const [payQuoteTarget, setPayQuoteTarget] = useState(null);
 
   const loadQuotes = () => {
     if (!id) return;
@@ -433,25 +447,38 @@ export default function ContractDetail() {
               <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: 0 }}>Aucun devis. Cliquez sur « Générer un devis » pour proposer une participation aux frais d'édition à l'auteur.</p>
             ) : (
               <div className="ct-quotes-list">
-                {quotes.map(q => (
+                {quotes.map(q => {
+                  const effStatus = q.payment_status || q.status || 'draft';
+                  const sb = QUOTE_STATUS[effStatus] || QUOTE_STATUS.draft;
+                  const isInvoiced = !!q.dolibarr_invoice_id;
+                  return (
                   <div key={q.id} className="ct-quote-row">
                     <div className="ct-quote-row-info">
                       <span className="ct-quote-row-ref">{q.ref}</span>
                       <span className="ct-quote-row-meta">
                         {new Date(q.created_at).toLocaleDateString('fr-FR')} · {q.created_by || 'admin'}
+                        {q.invoice_ref ? ` · ${q.invoice_ref}` : ''}
                       </span>
                     </div>
-                    <span className="ct-quote-row-total">{Number(q.total).toLocaleString('fr-FR')} FCFA</span>
-                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                      {q.status === 'sent' && (
-                        <span className="ct-badge" style={{ padding: '2px 8px', background: '#10531a14', color: '#10531a', fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: 4 }} title="Devis envoyé à l'auteur">
-                          <FiCheck size={11} /> Envoyé
-                        </span>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                      <span className="ct-quote-row-total">{formatPrice(q.total)}</span>
+                      {isInvoiced && effStatus !== 'paid' && q.remaining != null && (
+                        <span style={{ fontSize: '0.72rem', color: '#b45309' }}>Reste {formatPrice(q.remaining)}</span>
                       )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                      <span className="ct-badge" style={{ padding: '2px 8px', background: sb.bg, color: sb.color, fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: 4 }} title={`Statut : ${sb.label}`}>
+                        {effStatus === 'paid' ? <FiCheck size={11} /> : effStatus === 'sent' ? <FiSend size={11} /> : null} {sb.label}
+                      </span>
                       <button onClick={() => openQuotePdf(q.id)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Ouvrir le PDF">
                         <FiDownload size={12} /> PDF
                       </button>
-                      {canManage && q.status !== 'sent' && (
+                      {canPay && effStatus !== 'paid' && (
+                        <button onClick={() => setPayQuoteTarget(q)} className="ct-btn ct-btn-dark" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title={isInvoiced ? 'Enregistrer un acompte' : 'Facturer et encaisser'}>
+                          <FiDollarSign size={12} /> Encaisser
+                        </button>
+                      )}
+                      {canManage && q.status === 'draft' && (
                         <button onClick={() => setConfirmQuote({ action: 'send', quote: q })} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Marquer comme envoyé à l'auteur">
                           <FiSend size={12} /> Envoyé
                         </button>
@@ -463,7 +490,8 @@ export default function ContractDetail() {
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -704,6 +732,14 @@ export default function ContractDetail() {
           contract={contract}
           onClose={() => setShowQuoteModal(false)}
           onCreated={loadQuotes}
+        />
+      )}
+
+      {payQuoteTarget && (
+        <QuotePaymentModal
+          quote={payQuoteTarget}
+          onClose={() => setPayQuoteTarget(null)}
+          onPaid={() => { setPayQuoteTarget(null); loadQuotes(); }}
         />
       )}
     </div>

@@ -1,6 +1,6 @@
-import React, { useId, useState } from 'react';
+import React, { useId, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FiAlertCircle, FiArrowRight, FiBook, FiCheckCircle, FiChevronDown, FiChevronUp, FiClock, FiDollarSign, FiFileText, FiMail, FiMessageCircle, FiPhone, FiSend, FiShield, FiUpload, FiUser } from 'react-icons/fi';
+import { FiAlertCircle, FiArrowRight, FiBook, FiCheckCircle, FiChevronDown, FiChevronUp, FiClock, FiDollarSign, FiFileText, FiLink, FiMail, FiMessageCircle, FiPhone, FiSend, FiShield, FiUpload, FiUser } from 'react-icons/fi';
 import useSiteConfig from '../hooks/useSiteConfig.jsx';
 import api from '../api/dolibarr';
 import toast from 'react-hot-toast';
@@ -99,7 +99,7 @@ const heroHighlights = [
 const preparationChecklist = [
   'Préparez le titre de votre manuscrit et son genre principal.',
   'Ajoutez un synopsis clair pour accélérer l’analyse.',
-  'Prévoyez un fichier PDF ou Word de moins de 20 Mo.',
+  'Prévoyez un fichier PDF ou Word de moins de 20 Mo (au-delà, un lien de téléchargement est accepté).',
   'Rassemblez, si possible, votre biographie et la présentation du projet.',
 ];
 
@@ -174,6 +174,7 @@ function getInitialForm() {
     email: '',
     phone: '',
     title: '',
+    subtitle: '',
     genre: '',
     synopsis: '',
     biography: '',
@@ -181,7 +182,7 @@ function getInitialForm() {
   };
 }
 
-function getValidationErrors(form, file) {
+function getValidationErrors(form, file, linkMode = false, fileUrl = '') {
   const nextErrors = {};
 
   if (!form.firstname.trim()) nextErrors.firstname = 'Veuillez renseigner votre prénom.';
@@ -216,13 +217,39 @@ function getValidationErrors(form, file) {
     nextErrors.biography = 'La biographie ne doit pas dépasser 400 caractères.';
   }
 
-  if (!file) {
+  if (linkMode) {
+    const url = (fileUrl || '').trim();
+    if (!url) {
+      nextErrors.file = 'Veuillez coller le lien de téléchargement de votre manuscrit.';
+    } else if (!/^https?:\/\/.+/i.test(url)) {
+      nextErrors.file = 'Le lien doit commencer par http:// ou https://.';
+    } else if (url.length > 2000) {
+      nextErrors.file = 'Le lien est trop long.';
+    }
+  } else if (!file) {
     nextErrors.file = 'Veuillez joindre votre manuscrit (PDF, DOC ou DOCX).';
   } else if (!/\.(pdf|doc|docx)$/i.test(file.name)) {
     nextErrors.file = 'Format accepté : PDF, DOC ou DOCX.';
   }
 
   return nextErrors;
+}
+
+// Nombre maximum de tomes par soumission (1 tome principal + 4 tomes additionnels).
+const MAX_TOMES = 5;
+
+// Valide un tome additionnel (fichier OU lien). Renvoie un message d'erreur ou null.
+function getTomeError(tome) {
+  if (tome.useLink) {
+    const url = (tome.fileUrl || '').trim();
+    if (!url) return 'Veuillez coller le lien de téléchargement de ce tome.';
+    if (!/^https?:\/\/.+/i.test(url)) return 'Le lien doit commencer par http:// ou https://.';
+    if (url.length > 2000) return 'Le lien est trop long.';
+  } else {
+    if (!tome.file) return 'Veuillez joindre le fichier de ce tome (PDF, DOC ou DOCX).';
+    if (!/\.(pdf|doc|docx)$/i.test(tome.file.name)) return 'Format accepté : PDF, DOC ou DOCX.';
+  }
+  return null;
 }
 
 function getEarliestStep(errors) {
@@ -267,21 +294,84 @@ function ManuscriptForm() {
   const config = useSiteConfig();
   const [form, setForm] = useState(getInitialForm);
   const [file, setFile] = useState(null);
+  const [useLink, setUseLink] = useState(false);
+  const [fileUrl, setFileUrl] = useState('');
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
   const [errors, setErrors] = useState({});
   const [touched, setTouched] = useState({});
   const [statusMessage, setStatusMessage] = useState('');
+  // Soumission multi-tomes : le contrôle existant représente le Tome 1 ; les
+  // tomes additionnels sont gérés dans `extraTomes`. Chaque tome devient un
+  // manuscrit distinct côté serveur, relié à la même série.
+  const [multiTome, setMultiTome] = useState(false);
+  const [tome1Subtitle, setTome1Subtitle] = useState('');
+  const [extraTomes, setExtraTomes] = useState([]); // { key, subtitle, file, useLink, fileUrl, error }
+  const tomeKeyRef = useRef(0);
 
-  const genres = config?.manuscript_genres || ['Roman', 'Essai', 'Poésie', 'Théâtre', 'Conte', 'Mémoire / Thèse', 'Autre'];
+  const genres = config?.manuscript_genres || ['Roman', 'Essai', 'Poésie', 'Théâtre', 'Conte', 'Jeunesse', 'BD', 'Biographie', 'Mémoire / Thèse', 'Autre'];
+
+  const totalTomes = 1 + extraTomes.length;
+
+  const addTome = () => {
+    if (totalTomes >= MAX_TOMES) return;
+    tomeKeyRef.current += 1;
+    setExtraTomes((current) => [...current, { key: tomeKeyRef.current, subtitle: '', file: null, useLink: false, fileUrl: '', error: '' }]);
+  };
+
+  const removeTome = (key) => {
+    setExtraTomes((current) => current.filter((t) => t.key !== key));
+  };
+
+  const patchTome = (key, patch) => {
+    setExtraTomes((current) => current.map((t) => (t.key === key ? { ...t, ...patch } : t)));
+  };
+
+  const handleTomeFile = (key, e) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) { patchTome(key, { file: null, error: '' }); return; }
+    if (selectedFile.size > 20 * 1024 * 1024) {
+      // Trop volumineux : bascule ce tome sur le dépôt par lien.
+      patchTome(key, { file: null, useLink: true, error: '' });
+      toast('Fichier supérieur à 20 Mo : fournissez un lien pour ce tome', { icon: 'ℹ️' });
+      return;
+    }
+    if (!/\.(pdf|doc|docx)$/i.test(selectedFile.name)) {
+      patchTome(key, { file: null, error: 'Format accepté : PDF, DOC ou DOCX.' });
+      toast.error('Format accepté : PDF, DOC ou DOCX');
+      return;
+    }
+    patchTome(key, { file: selectedFile, error: '' });
+  };
+
+  const toggleTomeLink = (key, checked) => {
+    patchTome(key, checked ? { useLink: true, file: null, error: '' } : { useLink: false, fileUrl: '', error: '' });
+  };
+
+  const handleTomeUrl = (key, value) => {
+    patchTome(key, { fileUrl: value, error: '' });
+  };
+
+  const handleToggleMultiTome = (checked) => {
+    setMultiTome(checked);
+    if (checked && extraTomes.length === 0) {
+      // Démarre avec un Tome 2 prêt à remplir.
+      tomeKeyRef.current += 1;
+      setExtraTomes([{ key: tomeKeyRef.current, subtitle: '', file: null, useLink: false, fileUrl: '', error: '' }]);
+    }
+    if (!checked) {
+      setExtraTomes([]);
+      setTome1Subtitle('');
+    }
+  };
 
   const markFieldAsTouched = (name) => {
     setTouched((current) => ({ ...current, [name]: true }));
   };
 
-  const syncValidation = (nextForm, nextFile = file) => {
-    const nextErrors = getValidationErrors(nextForm, nextFile);
+  const syncValidation = (nextForm, nextFile = file, linkMode = useLink, url = fileUrl) => {
+    const nextErrors = getValidationErrors(nextForm, nextFile, linkMode, url);
     setErrors(nextErrors);
     return nextErrors;
   };
@@ -321,17 +411,27 @@ function ManuscriptForm() {
 
   const handleFile = (e) => {
     const selectedFile = e.target.files?.[0];
-    markFieldAsTouched('file');
 
     if (selectedFile) {
       const maxSize = 20 * 1024 * 1024;
       if (selectedFile.size > maxSize) {
-        setErrors((current) => ({ ...current, file: 'Le fichier ne doit pas dépasser 20 Mo.' }));
+        // Trop volumineux : on bascule en douceur sur le dépôt par lien.
+        // On ne marque PAS le champ comme « touché » et on efface l'erreur
+        // pour ne pas afficher de bordure rouge sur un champ encore vide :
+        // l'invitation passe par le toast + le message d'aide.
         setFile(null);
-        setStatusMessage('Le fichier sélectionné dépasse la taille maximale autorisée.');
-        toast.error('Le fichier ne doit pas dépasser 20 Mo');
+        setUseLink(true);
+        setErrors((current) => {
+          const next = { ...current };
+          delete next.file;
+          return next;
+        });
+        setTouched((current) => ({ ...current, file: false }));
+        setStatusMessage('Fichier supérieur à 20 Mo : indiquez un lien de téléchargement ci-dessous.');
+        toast('Fichier supérieur à 20 Mo : fournissez un lien de téléchargement', { icon: 'ℹ️' });
         return;
       }
+      markFieldAsTouched('file');
       if (!/\.(pdf|doc|docx)$/i.test(selectedFile.name)) {
         setErrors((current) => ({ ...current, file: 'Format accepté : PDF, DOC ou DOCX.' }));
         setFile(null);
@@ -340,24 +440,54 @@ function ManuscriptForm() {
         return;
       }
       setFile(selectedFile);
-      setErrors(getValidationErrors(form, selectedFile));
+      setErrors(getValidationErrors(form, selectedFile, false, ''));
       setStatusMessage('Fichier ajouté avec succès.');
       return;
     }
 
+    markFieldAsTouched('file');
     setFile(null);
-    setErrors(getValidationErrors(form, null));
+    setErrors(getValidationErrors(form, null, false, ''));
+  };
+
+  const handleToggleLink = (checked) => {
+    setUseLink(checked);
+    if (checked) {
+      setFile(null);
+      setStatusMessage('Mode lien de téléchargement activé.');
+    } else {
+      setFileUrl('');
+      setStatusMessage('');
+    }
+    // Recalcule les erreurs en interne, mais SANS marquer le champ comme
+    // « touché » : l'erreur ne devient visible qu'au blur du champ ou à la
+    // soumission. Cocher la case ne doit pas déclencher de bordure rouge.
+    setErrors(getValidationErrors(form, checked ? null : file, checked, checked ? fileUrl : ''));
+  };
+
+  const handleFileUrlChange = (e) => {
+    const value = e.target.value;
+    setFileUrl(value);
+    if (touched.file || errors.file) syncValidation(form, null, true, value);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    const nextErrors = getValidationErrors(form, file);
-    if (Object.keys(nextErrors).length > 0) {
+    const nextErrors = getValidationErrors(form, file, useLink, fileUrl);
+    const hasExtraTomes = multiTome && extraTomes.length > 0;
+    let extraInvalid = false;
+    if (hasExtraTomes) {
+      const validated = extraTomes.map((t) => ({ ...t, error: getTomeError(t) || '' }));
+      extraInvalid = validated.some((t) => t.error);
+      if (extraInvalid) setExtraTomes(validated);
+    }
+
+    if (Object.keys(nextErrors).length > 0 || extraInvalid) {
       const allTouched = Object.keys(fieldStepMap).reduce((accumulator, key) => ({ ...accumulator, [key]: true }), {});
       setTouched(allTouched);
       setErrors(nextErrors);
-      setActiveStep(getEarliestStep(nextErrors));
+      setActiveStep(Object.keys(nextErrors).length > 0 ? getEarliestStep(nextErrors) : 2);
       setStatusMessage('Veuillez corriger les champs signalés avant d’envoyer le formulaire.');
       toast.error('Veuillez corriger les champs signalés');
       return;
@@ -369,16 +499,37 @@ function ManuscriptForm() {
     try {
       const fd = new FormData();
       Object.entries(form).forEach(([key, value]) => fd.append(key, value));
-      if (file) fd.append('file', file);
+
+      if (hasExtraTomes) {
+        // Tome 1 (contrôle principal) puis tomes additionnels, dans l'ordre.
+        // Les fichiers sont ajoutés sous `files` dans le même ordre que les tomes
+        // sans lien — le serveur les apparie séquentiellement.
+        const tomesMeta = [{ subtitle: tome1Subtitle.trim(), useLink, fileUrl: useLink ? fileUrl.trim() : '' }];
+        if (!useLink && file) fd.append('files', file);
+        for (const t of extraTomes) {
+          tomesMeta.push({ subtitle: (t.subtitle || '').trim(), useLink: t.useLink, fileUrl: t.useLink ? (t.fileUrl || '').trim() : '' });
+          if (!t.useLink && t.file) fd.append('files', t.file);
+        }
+        fd.append('tomes', JSON.stringify(tomesMeta));
+      } else {
+        if (useLink) fd.append('file_url', fileUrl.trim());
+        else if (file) fd.append('file', file);
+      }
+
       await api.post('/manuscripts/submit', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
       setSent(true);
       setForm(getInitialForm());
       setFile(null);
+      setUseLink(false);
+      setFileUrl('');
+      setMultiTome(false);
+      setExtraTomes([]);
+      setTome1Subtitle('');
       setErrors({});
       setTouched({});
       setActiveStep(0);
       setStatusMessage('Votre manuscrit a été soumis avec succès.');
-      toast.success('Manuscrit soumis avec succès !');
+      toast.success(hasExtraTomes ? 'Tomes soumis avec succès !' : 'Manuscrit soumis avec succès !');
     } catch {
       setStatusMessage('Une erreur est survenue pendant l’envoi du formulaire.');
       toast.error('Erreur lors de l’envoi');
@@ -423,6 +574,11 @@ function ManuscriptForm() {
             setSent(false);
             setForm(getInitialForm());
             setFile(null);
+            setUseLink(false);
+            setFileUrl('');
+            setMultiTome(false);
+            setExtraTomes([]);
+            setTome1Subtitle('');
             setErrors({});
             setTouched({});
             setActiveStep(0);
@@ -574,6 +730,19 @@ function ManuscriptForm() {
             {isVisibleError('title') && <p className="editer-field-error" id="title-error"><FiAlertCircle /> {errors.title}</p>}
           </div>
           <div className="editer-field">
+            <label htmlFor="subtitle"><FiBook size={14} /> Sous-titre <span className="editer-field-optional">(facultatif)</span></label>
+            <input
+              id="subtitle"
+              type="text"
+              name="subtitle"
+              value={form.subtitle}
+              onChange={handleChange}
+              onBlur={handleBlur}
+              placeholder="Sous-titre de l’ouvrage"
+              maxLength={200}
+            />
+          </div>
+          <div className="editer-field">
             <label htmlFor="genre"><FiFileText size={14} /> Genre <span>*</span></label>
             <select
               id="genre"
@@ -655,33 +824,162 @@ function ManuscriptForm() {
           <p>{formStepConfig[2].description}</p>
         </div>
 
-        <div className={`editer-field ${isVisibleError('file') ? 'has-error' : ''}`}>
-          <label htmlFor="manuscript-file">
-            <FiUpload size={14} /> Manuscrit (PDF, DOC, DOCX — max 20 Mo) <span className="editer-required" aria-label="champ obligatoire">*</span>
-          </label>
-          <div className="editer-file-input">
-            <input
-              type="file"
-              id="manuscript-file"
-              accept=".pdf,.doc,.docx"
-              onChange={handleFile}
-              required
-              aria-required="true"
-              aria-invalid={isVisibleError('file') ? 'true' : 'false'}
-              aria-describedby={isVisibleError('file') ? 'file-error' : 'file-help'}
-            />
-            <label htmlFor="manuscript-file" className="editer-file-label">
-              <FiUpload />
-              {file ? 'Remplacer le fichier' : 'Choisir un fichier'}
-            </label>
-            <div className="editer-file-meta">
-              <strong>{file ? file.name : 'Aucun fichier sélectionné'}</strong>
-              <span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} Mo` : 'Formats acceptés : PDF, DOC, DOCX'}</span>
+        <label className="editer-link-toggle editer-multitome-toggle">
+          <input
+            type="checkbox"
+            checked={multiTome}
+            onChange={(e) => handleToggleMultiTome(e.target.checked)}
+          />
+          <span>Mon ouvrage comporte plusieurs tomes (ex. Tome 1 et Tome 2)</span>
+        </label>
+
+        {multiTome && (
+          <>
+            <p className="editer-field-help editer-multitome-hint">
+              Chaque tome sera traité comme un ouvrage distinct (évaluation, ISBN et contrat propres), reliés sous le même titre d’œuvre {form.title ? `« ${form.title} »` : '(renseigné à l’étape Projet)'}. Jusqu’à {MAX_TOMES} tomes.
+            </p>
+            <div className="editer-tome-heading"><FiBook size={14} /> <strong>Tome 1</strong></div>
+            <div className="editer-field">
+              <label htmlFor="tome1-subtitle">Sous-titre du tome 1 (facultatif)</label>
+              <input
+                id="tome1-subtitle"
+                type="text"
+                value={tome1Subtitle}
+                onChange={(e) => setTome1Subtitle(e.target.value)}
+                placeholder="Ex. Les origines"
+              />
             </div>
-          </div>
-          <p className="editer-field-help" id="file-help">Le dépôt du manuscrit est obligatoire pour permettre l'évaluation par le comité éditorial.</p>
+          </>
+        )}
+
+        <div className={`editer-field ${isVisibleError('file') ? 'has-error' : ''}`}>
+          {!useLink ? (
+            <>
+              <label htmlFor="manuscript-file">
+                <FiUpload size={14} /> {multiTome ? 'Fichier du tome 1' : 'Manuscrit'} (PDF, DOC, DOCX — max 20 Mo) <span className="editer-required" aria-label="champ obligatoire">*</span>
+              </label>
+              <div className="editer-file-input">
+                <input
+                  type="file"
+                  id="manuscript-file"
+                  accept=".pdf,.doc,.docx"
+                  onChange={handleFile}
+                  aria-required="true"
+                  aria-invalid={isVisibleError('file') ? 'true' : 'false'}
+                  aria-describedby={isVisibleError('file') ? 'file-error' : 'file-help'}
+                />
+                <label htmlFor="manuscript-file" className="editer-file-label">
+                  <FiUpload />
+                  {file ? 'Remplacer le fichier' : 'Choisir un fichier'}
+                </label>
+                <div className="editer-file-meta">
+                  <strong>{file ? file.name : 'Aucun fichier sélectionné'}</strong>
+                  <span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} Mo` : 'Formats acceptés : PDF, DOC, DOCX'}</span>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <label htmlFor="manuscript-url">
+                <FiLink size={14} /> Lien de téléchargement du manuscrit <span className="editer-required" aria-label="champ obligatoire">*</span>
+              </label>
+              <input
+                type="url"
+                inputMode="url"
+                id="manuscript-url"
+                name="file_url"
+                value={fileUrl}
+                onChange={handleFileUrlChange}
+                onBlur={() => { markFieldAsTouched('file'); syncValidation(form, null, true, fileUrl); }}
+                placeholder="https://drive.google.com/..."
+                aria-required="true"
+                aria-invalid={isVisibleError('file') ? 'true' : 'false'}
+                aria-describedby={isVisibleError('file') ? 'file-error' : 'file-help'}
+              />
+            </>
+          )}
+
+          <label className="editer-link-toggle">
+            <input
+              type="checkbox"
+              checked={useLink}
+              onChange={(e) => handleToggleLink(e.target.checked)}
+            />
+            <span>Mon fichier dépasse 20 Mo — je préfère fournir un lien de téléchargement</span>
+          </label>
+
+          <p className="editer-field-help" id="file-help">
+            {useLink
+              ? 'Collez un lien Google Drive, WeTransfer, Dropbox… Vérifiez qu’il reste accessible (sans expiration ni mot de passe, ou précisez-le dans le message complémentaire).'
+              : 'Le dépôt du manuscrit est obligatoire pour permettre l’évaluation par le comité éditorial. Fichier supérieur à 20 Mo ? Cochez l’option ci-dessus pour envoyer un lien.'}
+          </p>
           {isVisibleError('file') && <p className="editer-field-error" id="file-error" role="alert"><FiAlertCircle /> {errors.file}</p>}
         </div>
+
+        {multiTome && (
+          <div className="editer-tomes-extra">
+            {extraTomes.map((tome, idx) => (
+              <div className={`editer-field editer-tome-block ${tome.error ? 'has-error' : ''}`} key={tome.key}>
+                <div className="editer-tome-block-head">
+                  <span><FiBook size={14} /> <strong>Tome {idx + 2}</strong></span>
+                  <button type="button" className="editer-tome-remove" onClick={() => removeTome(tome.key)}>
+                    Retirer
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  className="editer-tome-subtitle"
+                  value={tome.subtitle}
+                  onChange={(e) => patchTome(tome.key, { subtitle: e.target.value })}
+                  placeholder={`Sous-titre du tome ${idx + 2} (facultatif)`}
+                  aria-label={`Sous-titre du tome ${idx + 2}`}
+                />
+                {!tome.useLink ? (
+                  <div className="editer-file-input">
+                    <input
+                      type="file"
+                      id={`tome-file-${tome.key}`}
+                      accept=".pdf,.doc,.docx"
+                      onChange={(e) => handleTomeFile(tome.key, e)}
+                    />
+                    <label htmlFor={`tome-file-${tome.key}`} className="editer-file-label">
+                      <FiUpload />
+                      {tome.file ? 'Remplacer le fichier' : 'Choisir un fichier'}
+                    </label>
+                    <div className="editer-file-meta">
+                      <strong>{tome.file ? tome.file.name : 'Aucun fichier sélectionné'}</strong>
+                      <span>{tome.file ? `${(tome.file.size / 1024 / 1024).toFixed(1)} Mo` : 'Formats acceptés : PDF, DOC, DOCX'}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <input
+                    type="url"
+                    inputMode="url"
+                    value={tome.fileUrl}
+                    onChange={(e) => handleTomeUrl(tome.key, e.target.value)}
+                    placeholder="https://drive.google.com/..."
+                    aria-label={`Lien de téléchargement du tome ${idx + 2}`}
+                  />
+                )}
+                <label className="editer-link-toggle">
+                  <input
+                    type="checkbox"
+                    checked={tome.useLink}
+                    onChange={(e) => toggleTomeLink(tome.key, e.target.checked)}
+                  />
+                  <span>Ce tome dépasse 20 Mo — fournir un lien de téléchargement</span>
+                </label>
+                {tome.error && <p className="editer-field-error" role="alert"><FiAlertCircle /> {tome.error}</p>}
+              </div>
+            ))}
+
+            {totalTomes < MAX_TOMES && (
+              <button type="button" className="btn btn-outline editer-add-tome" onClick={addTome}>
+                + Ajouter un tome
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="editer-form-summary">
           <div>

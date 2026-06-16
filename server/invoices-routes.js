@@ -269,9 +269,13 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
   });
 
   // ═══════════════════════════════════════════════════════════
-  // RAPPORT JOURNALIER / MENSUEL
-  // Renvoie toutes les factures de la période + le détail des paiements
-  // (par méthode) sans pagination — destiné à la génération PDF / Excel.
+  // RAPPORT JOURNALIER / MENSUEL — double vue
+  //   • « Factures émises »   → filtrées par DATE DE FACTURE (f.datef)
+  //   • « Encaissements »     → filtrés par DATE DE PAIEMENT (p.datep)
+  // Les deux sont indépendants : un impayé émis hier mais réglé aujourd'hui
+  // apparaît dans les encaissements d'aujourd'hui (et non dans ceux d'hier).
+  // Le cumul par mode de paiement = encaisse réelle de la période (datep).
+  // Sans pagination — destiné à la génération PDF / Excel.
   // ═══════════════════════════════════════════════════════════
   router.get('/report', auth, async (req, res) => {
     try {
@@ -281,7 +285,7 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         return res.status(400).json({ error: 'date_from / date_to requis (YYYY-MM-DD)' });
       }
 
-      // 1. Toutes les factures de la période (pas de pagination, garde-fou 5 000 lignes).
+      // 1. Factures ÉMISES sur la période (date de facture). Garde-fou 5 000 lignes.
       const [invoiceRows] = await dolibarrPool.query(
         `SELECT f.rowid AS id, f.ref,
                 DATE_FORMAT(f.datef, '%Y-%m-%d') AS datef,
@@ -299,38 +303,73 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
          LIMIT 5000`, [dateFrom, dateTo]
       );
 
-      // 2. Tous les paiements imputés sur ces factures (en une seule requête).
+      // 2. Paiements imputés sur ces factures émises — colonne « modes » de la
+      //    liste (contexte all-time de la facture, pas un total de période).
       const ids = invoiceRows.map(r => r.id);
-      let paymentRows = [];
+      const paymentsByInvoice = new Map();
       if (ids.length > 0) {
         const placeholders = ids.map(() => '?').join(',');
         const [rows] = await dolibarrPool.query(
           `SELECT pf.fk_facture, pf.amount,
-                  cp.code AS method_code, cp.libelle AS method_label,
-                  p.datep
+                  cp.code AS method_code, cp.libelle AS method_label
            FROM llx_paiement_facture pf
            JOIN llx_paiement p ON p.rowid = pf.fk_paiement
            LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
            WHERE pf.fk_facture IN (${placeholders})`,
           ids
         );
-        paymentRows = rows;
+        for (const p of rows) {
+          const code = p.method_code || 'AUTRE';
+          const label = PAYMENT_METHOD_LABELS[code] || p.method_label || code;
+          if (!paymentsByInvoice.has(p.fk_facture)) paymentsByInvoice.set(p.fk_facture, []);
+          paymentsByInvoice.get(p.fk_facture).push({ code, label, amount: Number(p.amount) || 0 });
+        }
       }
 
-      // 3. Index paiements par facture + cumul par méthode (sur la période).
-      const paymentsByInvoice = new Map();
+      // 3. ENCAISSEMENTS reçus sur la période (date de PAIEMENT, p.datep).
+      //    Indépendant de la date d'émission : capte les impayés réglés plus tard.
+      //    DATE(p.datep) car datep est un datetime ; bornes incluses.
+      const [paymentRows] = await dolibarrPool.query(
+        `SELECT pf.fk_facture AS invoice_id, pf.amount,
+                DATE_FORMAT(p.datep, '%Y-%m-%d') AS datep,
+                f.ref AS invoice_ref,
+                DATE_FORMAT(f.datef, '%Y-%m-%d') AS invoice_date,
+                f.type AS invoice_type,
+                f.fk_soc, s.nom AS customer_name,
+                cp.code AS method_code, cp.libelle AS method_label
+         FROM llx_paiement p
+         JOIN llx_paiement_facture pf ON pf.fk_paiement = p.rowid
+         JOIN llx_facture f ON f.rowid = pf.fk_facture
+         LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
+         LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+         WHERE DATE(p.datep) >= ? AND DATE(p.datep) <= ?
+         ORDER BY p.datep ASC, p.rowid ASC
+         LIMIT 5000`, [dateFrom, dateTo]
+      );
+
+      // Cumul par méthode sur la base des encaissements (datep).
       const totalsByMethod = new Map();
-      for (const p of paymentRows) {
+      const encaissements = paymentRows.map(p => {
         const code = p.method_code || 'AUTRE';
         const label = PAYMENT_METHOD_LABELS[code] || p.method_label || code;
         const amount = Number(p.amount) || 0;
-        if (!paymentsByInvoice.has(p.fk_facture)) paymentsByInvoice.set(p.fk_facture, []);
-        paymentsByInvoice.get(p.fk_facture).push({ code, label, amount });
         const agg = totalsByMethod.get(code) || { code, label, total: 0, count: 0 };
         agg.total += amount;
         agg.count += 1;
         totalsByMethod.set(code, agg);
-      }
+        return {
+          invoice_id: p.invoice_id,
+          invoice_ref: p.invoice_ref,
+          invoice_date: p.invoice_date,
+          invoice_type: p.invoice_type,
+          customer_id: p.fk_soc,
+          customer_name: p.customer_name || '—',
+          method_code: code,
+          method_label: label,
+          amount,
+          date: p.datep,
+        };
+      });
 
       const invoices = invoiceRows.map(r => ({
         id: r.id,
@@ -353,12 +392,15 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
       const payments_by_method = Array.from(totalsByMethod.values())
         .sort((a, b) => b.total - a.total);
+      const total_encaisse = payments_by_method.reduce((s, m) => s + m.total, 0);
 
       res.json({
         date_from: dateFrom,
         date_to: dateTo,
-        invoices,
-        payments_by_method,
+        invoices,            // factures émises (datef)
+        encaissements,       // règlements reçus (datep)
+        payments_by_method,  // cumul par mode, base encaissements (datep)
+        total_encaisse,
       });
     } catch (err) {
       console.error('[INVOICES] report error:', err.message);

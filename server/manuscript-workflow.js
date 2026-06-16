@@ -77,7 +77,9 @@ export const STAGE_ACTORS = {
   correction_author_review: 'author',
   in_editorial: 'editor',
   editorial_validated: 'admin',
-  cover_design: 'infographiste',
+  // Fusion Éditeur + Infographiste : la couverture est désormais conçue en
+  // interne par la Production éditoriale (compte assigned_editor_id).
+  cover_design: 'editor',
   bat_author_review: 'author',
   print_preparation: 'imprimeur',
   printing: 'imprimeur',
@@ -113,14 +115,14 @@ export const ALLOWED_TRANSITIONS = {
     { to: 'in_editorial', roles: ['author', 'super_admin', 'admin'] },
   ],
   in_editorial: [
-    { to: 'editorial_validated', roles: ['editor', 'super_admin', 'admin'] },
-    { to: 'in_correction', roles: ['editor', 'super_admin', 'admin'] },
+    { to: 'editorial_validated', roles: ['editor', 'production', 'super_admin', 'admin'] },
+    { to: 'in_correction', roles: ['editor', 'production', 'super_admin', 'admin'] },
   ],
   editorial_validated: [
-    { to: 'cover_design', roles: ['editor', 'super_admin', 'admin'] },
+    { to: 'cover_design', roles: ['editor', 'production', 'super_admin', 'admin'] },
   ],
   cover_design: [
-    { to: 'bat_author_review', roles: ['infographiste', 'editor', 'super_admin', 'admin'] },
+    { to: 'bat_author_review', roles: ['editor', 'production', 'super_admin', 'admin'] },
   ],
   bat_author_review: [
     { to: 'cover_design', roles: ['author', 'super_admin', 'admin'] },

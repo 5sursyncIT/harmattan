@@ -787,7 +787,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       const [[societe]] = await dolibarrPool.query(
         `SELECT rowid AS id, nom, name_alias, code_client, code_fournisseur, client, fournisseur,
                 siret, tva_intra, phone, email, town, zip, address, barcode,
-                note_private, datec AS created_at
+                fk_typent AS typent_id, note_private, datec AS created_at
          FROM llx_societe WHERE rowid = ?`, [id]
       );
       if (!societe) return res.status(404).json({ error: 'Tiers introuvable' });
@@ -1092,6 +1092,15 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       if (!id) return res.status(400).json({ error: 'Id invalide' });
 
       const data = sanitizeSocieteInput(req.body);
+      // Un tiers Dolibarr n'a qu'un champ `nom`. Comme à la création, on
+      // recompose « Prénom NOM » pour un particulier à partir des deux champs
+      // du formulaire (firstname + name). Recombinaison sans perte.
+      const firstname = String(req.body.firstname || '').trim();
+      const isCompany = !!req.body.is_company;
+      const natureProvided = req.body.is_company !== undefined;
+      if (data.name !== undefined) {
+        data.name = buildTierName({ name: data.name, firstname, isCompany });
+      }
       if (data.name !== undefined && data.name.length < 2) {
         return res.status(400).json({ error: 'Nom du tiers requis (2 caractères min.)' });
       }
@@ -1149,6 +1158,14 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
         const v = String(data[key]);
         if (v === '') { sets.push(`${col} = NULL`); continue; }
         sets.push(`${col} = ?`); params.push(v);
+      }
+
+      // Nature (particulier/entreprise) → fk_typent, uniquement si le
+      // formulaire l'a explicitement transmise. Permet d'assainir au fil de
+      // l'eau les tiers sans type (NULL).
+      if (natureProvided) {
+        if (isCompany) { sets.push('fk_typent = NULL'); }
+        else { sets.push('fk_typent = ?'); params.push(TYPENT_PARTICULIER); }
       }
 
       if (sets.length === 0) return res.json({ success: true, id, noop: true });

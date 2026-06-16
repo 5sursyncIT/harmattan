@@ -76,23 +76,17 @@ function OrderDetailModal({ orderId, onClose }) {
               </table>
             </div>
 
-            {/* Totaux */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 24, fontSize: '0.88rem', marginBottom: 12 }}>
-              <div style={{ textAlign: 'right', color: '#64748b' }}>
-                <div>Total HT</div><div>TVA</div><div style={{ fontWeight: 800, color: '#0f172a', fontSize: '1rem' }}>Total TTC</div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div>{formatPrice(data.order.total_ht)}</div>
-                <div>{formatPrice(data.order.total_tva)}</div>
-                <div style={{ fontWeight: 800, color: '#10531a', fontSize: '1rem' }}>{formatPrice(data.order.total_ttc)}</div>
-              </div>
+            {/* Total (pas de TVA : TTC = montant unique) */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'baseline', gap: 12, fontSize: '1rem', marginBottom: 12 }}>
+              <span style={{ color: '#64748b', fontWeight: 700 }}>Total</span>
+              <span style={{ fontWeight: 800, color: '#10531a', fontSize: '1.1rem' }}>{formatPrice(data.order.total_ttc)}</span>
             </div>
 
             {/* Paiement */}
             {data.payment && (
               <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: 12, fontSize: '0.85rem', color: '#1e40af' }}>
                 <div style={{ fontWeight: 700, marginBottom: 4 }}><FiDollarSign size={13} style={{ verticalAlign: -2 }} /> Paiement</div>
-                <div>Méthode : <strong>{data.payment.method || '—'}</strong> · Attendu : <strong>{formatPrice(data.payment.amount_expected)}</strong></div>
+                <div>Méthode : <strong>{data.payment.method || '—'}</strong> · Attendu : <strong>{formatPrice(data.payment.amount_expected)}</strong>{data.payment.amount_received != null && <> · Encaissé : <strong>{formatPrice(data.payment.amount_received)}</strong></>}</div>
                 {data.payment.transaction_ref && <div>Réf. transaction client : <strong>{data.payment.transaction_ref}</strong>{data.payment.payer_phone ? ` · ${data.payment.payer_phone}` : ''}</div>}
                 {data.payment.invoice_ref && <div><FiFileText size={12} style={{ verticalAlign: -1 }} /> Facture : <strong>{data.payment.invoice_ref}</strong></div>}
               </div>

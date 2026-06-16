@@ -572,6 +572,14 @@
   color: #b45309;
 }
 
+/* Mention « (facultatif) » : discrète, pas l'astérisque requis ambre. */
+.editer-field label span.editer-field-optional {
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .editer-field input,
 .editer-field select,
 .editer-field textarea {
@@ -661,6 +669,41 @@
 .editer-file-meta strong {
   color: #0f172a;
   overflow-wrap: anywhere;
+}
+
+/* Bascule « fichier > 20 Mo → lien de téléchargement » */
+.editer-link-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: #334155;
+}
+
+.editer-link-toggle:hover {
+  border-color: #cbd5e1;
+}
+
+.editer-link-toggle input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: #10531a;
+  cursor: pointer;
+}
+
+.editer-link-toggle span {
+  color: inherit;
 }
 
 .editer-form-summary {
@@ -882,4 +925,83 @@
   .editer-hero-actions .btn {
     width: 100%;
   }
+}
+
+/* ─── Soumission multi-tomes ─────────────────────────────── */
+.editer-multitome-toggle {
+  border-color: #b6d8bd;
+  background: #f1f8f2;
+  color: #10531a;
+}
+
+.editer-multitome-toggle:hover {
+  border-color: #10531a;
+}
+
+.editer-multitome-hint {
+  margin-top: 6px;
+}
+
+.editer-tome-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 6px;
+  color: #10531a;
+  font-size: 1rem;
+}
+
+.editer-tomes-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 6px;
+}
+
+.editer-tome-block {
+  padding: 16px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 16px;
+  background: #fbfdfb;
+}
+
+.editer-tome-block.has-error {
+  border-color: #dc2626;
+}
+
+.editer-tome-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.editer-tome-block-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #10531a;
+}
+
+.editer-tome-remove {
+  background: none;
+  border: none;
+  color: #b91c1c;
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.editer-tome-remove:hover {
+  background: #fee2e2;
+}
+
+.editer-tome-subtitle {
+  margin-bottom: 12px;
+}
+
+.editer-add-tome {
+  align-self: flex-start;
 }

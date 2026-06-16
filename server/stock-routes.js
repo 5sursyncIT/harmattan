@@ -658,6 +658,141 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // ENTREPÔTS — liste des dépôts actifs (+ stock du produit par dépôt)
+  // Sert l'écran de transfert : voir où se trouve le stock avant de déplacer.
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/warehouses', auth, async (req, res) => {
+    try {
+      const pid = parseInt(req.query.product_id, 10);
+      if (pid) {
+        // Tous les entrepôts actifs + stock courant du produit dans chacun
+        // (LEFT JOIN : un dépôt sans ligne de stock pour ce produit → reel 0).
+        const [rows] = await dolibarrPool.query(
+          `SELECT e.rowid AS id, e.ref, e.label, e.lieu, COALESCE(ps.reel, 0) AS reel
+           FROM llx_entrepot e
+           LEFT JOIN llx_product_stock ps ON ps.fk_entrepot = e.rowid AND ps.fk_product = ?
+           WHERE e.statut = 1 ORDER BY e.ref`, [pid]
+        );
+        return res.json({ warehouses: rows, default_warehouse: 4 });
+      }
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid AS id, ref, label, lieu FROM llx_entrepot WHERE statut = 1 ORDER BY ref`
+      );
+      res.json({ warehouses: rows, default_warehouse: 4 });
+    } catch (err) {
+      console.error('[STOCK] warehouses error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement des entrepôts' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // TRANSFERT ENTRE ENTREPÔTS (circulation de livres dépôt → dépôt)
+  // Réplique le « transfert de stock » natif Dolibarr : DEUX mouvements
+  // appariés — une SORTIE de la source et une ENTRÉE en destination — reliés
+  // par un code commun (équivalent de l'inventorycode d'un transfert Dolibarr).
+  // Le stock global du produit est inchangé, seule sa répartition par dépôt bouge.
+  // ═══════════════════════════════════════════════════════════
+
+  router.post('/transfer', auth, blockLibrarianWrite, csrfProtection, async (req, res) => {
+    try {
+      const { product_id, qty, warehouse_source_id, warehouse_dest_id, reason } = req.body;
+      const q = parseInt(qty, 10);
+      const src = parseInt(warehouse_source_id, 10);
+      const dst = parseInt(warehouse_dest_id, 10);
+      if (!product_id || !q || q < 1) return res.status(400).json({ error: 'product_id et qty (> 0) requis' });
+      if (q > 100000) return res.status(400).json({ error: 'Quantité trop élevée' });
+      if (!src || !dst) return res.status(400).json({ error: 'Entrepôt source et destination requis' });
+      if (src === dst) return res.status(400).json({ error: 'Les entrepôts source et destination doivent être différents' });
+
+      // Produit + les deux entrepôts valides et actifs
+      const [[product]] = await dolibarrPool.query(
+        `SELECT rowid, ref, label FROM llx_product WHERE rowid = ?`, [product_id]
+      );
+      if (!product) return res.status(404).json({ error: 'Produit introuvable' });
+      const [whRows] = await dolibarrPool.query(
+        `SELECT rowid, ref FROM llx_entrepot WHERE rowid IN (?, ?) AND statut = 1`, [src, dst]
+      );
+      const whMap = new Map(whRows.map(w => [w.rowid, w]));
+      if (!whMap.has(src)) return res.status(400).json({ error: 'Entrepôt source invalide ou inactif' });
+      if (!whMap.has(dst)) return res.status(400).json({ error: 'Entrepôt destination invalide ou inactif' });
+
+      // Anti stock négatif : on ne déplace pas plus que ce qui est réellement en
+      // source (comportement Dolibarr par défaut, hors STOCK_ALLOW_NEGATIVE).
+      const [[srcStock]] = await dolibarrPool.query(
+        `SELECT reel FROM llx_product_stock WHERE fk_product = ? AND fk_entrepot = ?`, [product_id, src]
+      );
+      const available = Number(srcStock?.reel || 0);
+      if (available < q) {
+        return res.status(400).json({ error: `Stock insuffisant dans « ${whMap.get(src).ref} » : ${available} disponible(s) pour ${q} demandé(s).` });
+      }
+
+      const adminApi = (await import('axios')).default.create({
+        baseURL: process.env.DOLIBARR_URL,
+        headers: { DOLAPIKEY: process.env.DOLIBARR_ADMIN_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 30000,
+      });
+
+      // Code commun reliant les deux mouvements (TRF-AAMMJJ-XXXX) + libellé partagé.
+      const stamp = new Date().toISOString().slice(2, 10).replace(/-/g, '');
+      const trfCode = `TRF-${stamp}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const lbl = `Transfert ${whMap.get(src).ref}→${whMap.get(dst).ref}${reason ? ' — ' + String(reason).slice(0, 60) : ''}`;
+      const pidInt = parseInt(product_id, 10);
+
+      // 1) SORTIE de la source (qty NÉGATIVE = décrément, cf. /adjust).
+      let outId;
+      try {
+        const r = await adminApi.post('/stockmovements', {
+          product_id: pidInt, warehouse_id: src, qty: -Math.abs(q),
+          movementcode: trfCode, movementlabel: lbl,
+        });
+        outId = r.data;
+      } catch (e) {
+        console.error('[STOCK] transfer SORTIE error:', e.response?.data || e.message);
+        return res.status(500).json({ error: 'Erreur lors de la sortie du stock source (rien déplacé)' });
+      }
+
+      // 2) ENTRÉE en destination (qty POSITIVE). Si elle échoue, on annule la
+      //    sortie par un mouvement compensatoire pour ne pas perdre de stock.
+      let inId;
+      try {
+        const r = await adminApi.post('/stockmovements', {
+          product_id: pidInt, warehouse_id: dst, qty: Math.abs(q),
+          movementcode: trfCode, movementlabel: lbl,
+        });
+        inId = r.data;
+      } catch (e) {
+        console.error('[STOCK] transfer ENTREE error → rollback SORTIE:', e.response?.data || e.message);
+        try {
+          await adminApi.post('/stockmovements', {
+            product_id: pidInt, warehouse_id: src, qty: Math.abs(q),
+            movementcode: trfCode + '-RB',
+            movementlabel: `Annulation transfert (échec destination) — ${product.ref}`,
+          });
+        } catch (rbErr) {
+          console.error('[STOCK] CRITIQUE: rollback transfert échoué (source décrémentée sans crédit destination):', rbErr.response?.data || rbErr.message);
+          return res.status(500).json({ error: "Échec du transfert ET de son annulation. Un retrait a eu lieu en source — vérifiez le stock manuellement." });
+        }
+        return res.status(500).json({ error: "Erreur d'entrée en destination — transfert annulé, aucun stock déplacé." });
+      }
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'stock_transfer',
+          `Transfert : ${product.ref} × ${q} ${whMap.get(src).ref}→${whMap.get(dst).ref}${reason ? ' — ' + reason : ''} [${trfCode}]`);
+      console.log(`[STOCK] Transfert: ${product.ref} ×${q} ${whMap.get(src).ref}→${whMap.get(dst).ref} par ${req.admin.username} (${trfCode})`);
+
+      res.json({
+        success: true, product_ref: product.ref, qty: q, code: trfCode,
+        source: whMap.get(src).ref, dest: whMap.get(dst).ref,
+        movement_out: outId, movement_in: inId,
+      });
+    } catch (err) {
+      console.error('[STOCK] transfer error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur lors du transfert de stock' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // SUPPLIER ORDER (titre externe → commande fournisseur Dolibarr)
   // ═══════════════════════════════════════════════════════════
 

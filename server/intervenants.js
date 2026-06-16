@@ -14,7 +14,11 @@
 import { CORRECTEURS } from './correcteurs.js';
 
 // Métiers gérés par le carnet (acteurs externes notifiés par email, sans compte).
-export const INTERVENANT_METIERS = ['evaluateur', 'correcteur', 'infographiste', 'imprimeur'];
+// « infographiste » a été retiré : la couverture est désormais conçue en interne
+// par la Production éditoriale (fusion Éditeur/Infographiste). Les intervenants
+// infographistes déjà en base restent valides (contrainte CHECK inchangée) pour
+// l'historique des anciens manuscrits.
+export const INTERVENANT_METIERS = ['evaluateur', 'correcteur', 'imprimeur'];
 
 /**
  * Crée la table `intervenants` si absente. À appeler une fois au démarrage.

@@ -11,6 +11,15 @@ const TYPES = [
   { value: '0', label: 'Aucun' },
 ];
 
+// Un tiers Dolibarr ne stocke qu'un champ `nom`. Pour un particulier, on
+// présente Prénom + Nom : dernier mot = nom de famille, le reste = prénom
+// (même heuristique que la promotion en auteur). Recombinaison sans perte.
+function splitPersonName(full) {
+  const parts = String(full || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length <= 1) return { firstname: '', name: String(full || '').trim() };
+  return { firstname: parts.slice(0, -1).join(' '), name: parts[parts.length - 1] };
+}
+
 function emptyForm() {
   return {
     is_company: false,
@@ -39,8 +48,16 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
 
   useEffect(() => {
     if (tier) {
+      // typent_id === 8 = particulier (posé par ce module). Une valeur autre
+      // que 8/null (typée manuellement dans Dolibarr) ⇒ entreprise. Par défaut
+      // (tiers sans type), on traite comme un particulier et on découpe le nom.
+      const isCompany = tier.typent_id != null && Number(tier.typent_id) !== 8;
+      const fullNom = tier.nom || tier.name || '';
+      const split = isCompany ? { firstname: '', name: fullNom } : splitPersonName(fullNom);
       setForm({
-        name: tier.nom || tier.name || '',
+        name: split.name,
+        firstname: split.firstname,
+        is_company: isCompany,
         name_alias: tier.name_alias || '',
         email: tier.email || '',
         phone: tier.phone || '',
@@ -62,6 +79,17 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  // Bascule Particulier/Entreprise : on fusionne (« Prénom NOM » → raison
+  // sociale) ou on redécoupe le nom pour ne rien perdre.
+  const setNature = (isCompany) => setForm(f => {
+    if (isCompany === f.is_company) return f;
+    if (isCompany) {
+      return { ...f, is_company: true, name: [f.firstname, f.name].filter(Boolean).join(' ').trim(), firstname: '' };
+    }
+    const s = splitPersonName(f.name);
+    return { ...f, is_company: false, name: s.name, firstname: s.firstname };
+  });
+
   const validate = () => {
     const errs = {};
     if (!form.name.trim() || form.name.trim().length < 2) errs.name = 'Nom requis (2 caractères min.)';
@@ -82,7 +110,7 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
     try {
       const payload = {
         name: form.name.trim(),
-        firstname: form.firstname.trim(),
+        firstname: (form.firstname || '').trim(),
         is_company: form.is_company,
         name_alias: form.name_alias.trim() || null,
         email: form.email.trim() || null,
@@ -138,21 +166,19 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
         <div className="tiers-modal-body">
           <h5 className="tiers-section">Identification</h5>
           <div className="tiers-grid">
-            {!isEdit && (
-              <div className="tiers-field tiers-field-full">
-                <label>Nature</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button type="button" className={`btn ${!form.is_company ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => set('is_company', false)}>Particulier</button>
-                  <button type="button" className={`btn ${form.is_company ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => set('is_company', true)}>Entreprise / organisation</button>
-                </div>
+            <div className="tiers-field tiers-field-full">
+              <label>Nature</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" className={`btn ${!form.is_company ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setNature(false)}>Particulier</button>
+                <button type="button" className={`btn ${form.is_company ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setNature(true)}>Entreprise / organisation</button>
               </div>
+            </div>
+            {!form.is_company && (
+              F({ label: 'Prénom', name: 'firstname', required: !isEdit })
             )}
-            {!isEdit && !form.is_company && (
-              F({ label: 'Prénom', name: 'firstname', required: true })
-            )}
-            {F({ label: form.is_company ? 'Raison sociale' : 'Nom', name: 'name', required: true, full: isEdit || form.is_company })}
+            {F({ label: form.is_company ? 'Raison sociale' : 'Nom', name: 'name', required: true, full: form.is_company })}
             {F({ label: 'Nom alternatif', name: 'name_alias' })}
             <div className="tiers-field">
               <label>Type</label>

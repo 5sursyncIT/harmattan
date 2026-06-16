@@ -287,18 +287,19 @@ function ReportModal({ kind, onClose }) {
     try {
       const data = await fetchReport();
       const invoices = data.invoices || [];
+      const encaissements = data.encaissements || [];
       const paymentsByMethod = data.payments_by_method || [];
-      if (invoices.length === 0) {
-        toast('Aucune facture sur cette période', { icon: 'ℹ️' });
+      if (invoices.length === 0 && encaissements.length === 0) {
+        toast('Aucune facture ni encaissement sur cette période', { icon: 'ℹ️' });
       }
       const kpis = computeReportKpis(invoices);
-      const title = isDaily ? 'Rapport journalier des factures' : 'Rapport mensuel des factures';
+      const title = isDaily ? 'Rapport journalier' : 'Rapport mensuel';
 
       if (format === 'pdf') {
-        openInvoicesPdf({ invoices, kpis, paymentsByMethod, title, periodLabel });
+        openInvoicesPdf({ invoices, encaissements, kpis, paymentsByMethod, title, periodLabel });
       } else {
         const filename = buildFilename({ kind, dateIso, yearMonth, ext: 'csv' });
-        downloadInvoicesCsv({ invoices, kpis, paymentsByMethod, title, periodLabel, filename });
+        downloadInvoicesCsv({ invoices, encaissements, kpis, paymentsByMethod, title, periodLabel, filename });
         toast.success('Fichier Excel téléchargé');
       }
       onClose();

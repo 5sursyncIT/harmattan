@@ -18,6 +18,7 @@ import mysql from 'mysql2/promise';
 import sharp from 'sharp';
 import axios from 'axios';
 import { dolibarrApi } from './dolibarr-client.js';
+import { fetchOrderDetail } from './order-detail.js';
 import { findExistingTier } from './tier-dedup.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
 import { EXCLUDED_CATEGORIES_SET, excludedCategorySqlList } from '../src/utils/excludedCategories.js';
@@ -1331,10 +1332,12 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
     await dolibarrApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
     const invoice = await dolibarrApi.get(`/invoices/${invoiceId}`);
 
-    // Mettre à jour le suivi de paiement local
+    // Mettre à jour le suivi de paiement local. La confirmation manuelle vaut
+    // encaissement du montant attendu (paiement intégral) → amount_received = total.
+    const amountReceived = parseFloat(invoice.data.total_ttc) || parseFloat(order.total_ttc) || 0;
     db.prepare(
-      'UPDATE order_payments SET payment_status = ?, invoice_ref = ?, confirmed_by = ?, confirmed_at = datetime(?) WHERE dolibarr_order_id = ?'
-    ).run('confirmed', invoice.data.ref, req.admin.username, new Date().toISOString(), String(orderId));
+      'UPDATE order_payments SET payment_status = ?, invoice_ref = ?, amount_received = ?, confirmed_by = ?, confirmed_at = datetime(?) WHERE dolibarr_order_id = ?'
+    ).run('confirmed', invoice.data.ref, amountReceived, req.admin.username, new Date().toISOString(), String(orderId));
 
     // Log activity
     db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
@@ -1413,63 +1416,14 @@ app.post('/api/admin/payments/:id/reject', paymentMgmtAuth, csrfProtection, (req
 
 // Détail complet d'une commande web (pour la fiche depuis l'écran Paiements).
 // Sous /payments/* pour hériter de la whitelist RBAC (super_admin, admin, comptable).
-const ORDER_STATUS_LABELS = { '-1': 'Annulée', 0: 'Brouillon', 1: 'Validée', 2: 'En cours', 3: 'Livrée' };
+// Même source que /api/admin/orders/:id (helper partagé fetchOrderDetail).
 app.get('/api/admin/payments/order/:orderId', paymentMgmtAuth, async (req, res) => {
   const id = parseInt(req.params.orderId, 10);
   if (!id) return res.status(400).json({ error: 'Identifiant de commande invalide' });
   try {
-    const [[order]] = await dolibarrPool.query(
-      `SELECT c.rowid AS id, c.ref, c.fk_statut, c.facture AS billed,
-              DATE_FORMAT(c.date_commande, '%Y-%m-%d') AS date_commande,
-              c.total_ht, c.total_tva, c.total_ttc, c.note_public, c.note_private,
-              c.fk_soc, s.nom AS customer_name, s.email AS customer_email,
-              s.phone AS customer_phone, s.address, s.zip, s.town
-       FROM llx_commande c
-       LEFT JOIN llx_societe s ON s.rowid = c.fk_soc
-       WHERE c.rowid = ?`, [id]
-    );
-    if (!order) return res.status(404).json({ error: 'Commande introuvable' });
-
-    const [lines] = await dolibarrPool.query(
-      `SELECT cd.rowid AS id, cd.fk_product, p.ref AS product_ref, p.label AS product_label,
-              cd.description, cd.qty, cd.subprice, cd.remise_percent, cd.total_ht, cd.total_ttc
-       FROM llx_commandedet cd
-       LEFT JOIN llx_product p ON p.rowid = cd.fk_product
-       WHERE cd.fk_commande = ? AND cd.product_type = 0
-       ORDER BY cd.rang ASC, cd.rowid ASC`, [id]
-    );
-
-    // Enregistrement de paiement local lié (méthode, réf transaction client, statut).
-    const payment = db.prepare(
-      'SELECT * FROM order_payments WHERE dolibarr_order_id = ? ORDER BY id DESC LIMIT 1'
-    ).get(String(id)) || null;
-
-    res.json({
-      order: {
-        id: order.id, ref: order.ref,
-        status: order.fk_statut, statusLabel: ORDER_STATUS_LABELS[String(order.fk_statut)] || '?',
-        billed: !!order.billed,
-        date: order.date_commande,
-        total_ht: Number(order.total_ht), total_tva: Number(order.total_tva), total_ttc: Number(order.total_ttc),
-        note_public: order.note_public, note_private: order.note_private,
-        customer: {
-          id: order.fk_soc, name: order.customer_name, email: order.customer_email,
-          phone: order.customer_phone, address: order.address, zip: order.zip, town: order.town,
-        },
-      },
-      lines: lines.map(l => ({
-        id: l.id, product_id: l.fk_product, ref: l.product_ref,
-        label: l.product_label || l.description, qty: Number(l.qty),
-        subprice: Number(l.subprice), remise_percent: Number(l.remise_percent),
-        total_ht: Number(l.total_ht), total_ttc: Number(l.total_ttc),
-      })),
-      payment: payment ? {
-        method: payment.payment_method, status: payment.payment_status,
-        amount_expected: Number(payment.amount_expected), amount_received: payment.amount_received,
-        transaction_ref: payment.transaction_ref, payer_phone: payment.payer_phone,
-        invoice_ref: payment.invoice_ref, created_at: payment.created_at,
-      } : null,
-    });
+    const detail = await fetchOrderDetail({ db, dolibarrPool }, id);
+    if (!detail) return res.status(404).json({ error: 'Commande introuvable' });
+    res.json(detail);
   } catch (err) {
     console.error('GET /api/admin/payments/order/:orderId error:', err.message);
     res.status(500).json({ error: 'Erreur chargement de la commande' });
@@ -1528,7 +1482,7 @@ try {
 }
 
 // ─── PAYTECH (paiement hosted) ──────────────────────────────
-import { createPaytechRouter, isPaytechConfigured } from './paytech-routes.js';
+import { createPaytechRouter, isPaytechConfigured, createPaytechCheckout } from './paytech-routes.js';
 import * as emailService from './email-service.js';
 import * as whatsappService from './whatsapp-service.js';
 try {
@@ -2826,51 +2780,20 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
     }
 
     // Si le client a choisi PayTech, initier le checkout hosted dans la foulée
+    // (même helper que la route /api/payments/paytech/init). Best-effort : un
+    // échec ne fait pas planter la commande, le client peut retenter via la route.
     let paytechRedirectUrl = null;
     if (payment_method === 'paytech' && isPaytechConfigured()) {
-      try {
-        const refCommand = orderDetail.data.ref || `SO-${orderId}`;
-        const total = parseInt(orderDetail.data.total_ttc, 10) || 0;
-        if (total > 0) {
-          const ptPayload = {
-            item_name: `Commande ${refCommand}`,
-            item_price: total,
-            currency: 'XOF',
-            ref_command: refCommand,
-            command_name: `Commande ${refCommand}`,
-            env: (process.env.PAYTECH_ENV || 'test').toLowerCase(),
-            ipn_url: process.env.PAYTECH_IPN_URL || `${SITE_URL}/api/webhooks/paytech`,
-            success_url: `${process.env.PAYTECH_RETURN_URL || `${SITE_URL}/commande/succes`}?ref=${encodeURIComponent(refCommand)}`,
-            cancel_url: `${process.env.PAYTECH_CANCEL_URL || `${SITE_URL}/commande/echec`}?ref=${encodeURIComponent(refCommand)}`,
-            custom_field: JSON.stringify({ order_id: String(orderId), order_ref: refCommand }),
-          };
-          const ptRes = await axios.post(
-            'https://paytech.sn/api/payment/request-payment',
-            ptPayload,
-            {
-              headers: {
-                API_KEY: process.env.PAYTECH_API_KEY,
-                API_SECRET: process.env.PAYTECH_API_SECRET,
-                'Content-Type': 'application/json',
-              },
-              timeout: 15000,
-            }
-          );
-          if (ptRes.data?.success === 1 && ptRes.data?.redirect_url) {
-            paytechRedirectUrl = ptRes.data.redirect_url;
-            db.prepare(
-              `UPDATE order_payments
-               SET external_transaction_id = ?, external_provider = 'paytech', external_status = 'pending'
-               WHERE dolibarr_order_id = ?`
-            ).run(ptRes.data.token || '', String(orderId));
-          } else {
-            console.warn('[PAYTECH] init unexpected:', ptRes.data);
-          }
-        }
-      } catch (ptErr) {
-        console.error('[PAYTECH] init error inside /api/orders:', ptErr.response?.data || ptErr.message);
-        // On ne fait pas planter la commande — on retourne quand même les infos
-        // et le client peut retenter via /api/payments/paytech/init
+      const ptResult = await createPaytechCheckout({
+        db,
+        orderId,
+        orderRef: orderDetail.data.ref,
+        amount: orderDetail.data.total_ttc,
+      });
+      if (ptResult.ok) {
+        paytechRedirectUrl = ptResult.redirect_url;
+      } else {
+        console.warn('[PAYTECH] init inside /api/orders failed:', ptResult.code);
       }
     }
 

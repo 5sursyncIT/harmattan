@@ -32,6 +32,61 @@ export function isPaytechConfigured() {
   return Boolean(PAYTECH_API_KEY && PAYTECH_API_SECRET);
 }
 
+/**
+ * Initialise un checkout hosted PayTech pour une commande et persiste le token.
+ * Source unique partagée par la route /payments/paytech/init ET par /api/orders
+ * (index.js) afin d'éviter deux payloads à garder synchrones.
+ *
+ * @param {{ db: any, orderId: string|number, orderRef?: string, amount: number }} p
+ * @returns {Promise<{ok:true,redirect_url:string,token:string}|{ok:false,code:string}>}
+ *   code ∈ 'not_configured' | 'bad_amount' | 'provider_down' | 'bad_response'
+ */
+export async function createPaytechCheckout({ db, orderId, orderRef, amount }) {
+  if (!isPaytechConfigured()) return { ok: false, code: 'not_configured' };
+  const price = Math.round(Number(amount) || 0); // PayTech : entier en XOF
+  if (!(price > 0)) return { ok: false, code: 'bad_amount' };
+
+  const refCommand = orderRef || `SO-${orderId}`;
+  const itemName = `Commande ${refCommand}`;
+  const payload = {
+    item_name: itemName,
+    item_price: price,
+    currency: 'XOF',
+    ref_command: refCommand,
+    command_name: itemName,
+    env: PAYTECH_ENV,
+    ipn_url: PAYTECH_IPN_URL,
+    success_url: `${PAYTECH_RETURN_URL}?ref=${encodeURIComponent(refCommand)}`,
+    cancel_url: `${PAYTECH_CANCEL_URL}?ref=${encodeURIComponent(refCommand)}`,
+    custom_field: JSON.stringify({ order_id: String(orderId), order_ref: refCommand }),
+  };
+
+  let ptRes;
+  try {
+    ptRes = await axios.post(`${PAYTECH_BASE}/request-payment`, payload, {
+      headers: { API_KEY: PAYTECH_API_KEY, API_SECRET: PAYTECH_API_SECRET, 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+  } catch (err) {
+    console.error('[PAYTECH] init request failed:', err.response?.data || err.message);
+    return { ok: false, code: 'provider_down' };
+  }
+
+  const data = ptRes.data || {};
+  if (data.success !== 1 || !data.redirect_url) {
+    console.error('[PAYTECH] init unexpected response:', data);
+    return { ok: false, code: 'bad_response' };
+  }
+
+  db.prepare(
+    `UPDATE order_payments
+     SET external_transaction_id = ?, external_provider = 'paytech', external_status = 'pending'
+     WHERE dolibarr_order_id = ?`
+  ).run(data.token || '', String(orderId));
+
+  return { ok: true, redirect_url: data.redirect_url, token: data.token };
+}
+
 function sha256(s) {
   return crypto.createHash('sha256').update(String(s || '')).digest('hex');
 }
@@ -117,58 +172,22 @@ export function createPaytechRouter({
         return res.status(409).json({ error: 'Commande déjà payée', payment_status: 'confirmed' });
       }
 
-      const total = parseFloat(op.amount_expected || 0);
-      if (total <= 0) return res.status(400).json({ error: 'Montant invalide' });
-
-      const refCommand = op.order_ref || `SO-${order_id}`;
-      const itemName = `Commande ${refCommand}`;
-
-      const payload = {
-        item_name: itemName,
-        item_price: Math.round(total),     // PayTech : entier en XOF
-        currency: 'XOF',
-        ref_command: refCommand,
-        command_name: itemName,
-        env: PAYTECH_ENV,
-        ipn_url: PAYTECH_IPN_URL,
-        success_url: `${PAYTECH_RETURN_URL}?ref=${encodeURIComponent(refCommand)}`,
-        cancel_url: `${PAYTECH_CANCEL_URL}?ref=${encodeURIComponent(refCommand)}`,
-        custom_field: JSON.stringify({ order_id: String(order_id), order_ref: refCommand }),
-      };
-
-      let ptRes;
-      try {
-        ptRes = await axios.post(`${PAYTECH_BASE}/request-payment`, payload, {
-          headers: {
-            API_KEY: PAYTECH_API_KEY,
-            API_SECRET: PAYTECH_API_SECRET,
-            'Content-Type': 'application/json',
-          },
-          timeout: 15000,
-        });
-      } catch (err) {
-        console.error('[PAYTECH] init request failed:', err.response?.data || err.message);
-        return res.status(502).json({ error: 'Service de paiement indisponible' });
-      }
-
-      const data = ptRes.data || {};
-      if (data.success !== 1 || !data.redirect_url) {
-        console.error('[PAYTECH] init unexpected response:', data);
-        return res.status(502).json({ error: 'Réponse inattendue du service de paiement' });
-      }
-
-      // Persister le token PayTech
-      db.prepare(
-        `UPDATE order_payments
-         SET external_transaction_id = ?, external_provider = 'paytech', external_status = 'pending'
-         WHERE dolibarr_order_id = ?`
-      ).run(data.token || '', String(order_id));
-
-      res.json({
-        success: true,
-        redirect_url: data.redirect_url,
-        token: data.token,
+      const result = await createPaytechCheckout({
+        db, orderId: order_id, orderRef: op.order_ref, amount: op.amount_expected,
       });
+
+      if (!result.ok) {
+        const map = {
+          not_configured: [503, 'PayTech non configuré sur ce serveur'],
+          bad_amount: [400, 'Montant invalide'],
+          provider_down: [502, 'Service de paiement indisponible'],
+          bad_response: [502, 'Réponse inattendue du service de paiement'],
+        };
+        const [status, error] = map[result.code] || [500, 'Erreur init paiement'];
+        return res.status(status).json({ error });
+      }
+
+      res.json({ success: true, redirect_url: result.redirect_url, token: result.token });
     } catch (err) {
       console.error('[PAYTECH] init error:', err.message);
       res.status(500).json({ error: 'Erreur init paiement' });
@@ -235,6 +254,18 @@ export function createPaytechRouter({
           console.warn(`[PAYTECH-IPN] type_event inattendu : ${eventType}`);
           // On accuse réception sans erreur pour ne pas faire retry
           return res.json({ ok: true, ignored: eventType });
+        }
+
+        // ── Vérification de la devise ──
+        // On ne facture qu'en XOF. Si l'IPN annonce une autre devise, on ne
+        // confirme pas (incohérence à arbitrer manuellement).
+        const ipnCurrency = String(body.currency || '').toUpperCase();
+        if (ipnCurrency && ipnCurrency !== 'XOF') {
+          console.warn(`[PAYTECH-IPN] devise inattendue : ${ipnCurrency} order=${op.dolibarr_order_id} — commande NON confirmée`);
+          db.prepare(
+            `UPDATE order_payments SET external_status = 'currency_mismatch', external_payload = ? WHERE id = ?`
+          ).run(JSON.stringify(body), op.id);
+          return res.json({ ok: true, status: 'currency_mismatch' });
         }
 
         // ── Vérification du montant payé ──
@@ -355,6 +386,7 @@ export function createPaytechRouter({
                external_payment_id = ?,
                external_transaction_id = ?,
                external_payload = ?,
+               amount_received = ?,
                invoice_ref = COALESCE(?, invoice_ref),
                confirmed_by = 'paytech',
                confirmed_at = CURRENT_TIMESTAMP
@@ -363,6 +395,7 @@ export function createPaytechRouter({
           String(body.payment_id || body.transaction_id || ''),
           token || op.external_transaction_id,
           JSON.stringify(body),
+          amountPaid,
           invoiceRef,
           op.id
         );

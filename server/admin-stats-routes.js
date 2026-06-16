@@ -333,12 +333,16 @@ export function createAdminStatsRouter({ db, dolibarrPool, cache, auth }) {
       );
 
       const [paymentRows] = await dolibarrPool.query(
+        // Répartition des ENCAISSEMENTS par moyen de paiement : fenêtre sur la
+        // DATE DE PAIEMENT (p.datep), pas la date de facture — sinon un impayé
+        // réglé récemment sur une vieille facture serait mal compté (cf. rapport
+        // journalier). UTC_DATE() = heure Dakar (cf. en-tête de ce fichier).
         `SELECT cp.code, cp.libelle AS label, COUNT(*) AS cnt, SUM(pf.amount) AS amount
          FROM llx_paiement_facture pf
          INNER JOIN llx_paiement p ON p.rowid = pf.fk_paiement
          INNER JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
          INNER JOIN llx_facture f ON f.rowid = pf.fk_facture
-         WHERE f.fk_statut >= 1 AND f.datef >= UTC_DATE() - INTERVAL 30 DAY
+         WHERE f.fk_statut >= 1 AND p.datep >= UTC_DATE() - INTERVAL 30 DAY
          GROUP BY cp.code, cp.libelle
          ORDER BY amount DESC
          LIMIT 10`

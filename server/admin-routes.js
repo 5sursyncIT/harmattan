@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
@@ -8,7 +8,7 @@ import multer from 'multer';
 import { existsSync } from 'fs';
 import rateLimit from 'express-rate-limit';
 import { generateManuscriptRef } from './manuscript-workflow.js';
-import { notifyTransition } from './manuscript-emails.js';
+import { notifyTransition, notifySeriesSubmission } from './manuscript-emails.js';
 import {
   ROLES,
   validRoles,
@@ -86,6 +86,18 @@ const manuscriptUpload = multer({
     cb(null, /\.(pdf|doc|docx)$/i.test(file.originalname));
   },
 });
+
+// Supprime le fichier temporaire déposé par multer quand une soumission est
+// rejetée avant d'être persistée. Sans ça, chaque envoi invalide (validation
+// serveur en échec, erreur DB) laisse un orphelin « manuscrit-<ts>.ext » à la
+// racine de manuscripts/.
+function cleanupTmpUpload(file) {
+  try {
+    if (file?.path && existsSync(file.path)) unlinkSync(file.path);
+  } catch (err) {
+    console.warn('[MANUSCRIPT] cleanup tmp upload:', err.message);
+  }
+}
 
 // ─── CONFIG HELPERS ─────────────────────────────────────────
 function readConfig() {
@@ -302,6 +314,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   try { db.exec('ALTER TABLE manuscript_submissions ADD COLUMN biography TEXT'); } catch (e) { void e; /* column exists */ }
+  try { db.exec('ALTER TABLE manuscript_submissions ADD COLUMN subtitle TEXT'); } catch (e) { void e; /* column exists */ }
 
   // ─── WORKFLOW ÉDITORIAL ─────────────────────────────────────
   // Portail auteur
@@ -368,6 +381,20 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   for (const c of ['assigned_evaluator_contact_id', 'assigned_corrector_contact_id', 'assigned_infographist_contact_id', 'assigned_printer_contact_id']) {
     try { db.exec(`ALTER TABLE manuscripts ADD COLUMN ${c} INTEGER`); } catch (e) { void e; }
   }
+  // Soumission multi-tomes : un ouvrage en plusieurs tomes crée N manuscrits
+  // indépendants (chacun son ISBN, contrat, royalties, impression) reliés par
+  // un identifiant de série commun. Colonnes nulles pour un livre unique.
+  //  - series_ref   : identifiant de groupe partagé (= ref du 1ᵉʳ tome)
+  //  - series_title : titre commun de l'œuvre
+  //  - tome_number  : rang du tome (1, 2, 3…)
+  //  - tome_total   : nombre de tomes soumis ensemble
+  // Sous-titre de l'ouvrage (facultatif), saisi après le titre dans le formulaire public.
+  try { db.exec('ALTER TABLE manuscripts ADD COLUMN subtitle TEXT'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE manuscripts ADD COLUMN series_ref TEXT'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE manuscripts ADD COLUMN series_title TEXT'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE manuscripts ADD COLUMN tome_number INTEGER'); } catch (e) { void e; }
+  try { db.exec('ALTER TABLE manuscripts ADD COLUMN tome_total INTEGER'); } catch (e) { void e; }
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_series ON manuscripts(series_ref)'); } catch (e) { void e; }
 
   db.exec(`CREATE TABLE IF NOT EXISTS manuscript_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,6 +410,11 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscript_files_ms ON manuscript_files(manuscript_id, kind)'); } catch (e) { void e; }
+  // Lien de téléchargement externe (manuscrits > 20 Mo déposés via une URL
+  // Google Drive / WeTransfer / Dropbox… au lieu d'un upload). Quand cette
+  // colonne est renseignée, file_path contient l'URL et aucun fichier local
+  // n'existe : le téléchargement admin redirige vers le lien.
+  try { db.exec('ALTER TABLE manuscript_files ADD COLUMN external_url TEXT'); } catch (e) { void e; }
 
   db.exec(`CREATE TABLE IF NOT EXISTS manuscript_stages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -883,48 +915,134 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // /api/manuscripts/submit (plus clair, et plus facile à reconnaître pour
   // les outils de sécurité qui scannent /admin).
   // Rate limit explicite : upload coûteux, surface de spam.
-  const submitManuscriptHandler = (req, res) => {
+  // Valide une URL de dépôt externe (manuscrit > 20 Mo).
+  const isValidExternalUrl = (url) => {
+    if (!url || url.length > 2000) return false;
     try {
-      const { firstname, lastname, email, phone, title, genre, synopsis, biography, message } = req.body;
+      const u = new URL(url);
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch { return false; }
+  };
+
+  const submitManuscriptHandler = (req, res) => {
+    // .fields() : on normalise les fichiers reçus (multi-tomes `files`, ou champ
+    // unique `file` legacy) en un seul tableau ordonné.
+    const uploaded = [
+      ...((req.files && req.files.files) || []),
+      ...((req.files && req.files.file) || []),
+    ];
+    const cleanupAll = () => uploaded.forEach((f) => cleanupTmpUpload(f));
+    try {
+      const { firstname, lastname, email, phone, title, subtitle, genre, synopsis, biography, message } = req.body;
       if (!firstname || !lastname || !email || !title) {
+        cleanupAll();
         return res.status(400).json({ error: 'Champs requis manquants' });
       }
+      if (subtitle && String(subtitle).length > 200) {
+        cleanupAll();
+        return res.status(400).json({
+          error: 'Le sous-titre ne doit pas dépasser 200 caractères.',
+          errors: { subtitle: 'Le sous-titre ne doit pas dépasser 200 caractères.' },
+        });
+      }
       if (!phone || !String(phone).trim()) {
+        cleanupAll();
         return res.status(400).json({
           error: 'Le numéro de téléphone est obligatoire.',
           errors: { phone: 'Veuillez renseigner votre numéro de téléphone.' },
         });
       }
-      if (!req.file) {
-        return res.status(400).json({
-          error: 'Le manuscrit (PDF, DOC ou DOCX) est obligatoire.',
-          errors: { file: 'Veuillez joindre votre manuscrit.' },
-        });
-      }
       if (synopsis && String(synopsis).length > 1200) {
+        cleanupAll();
         return res.status(400).json({
           error: 'Le synopsis ne doit pas dépasser 1200 caractères.',
           errors: { synopsis: 'Le synopsis ne doit pas dépasser 1200 caractères.' },
         });
       }
       if (!biography || !String(biography).trim()) {
+        cleanupAll();
         return res.status(400).json({
           error: 'La biographie de l’auteur est obligatoire.',
           errors: { biography: 'Veuillez renseigner une courte biographie de l’auteur.' },
         });
       }
       if (String(biography).length > 400) {
+        cleanupAll();
         return res.status(400).json({
           error: 'La biographie ne doit pas dépasser 400 caractères.',
           errors: { biography: 'La biographie ne doit pas dépasser 400 caractères.' },
         });
       }
 
+      // Construction de la liste normalisée des tomes à créer.
+      //  - mode multi-tomes : champ JSON `tomes` = [{ subtitle, useLink, fileUrl }]
+      //    (les fichiers arrivent dans `files`, dans l'ordre des tomes sans lien)
+      //  - mode legacy (1 livre) : un fichier OU `file_url`
+      let tomesMeta = null;
+      if (req.body.tomes) {
+        try { tomesMeta = JSON.parse(req.body.tomes); } catch { tomesMeta = null; }
+        if (!Array.isArray(tomesMeta) || tomesMeta.length === 0) tomesMeta = null;
+      }
+
+      const tomeInputs = [];
+      if (tomesMeta) {
+        if (tomesMeta.length > 5) {
+          cleanupAll();
+          return res.status(400).json({ error: 'Un maximum de 5 tomes peut être soumis en une fois.' });
+        }
+        let fileIdx = 0;
+        for (let i = 0; i < tomesMeta.length; i++) {
+          const t = tomesMeta[i] || {};
+          const subtitle = (t.subtitle || '').toString().trim() || null;
+          if (t.useLink) {
+            const url = (t.fileUrl || '').toString().trim();
+            if (!isValidExternalUrl(url)) {
+              cleanupAll();
+              return res.status(400).json({
+                error: `Le lien de téléchargement du tome ${i + 1} est invalide.`,
+                errors: { file: 'Veuillez fournir un lien valide commençant par http:// ou https://.' },
+              });
+            }
+            tomeInputs.push({ subtitle, file: null, externalUrl: url });
+          } else {
+            const f = uploaded[fileIdx++] || null;
+            if (!f) {
+              cleanupAll();
+              return res.status(400).json({
+                error: `Le fichier du tome ${i + 1} est manquant.`,
+                errors: { file: 'Veuillez joindre le fichier de chaque tome (PDF, DOC ou DOCX).' },
+              });
+            }
+            tomeInputs.push({ subtitle, file: f, externalUrl: null });
+          }
+        }
+      } else {
+        // Mode legacy : un seul manuscrit.
+        const externalUrl = (req.body.file_url || '').trim() || null;
+        const f = uploaded[0] || null;
+        if (!f && !externalUrl) {
+          return res.status(400).json({
+            error: 'Le manuscrit (PDF, DOC ou DOCX) ou un lien de téléchargement est obligatoire.',
+            errors: { file: 'Veuillez joindre votre manuscrit ou coller un lien de téléchargement.' },
+          });
+        }
+        if (!f && !isValidExternalUrl(externalUrl)) {
+          return res.status(400).json({
+            error: 'Le lien de téléchargement est invalide.',
+            errors: { file: 'Veuillez fournir un lien valide commençant par http:// ou https://.' },
+          });
+        }
+        tomeInputs.push({ subtitle: null, file: f, externalUrl: f ? null : externalUrl });
+      }
+
       const cleanEmail = email.trim().toLowerCase();
       const cleanFirstname = firstname.trim();
       const cleanLastname = lastname.trim();
       const cleanTitle = title.trim();
+      const cleanSubtitle = subtitle ? String(subtitle).trim() || null : null;
       const cleanBio = biography ? String(biography).trim() : null;
+      const isSeries = tomeInputs.length > 1;
+      const tomeTotal = tomeInputs.length;
 
       // 1. Find or create author
       let author = db.prepare('SELECT * FROM authors WHERE email = ?').get(cleanEmail);
@@ -941,60 +1059,98 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       }
       const needsActivation = !author.password;
 
-      // 2. Create manuscript + move file + traces (en transaction)
-      const ref = generateManuscriptRef(db);
-      const tmpPath = req.file.path;
-      const fileName = req.file.originalname;
-      let manuscriptId;
+      // 2. Create manuscript(s) + move file(s) + traces (en transaction)
+      let createdIds = [];
       try {
         const tx = db.transaction(() => {
-          const result = db.prepare(
-            `INSERT INTO manuscripts (ref, author_id, title, genre, synopsis, biography, message, current_stage)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted')`
-          ).run(ref, author.id, cleanTitle, genre?.trim() || null, synopsis || null, cleanBio, message || null);
-          const id = result.lastInsertRowid;
+          const ids = [];
+          let seriesRef = null;
+          for (let n = 0; n < tomeInputs.length; n++) {
+            const tome = tomeInputs[n];
+            const ref = generateManuscriptRef(db);
+            // L'identifiant de série = ref du 1ᵉʳ tome (lisible et unique).
+            if (isSeries && n === 0) seriesRef = ref;
 
-          // Déplacement du fichier vers manuscripts/<id>/original/
-          const finalDir = join(MANUSCRIPTS_DIR, String(id), 'original');
-          mkdirSync(finalDir, { recursive: true });
-          const fp = join(finalDir, req.file.filename || `manuscrit-${Date.now()}`);
-          try { renameSync(tmpPath, fp); }
-          catch (err) { console.warn('[MANUSCRIPT] rename fallback:', err.message); }
+            // Titre du manuscrit : inchangé pour un livre unique ; sinon
+            // « <œuvre> — Tome N[ : sous-titre] ».
+            const manuscriptTitle = isSeries
+              ? `${cleanTitle} — Tome ${n + 1}${tome.subtitle ? ` : ${tome.subtitle}` : ''}`
+              : cleanTitle;
 
-          db.prepare(
-            `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
-             VALUES (?, 'original', 1, ?, ?, ?, ?, 'author', ?)`
-          ).run(id, fp, fileName || req.file.filename, req.file.size || null, req.file.mimetype || null, author.id);
+            const result = db.prepare(
+              `INSERT INTO manuscripts (ref, author_id, title, subtitle, genre, synopsis, biography, message, current_stage,
+                 series_ref, series_title, tome_number, tome_total)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?)`
+            ).run(ref, author.id, manuscriptTitle, cleanSubtitle, genre?.trim() || null, synopsis || null, cleanBio, message || null,
+              isSeries ? seriesRef : null, isSeries ? cleanTitle : null,
+              isSeries ? n + 1 : null, isSeries ? tomeTotal : null);
+            const id = result.lastInsertRowid;
 
-          db.prepare(
-            `INSERT INTO manuscript_stages (manuscript_id, from_stage, to_stage, actor_role, actor_id, actor_label, note)
-             VALUES (?, NULL, 'submitted', 'author', ?, ?, ?)`
-          ).run(id, author.id, `${cleanFirstname} ${cleanLastname}`,
-            isNewAuthor ? 'Soumission formulaire public — compte créé' : 'Soumission formulaire public');
+            let storedPath, storedName, storedSize, storedMime, storedExternal;
+            if (tome.file) {
+              const finalDir = join(MANUSCRIPTS_DIR, String(id), 'original');
+              mkdirSync(finalDir, { recursive: true });
+              const fp = join(finalDir, tome.file.filename || `manuscrit-${Date.now()}`);
+              try { renameSync(tome.file.path, fp); }
+              catch (err) { console.warn('[MANUSCRIPT] rename fallback:', err.message); }
+              storedPath = fp;
+              storedName = tome.file.originalname || tome.file.filename;
+              storedSize = tome.file.size || null;
+              storedMime = tome.file.mimetype || null;
+              storedExternal = null;
+            } else {
+              // Dépôt par lien externe (fichier > 20 Mo) : on conserve l'URL.
+              storedPath = tome.externalUrl;
+              storedName = 'Manuscrit (lien de téléchargement externe)';
+              storedSize = null;
+              storedMime = 'text/uri-list';
+              storedExternal = tome.externalUrl;
+            }
 
-          // Conservation legacy (les anciennes vues admin pointent encore dessus)
-          db.prepare(
-            `INSERT INTO manuscript_submissions
-             (firstname, lastname, email, phone, title, genre, synopsis, biography, message, file_path, file_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(cleanFirstname, cleanLastname, cleanEmail, phone || null, cleanTitle,
-            genre || null, synopsis || null, cleanBio, message || null, fp, fileName);
+            db.prepare(
+              `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id, external_url)
+               VALUES (?, 'original', 1, ?, ?, ?, ?, 'author', ?, ?)`
+            ).run(id, storedPath, storedName, storedSize, storedMime, author.id, storedExternal);
 
-          return { id, fp };
+            const stageNote = isSeries
+              ? `Soumission formulaire public — Tome ${n + 1}/${tomeTotal}${isNewAuthor && n === 0 ? ' — compte créé' : ''}`
+              : (isNewAuthor ? 'Soumission formulaire public — compte créé' : 'Soumission formulaire public');
+            db.prepare(
+              `INSERT INTO manuscript_stages (manuscript_id, from_stage, to_stage, actor_role, actor_id, actor_label, note)
+               VALUES (?, NULL, 'submitted', 'author', ?, ?, ?)`
+            ).run(id, author.id, `${cleanFirstname} ${cleanLastname}`, stageNote);
+
+            // Conservation legacy (les anciennes vues admin pointent encore dessus)
+            db.prepare(
+              `INSERT INTO manuscript_submissions
+               (firstname, lastname, email, phone, title, subtitle, genre, synopsis, biography, message, file_path, file_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(cleanFirstname, cleanLastname, cleanEmail, phone || null, manuscriptTitle, cleanSubtitle,
+              genre || null, synopsis || null, cleanBio, message || null, storedPath, storedName);
+
+            ids.push(id);
+          }
+          return ids;
         });
-        const out = tx();
-        manuscriptId = out.id;
+        createdIds = tx();
       } catch (err) {
         console.error('[MANUSCRIPT] DB error:', err.message);
+        cleanupAll();
         return res.status(500).json({ error: 'Erreur enregistrement manuscrit' });
       }
 
-      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(manuscriptId);
+      const manuscripts = createdIds.map((id) => db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(id));
+      const manuscript = manuscripts[0];
 
       // 3. Workflow notification (in-app + email + admin)
       try {
-        notifyTransition(db, transporter, manuscript, 'submitted',
-          { role: 'author', id: author.id, label: `${cleanFirstname} ${cleanLastname}` }, siteUrl);
+        if (isSeries) {
+          // Une seule confirmation auteur (récap des tomes) + une seule notif admin.
+          notifySeriesSubmission(db, transporter, manuscripts, author, cleanTitle, siteUrl);
+        } else {
+          notifyTransition(db, transporter, manuscript, 'submitted',
+            { role: 'author', id: author.id, label: `${cleanFirstname} ${cleanLastname}` }, siteUrl);
+        }
       } catch (err) { console.error('[MANUSCRIPT] notifyTransition error:', err.message); }
 
       // 4. Magic link d'activation pour les nouveaux auteurs (ou ceux sans mot de passe)
@@ -1006,12 +1162,15 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
           db.prepare('INSERT OR REPLACE INTO author_password_resets (email, token, expires_at) VALUES (?, ?, ?)')
             .run(cleanEmail, token, expiresAt);
           const activateUrl = `${siteUrl}/auteur/activer?token=${token}&email=${encodeURIComponent(cleanEmail)}`;
+          const arrivalLine = isSeries
+            ? `<p>Votre ouvrage <strong>« ${escapeHtml(cleanTitle)} »</strong> est bien arrivé chez nous en <strong>${tomeTotal} tomes</strong> (références <strong>${manuscripts.map((m) => escapeHtml(m.ref)).join(', ')}</strong>).</p>`
+            : `<p>Votre manuscrit <strong>« ${escapeHtml(cleanTitle)} »</strong> est bien arrivé chez nous (référence <strong>${manuscript.ref}</strong>).</p>`;
           transporter.sendMail({
             to: cleanEmail,
             subject: 'Activez votre espace auteur — L\'Harmattan Sénégal',
             html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
               <h2 style="color:#10531a">Bienvenue ${escapeHtml(cleanFirstname)} !</h2>
-              <p>Votre manuscrit <strong>« ${escapeHtml(cleanTitle)} »</strong> est bien arrivé chez nous (référence <strong>${manuscript.ref}</strong>).</p>
+              ${arrivalLine}
               <p>Pour suivre l'avancement du projet, valider les corrections et le BAT, télécharger les fichiers et échanger avec notre équipe, activez votre espace auteur :</p>
               <p><a href="${activateUrl}" style="background:#10531a;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">Activer mon espace auteur</a></p>
               <p style="color:#666;font-size:0.85em">Ce lien est valable 90 jours. Vous pourrez ensuite vous connecter à tout moment sur ${siteUrl}/auteur/connexion.</p>
@@ -1021,9 +1180,17 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         } catch (err) { console.error('[MANUSCRIPT] Activation setup error:', err.message); }
       }
 
-      res.json({ success: true, ref: manuscript.ref, id: manuscript.id });
+      res.json({
+        success: true,
+        ref: manuscript.ref,
+        id: manuscript.id,
+        series: isSeries,
+        count: manuscripts.length,
+        refs: manuscripts.map((m) => m.ref),
+      });
     } catch (err) {
       console.error('POST /manuscripts error:', err.message);
+      cleanupAll();
       res.status(500).json({ error: 'Erreur soumission manuscrit' });
     }
   };
@@ -1031,7 +1198,10 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // est appelé sans ce paramètre (tests, anciens montages).
   const submitMiddlewares = [csrfProtection];
   if (manuscriptSubmitLimiter) submitMiddlewares.push(manuscriptSubmitLimiter);
-  submitMiddlewares.push(manuscriptUpload.single('file'));
+  // .fields : `files` = soumission multi-tomes (jusqu'à 5), `file` = ancien champ
+  // unique (rétrocompatibilité formulaire/alias legacy). Une soumission = 1 requête,
+  // donc le rate-limiter compte toujours 1 même pour plusieurs tomes.
+  submitMiddlewares.push(manuscriptUpload.fields([{ name: 'files', maxCount: 5 }, { name: 'file', maxCount: 1 }]));
   app.post('/api/manuscripts/submit', ...submitMiddlewares, submitManuscriptHandler);
   // Alias legacy — déconseillé pour les nouvelles intégrations.
   app.post('/api/admin/manuscripts', ...submitMiddlewares, submitManuscriptHandler);
@@ -1075,6 +1245,8 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   app.get('/api/admin/manuscripts/:id/download', auth, (req, res) => {
     const manuscript = db.prepare('SELECT file_path, file_name FROM manuscript_submissions WHERE id = ?').get(req.params.id);
     if (!manuscript?.file_path) return res.status(404).json({ error: 'Fichier non trouvé' });
+    // Dépôt par lien externe (> 20 Mo) : file_path contient l'URL, on redirige.
+    if (/^https?:\/\//i.test(manuscript.file_path)) return res.redirect(manuscript.file_path);
     if (!existsSync(manuscript.file_path)) return res.status(404).json({ error: 'Fichier introuvable sur le serveur' });
     res.download(manuscript.file_path, manuscript.file_name || 'manuscrit');
   });

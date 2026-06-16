@@ -6,8 +6,8 @@ export const manuscriptsApi = {
   get: (id) => api.get(`/admin/manuscripts/v2/${id}`),
   stages: () => api.get('/admin/manuscripts/v2/stages'),
   assignedToMe: () => api.get('/admin/manuscripts/assigned'),
-  assign: (id, role, userId) =>
-    api.post(`/admin/manuscripts/v2/${id}/assign`, { role, user_id: userId }),
+  assign: (id, role, userId, applyToSeries = false) =>
+    api.post(`/admin/manuscripts/v2/${id}/assign`, { role, user_id: userId, apply_to_series: applyToSeries }),
   transition: (id, toStage, note, force = false) =>
     api.post(`/admin/manuscripts/v2/${id}/transition`, { to_stage: toStage, note, force }),
   markPaid: (id, note) => api.post(`/admin/manuscripts/v2/${id}/mark-paid`, { note }),
@@ -70,9 +70,11 @@ export const intervenantsApi = {
   remove: (id) => api.delete(`/admin/intervenants/${id}`),
 };
 
+// « infographiste » retiré : la couverture est désormais conçue en interne par
+// la Production éditoriale (fusion Éditeur/Infographiste). Les intervenants
+// infographistes existants restent affichés via un libellé de repli.
 export const INTERVENANT_METIERS = [
   { value: 'evaluateur', label: 'Évaluateur / lecteur' },
   { value: 'correcteur', label: 'Correcteur' },
-  { value: 'infographiste', label: 'Infographiste' },
   { value: 'imprimeur', label: 'Imprimeur' },
 ];

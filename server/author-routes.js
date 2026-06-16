@@ -211,7 +211,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
 
       // 1. Manuscrits (toutes étapes)
       const manuscripts = db.prepare(
-        `SELECT id, ref, title, genre, current_stage, created_at, updated_at
+        `SELECT id, ref, title, subtitle, genre, current_stage, created_at, updated_at
          FROM manuscripts WHERE author_id = ? ORDER BY created_at DESC`
       ).all(author.id).map((r) => ({ ...r, stage_label: STAGE_LABELS[r.current_stage] || r.current_stage }));
 
@@ -586,6 +586,8 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     if (!['original', 'correction', 'author_final', 'bat_cover'].includes(file.kind)) {
       return res.status(403).json({ error: 'Fichier non accessible' });
     }
+    // Dépôt par lien externe (> 20 Mo) : pas de fichier local, on redirige.
+    if (file.external_url) return res.redirect(file.external_url);
     if (!existsSync(file.file_path)) return res.status(404).json({ error: 'Fichier introuvable sur le serveur' });
     res.download(file.file_path, file.file_name);
   });

@@ -193,7 +193,10 @@ export default function AuthorDashboard() {
                   className="author-ms-card"
                 >
                   <div className="author-ms-header">
-                    <h3>{m.title}</h3>
+                    <div>
+                      <h3>{m.title}</h3>
+                      {m.subtitle && <p style={{ margin: '2px 0 0', fontSize: '0.85rem', fontStyle: 'italic', color: '#64748b' }}>{m.subtitle}</p>}
+                    </div>
                     <span className="author-ms-stage" style={{ background: stageBadge(m.current_stage) }}>
                       {m.stage_label}
                     </span>

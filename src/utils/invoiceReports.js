@@ -72,9 +72,10 @@ function csvEscape(v) {
   return /[";\n\r]/.test(s) ? `"${s}"` : s;
 }
 
-export function downloadInvoicesCsv({ invoices, kpis, paymentsByMethod, title, periodLabel, filename }) {
+export function downloadInvoicesCsv({ invoices, encaissements, kpis, paymentsByMethod, title, periodLabel, filename }) {
   const sep = ';';
   const lines = [];
+  encaissements = encaissements || [];
   const totalEncaisse = (paymentsByMethod || []).reduce((s, m) => s + Number(m.total || 0), 0);
 
   // En-tête synthèse
@@ -83,19 +84,20 @@ export function downloadInvoicesCsv({ invoices, kpis, paymentsByMethod, title, p
   lines.push(csvEscape(`Généré le ${new Date().toLocaleString('fr-FR')}`));
   lines.push('');
   lines.push(['Indicateur', 'Valeur'].map(csvEscape).join(sep));
-  lines.push([`Nombre de factures`, kpis.nb].map(csvEscape).join(sep));
-  lines.push([`Chiffre d'affaires TTC (FCFA)`, fmtNum(kpis.total_ttc)].map(csvEscape).join(sep));
-  lines.push([`Chiffre d'affaires HT (FCFA)`, fmtNum(kpis.total_ht)].map(csvEscape).join(sep));
-  lines.push([`Encaissé (FCFA)`, fmtNum(kpis.paid_amount)].map(csvEscape).join(sep));
-  lines.push([`Reste à encaisser (FCFA)`, fmtNum(kpis.remaining)].map(csvEscape).join(sep));
+  lines.push([`Encaissé sur la période (date de paiement, FCFA)`, fmtNum(totalEncaisse)].map(csvEscape).join(sep));
+  lines.push([`Nombre de règlements`, encaissements.length].map(csvEscape).join(sep));
+  lines.push([`Factures émises`, kpis.nb].map(csvEscape).join(sep));
+  lines.push([`Chiffre d'affaires TTC émis (FCFA)`, fmtNum(kpis.total_ttc)].map(csvEscape).join(sep));
+  lines.push([`Chiffre d'affaires HT émis (FCFA)`, fmtNum(kpis.total_ht)].map(csvEscape).join(sep));
+  lines.push([`Reste à encaisser sur factures émises (FCFA)`, fmtNum(kpis.remaining)].map(csvEscape).join(sep));
   lines.push([`Payées`, kpis.nb_paid].map(csvEscape).join(sep));
   lines.push([`Impayées`, kpis.nb_unpaid].map(csvEscape).join(sep));
   lines.push([`Brouillons`, kpis.nb_draft].map(csvEscape).join(sep));
   lines.push([`Avoirs`, kpis.nb_credit].map(csvEscape).join(sep));
   lines.push('');
 
-  // Cumul par mode de paiement
-  lines.push(['Cumul par mode de paiement'].map(csvEscape).join(sep));
+  // Cumul par mode de paiement (date de paiement)
+  lines.push(['Cumul par mode de paiement (date de paiement)'].map(csvEscape).join(sep));
   lines.push(['Mode', 'Nombre opérations', 'Total encaissé (FCFA)', 'Part (%)'].map(csvEscape).join(sep));
   for (const m of (paymentsByMethod || [])) {
     const pct = totalEncaisse > 0 ? ((m.total / totalEncaisse) * 100).toFixed(1) : '0.0';
@@ -106,13 +108,32 @@ export function downloadInvoicesCsv({ invoices, kpis, paymentsByMethod, title, p
   }
   lines.push('');
 
+  // Détail des encaissements (par date de paiement)
+  lines.push(['Détail des encaissements (par date de paiement)'].map(csvEscape).join(sep));
+  lines.push(['Date paiement', 'Facture', 'Date facture', 'Client', 'Mode', 'Montant (FCFA)'].map(csvEscape).join(sep));
+  for (const e of encaissements) {
+    lines.push([
+      fmtDateFr(e.date),
+      (e.invoice_ref || `#${e.invoice_id}`) + (e.invoice_type === 2 ? ' (avoir)' : ''),
+      fmtDateFr(e.invoice_date),
+      e.customer_name || '',
+      e.method_label || e.method_code || '',
+      fmtNum(e.amount),
+    ].map(csvEscape).join(sep));
+  }
+  if (encaissements.length) {
+    lines.push(['TOTAL', '', '', '', '', fmtNum(totalEncaisse)].map(csvEscape).join(sep));
+  }
+  lines.push('');
+
   lines.push(['Source', 'Nombre', 'Total TTC (FCFA)'].map(csvEscape).join(sep));
   for (const [src, v] of Object.entries(kpis.by_source)) {
     lines.push([src, v.nb, fmtNum(v.total)].map(csvEscape).join(sep));
   }
   lines.push('');
 
-  // Détail
+  // Détail des factures émises (par date de facture)
+  lines.push(['Détail des factures émises (par date de facture)'].map(csvEscape).join(sep));
   const headers = [
     'Référence', 'Date', 'Client', 'Source', 'Type',
     'Statut', 'Total HT', 'Total TTC', 'Encaissé', 'Reste', 'Modes de paiement',
@@ -212,7 +233,8 @@ function buildSvgPie(data, { size = 220, donutRatio = 0 } = {}) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${slices.join('')}${hole}</svg>`;
 }
 
-export function openInvoicesPdf({ invoices, kpis, paymentsByMethod, title, periodLabel }) {
+export function openInvoicesPdf({ invoices, encaissements, kpis, paymentsByMethod, title, periodLabel }) {
+  encaissements = encaissements || [];
   const win = window.open('', '_blank', 'width=1100,height=800');
   if (!win) {
     throw new Error('Pop-up bloqué — autorisez les pop-ups pour générer le PDF');
@@ -263,6 +285,19 @@ export function openInvoicesPdf({ invoices, kpis, paymentsByMethod, title, perio
     </tr>` : '';
   const pieLegend = pbm.map(m => `
     <div class="legend-item"><span class="dot" style="background:${m.color}"></span>${escapeHtml(m.label)}</div>
+  `).join('');
+
+  // Détail des encaissements (par date de paiement) — capte les impayés réglés
+  // un autre jour que leur émission.
+  const encRows = encaissements.map(e => `
+    <tr>
+      <td>${escapeHtml(fmtDateFr(e.date))}</td>
+      <td class="mono">${escapeHtml(e.invoice_ref || `#${e.invoice_id}`)}${e.invoice_type === 2 ? ' <span class="badge-avoir">AVOIR</span>' : ''}</td>
+      <td>${escapeHtml(fmtDateFr(e.invoice_date))}</td>
+      <td>${escapeHtml(e.customer_name || '—')}</td>
+      <td>${escapeHtml(e.method_label || e.method_code || '—')}</td>
+      <td class="num">${escapeHtml(fmtNum(e.amount))}</td>
+    </tr>
   `).join('');
 
   const html = `<!DOCTYPE html>
@@ -329,16 +364,17 @@ export function openInvoicesPdf({ invoices, kpis, paymentsByMethod, title, perio
   <div class="meta">Généré le ${escapeHtml(new Date().toLocaleString('fr-FR'))}</div>
 
   <div class="kpis">
-    <div class="kpi"><div class="label">Factures</div><div class="value">${kpis.nb}</div></div>
-    <div class="kpi success"><div class="label">CA TTC</div><div class="value">${escapeHtml(fmtNum(kpis.total_ttc))} FCFA</div></div>
-    <div class="kpi"><div class="label">CA HT</div><div class="value">${escapeHtml(fmtNum(kpis.total_ht))} FCFA</div></div>
-    <div class="kpi success"><div class="label">Encaissé</div><div class="value">${escapeHtml(fmtNum(kpis.paid_amount))} FCFA</div></div>
-    <div class="kpi warn"><div class="label">Reste à encaisser</div><div class="value">${escapeHtml(fmtNum(kpis.remaining))} FCFA</div></div>
+    <div class="kpi success"><div class="label">Encaissé (date de paiement)</div><div class="value">${escapeHtml(fmtNum(totalEncaisse))} FCFA</div></div>
+    <div class="kpi"><div class="label">Règlements</div><div class="value">${encaissements.length}</div></div>
+    <div class="kpi"><div class="label">Factures émises</div><div class="value">${kpis.nb}</div></div>
+    <div class="kpi success"><div class="label">CA TTC émis</div><div class="value">${escapeHtml(fmtNum(kpis.total_ttc))} FCFA</div></div>
+    <div class="kpi"><div class="label">CA HT émis</div><div class="value">${escapeHtml(fmtNum(kpis.total_ht))} FCFA</div></div>
+    <div class="kpi warn"><div class="label">Reste sur factures émises</div><div class="value">${escapeHtml(fmtNum(kpis.remaining))} FCFA</div></div>
     <div class="kpi"><div class="label">Payées / Impayées</div><div class="value">${kpis.nb_paid} / ${kpis.nb_unpaid}</div></div>
     <div class="kpi"><div class="label">Brouillons / Avoirs</div><div class="value">${kpis.nb_draft} / ${kpis.nb_credit}</div></div>
   </div>
 
-  <h2>Cumul par mode de paiement</h2>
+  <h2>Encaissements de la période <span style="font-weight:400;color:#64748b;font-size:11px;">(par date de paiement)</span></h2>
   <div class="payment-block">
     <div class="chart">
       ${pieSvg}
@@ -356,13 +392,30 @@ export function openInvoicesPdf({ invoices, kpis, paymentsByMethod, title, perio
     </div>
   </div>
 
+  <h2>Détail des encaissements <span style="font-weight:400;color:#64748b;font-size:11px;">(par date de paiement — inclut les impayés réglés ce jour-là)</span></h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Date paiement</th>
+        <th>Facture</th>
+        <th>Date facture</th>
+        <th>Client</th>
+        <th>Mode</th>
+        <th class="num">Montant</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${encRows || '<tr><td colspan="6" class="empty">Aucun encaissement sur cette période</td></tr>'}
+    </tbody>
+  </table>
+
   <h2>Répartition par source</h2>
   <table class="sub-table">
     <thead><tr><th>Source</th><th class="num">Nombre</th><th class="num">Total TTC</th></tr></thead>
     <tbody>${sourceRows || '<tr><td colspan="3" class="empty">—</td></tr>'}</tbody>
   </table>
 
-  <h2>Détail des factures</h2>
+  <h2>Détail des factures émises <span style="font-weight:400;color:#64748b;font-size:11px;">(par date de facture)</span></h2>
   <table>
     <thead>
       <tr>

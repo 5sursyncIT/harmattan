@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { logManuscriptEvent } from './manuscript-workflow.js';
 import { makeAdminAuth } from './admin-auth.js';
+import { adminApi } from './dolibarr-admin-client.js';
+import { recordInvoicePayment, resolvePaymentId } from './dolibarr-payments.js';
 
 const execFile = promisify(execFileCb);
 
@@ -103,13 +105,48 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contract_quotes_contract ON contract_quotes(contract_id)`);
+  // Migration : lien vers la facture Dolibarr générée lors de l'encaissement.
+  for (const col of ['dolibarr_invoice_id INTEGER', 'invoice_ref TEXT']) {
+    try { db.exec(`ALTER TABLE contract_quotes ADD COLUMN ${col}`); } catch { /* déjà présente */ }
+  }
 
   // Le comptable peut créer/consulter les devis de contribution, mais pas les supprimer
   // (la suppression reste réservée aux rôles éditoriaux — cf. route DELETE).
   const ALLOWED_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
   const QUOTE_DELETE_ROLES = ['super_admin', 'admin', 'editor'];
+  // L'encaissement (écriture comptable : facture + règlement) est réservé aux profils financiers.
+  const QUOTE_PAY_ROLES = ['super_admin', 'admin', 'comptable'];
   const auth = makeAdminAuth(db, ALLOWED_ROLES);
   const authDelete = makeAdminAuth(db, QUOTE_DELETE_ROLES);
+  const authPay = makeAdminAuth(db, QUOTE_PAY_ROLES);
+
+  const PAYMENT_METHODS_ALLOWED = new Set(['LIQ', 'CB', 'CHQ', 'WAVE', 'OM', 'VIR']);
+
+  // Tiers (auteur) à facturer = fk_soc du contrat parent.
+  async function contractSoc(contractId) {
+    if (!dolibarrPool) return null;
+    const [rows] = await dolibarrPool.query('SELECT fk_soc FROM llx_contrat WHERE rowid = ? LIMIT 1', [contractId]);
+    return rows[0]?.fk_soc ? Number(rows[0].fk_soc) : null;
+  }
+
+  // Total / déjà payé / reste à payer d'une facture Dolibarr (lecture directe).
+  async function invoicePaidInfo(invoiceId) {
+    const [[inv]] = await dolibarrPool.query('SELECT total_ttc, paye FROM llx_facture WHERE rowid = ?', [invoiceId]);
+    if (!inv) return null;
+    const [[p]] = await dolibarrPool.query(
+      'SELECT COALESCE(SUM(amount), 0) AS paid FROM llx_paiement_facture WHERE fk_facture = ?', [invoiceId]
+    );
+    const total = Number(inv.total_ttc);
+    const paid = Math.round(Number(p.paid) * 100) / 100;
+    return { total, paid, remaining: Math.round((total - paid) * 100) / 100, paye: Number(inv.paye) };
+  }
+
+  // Statut « paiement » dérivé pour l'affichage (au-delà de draft/sent stockés).
+  function payStatus(remaining, total) {
+    if (remaining <= 0.01) return 'paid';
+    if (remaining < total - 0.01) return 'partial';
+    return 'invoiced';
+  }
 
   function generateRef() {
     const now = new Date();
@@ -200,17 +237,49 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
   });
 
   // GET /api/contracts/:contractId/quotes — list quotes for a contract
-  router.get('/contracts/:contractId/quotes', auth, (req, res) => {
+  router.get('/contracts/:contractId/quotes', auth, async (req, res) => {
     try {
       const contractId = parseInt(req.params.contractId);
       const quotes = db.prepare(
-        `SELECT id, ref, recipient_name, book_title, total, status, created_at, created_by
+        `SELECT id, ref, recipient_name, book_title, total, status, created_at, created_by,
+                dolibarr_invoice_id, invoice_ref
          FROM contract_quotes WHERE contract_id = ? ORDER BY created_at DESC`,
       ).all(contractId);
+
+      // Enrichit les devis facturés du reste à payer live (best-effort : un échec
+      // de lecture Dolibarr ne casse pas la liste, on garde le statut stocké).
+      for (const q of quotes) {
+        if (q.dolibarr_invoice_id && dolibarrPool) {
+          try {
+            const info = await invoicePaidInfo(q.dolibarr_invoice_id);
+            if (info) {
+              q.paid = info.paid;
+              q.remaining = info.remaining;
+              q.payment_status = payStatus(info.remaining, info.total);
+            }
+          } catch (e) { void e; }
+        }
+      }
       res.json(quotes);
     } catch (err) {
       console.error('List quotes error:', err.message);
       res.status(500).json({ error: 'Erreur liste devis' });
+    }
+  });
+
+  // GET /api/quotes/banks — comptes bancaires ouverts (pour l'encaissement).
+  // Sous la même whitelist que les devis : évite de coupler le module devis à la
+  // RBAC du module factures (l'éditeur n'a pas accès à /api/admin/invoices).
+  router.get('/quotes/banks', auth, async (req, res) => {
+    try {
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid AS id, ref, label, currency_code
+         FROM llx_bank_account WHERE clos = 0 ORDER BY label ASC`
+      );
+      res.json({ accounts: rows });
+    } catch (err) {
+      console.error('Quote banks error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement comptes' });
     }
   });
 
@@ -248,12 +317,22 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
   });
 
   // GET /api/quotes/:id — get full quote
-  router.get('/quotes/:id', auth, (req, res) => {
+  router.get('/quotes/:id', auth, async (req, res) => {
     try {
       const quote = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
       quote.items = JSON.parse(quote.items_json);
       delete quote.items_json;
+      if (quote.dolibarr_invoice_id && dolibarrPool) {
+        try {
+          const info = await invoicePaidInfo(quote.dolibarr_invoice_id);
+          if (info) {
+            quote.paid = info.paid;
+            quote.remaining = info.remaining;
+            quote.payment_status = payStatus(info.remaining, info.total);
+          }
+        } catch (e) { void e; }
+      }
       res.json(quote);
     } catch (err) {
       console.error('Get quote error:', err.message);
@@ -369,6 +448,11 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     try {
       const quote = db.prepare('SELECT id, ref, contract_id, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
+      // On ne « renvoie » qu'un brouillon ou un devis déjà envoyé : ne jamais
+      // écraser un statut comptable (facturé/acompte/payé).
+      if (!['draft', 'sent'].includes(quote.status)) {
+        return res.status(409).json({ error: 'Ce devis est déjà facturé — statut non modifiable' });
+      }
 
       db.prepare("UPDATE contract_quotes SET status = 'sent' WHERE id = ?").run(quote.id);
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
@@ -387,6 +471,148 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     } catch (err) {
       console.error('Send quote error:', err.message);
       res.status(500).json({ error: 'Erreur envoi devis' });
+    }
+  });
+
+  // POST /api/quotes/:id/pay — encaisse le devis (compta complète).
+  // 1) crée+valide une facture client Dolibarr depuis les lignes du devis (une
+  //    seule fois ; lignes en services, TVA=0 → aucun impact stock) ;
+  // 2) enregistre le(s) règlement(s) via paymentsdistributed (montant exact) ;
+  // 3) solde la facture si entièrement payée. Acomptes : appels successifs.
+  // Body : { bank_account, date?, reason?, splits:[{method,amount,num_payment?}] }
+  //        (ou { method, amount } mono-méthode).
+  router.post('/quotes/:id/pay', authPay, csrfProtection, async (req, res) => {
+    try {
+      const quoteId = parseInt(req.params.id);
+      const quote = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(quoteId);
+      if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
+      if (!dolibarrPool) return res.status(503).json({ error: 'Connexion Dolibarr indisponible' });
+
+      const bankAccount = parseInt(req.body?.bank_account);
+      if (!bankAccount) return res.status(400).json({ error: 'Compte bancaire requis' });
+
+      const dateRaw = req.body?.date || new Date().toISOString().split('T')[0];
+      const datepUnix = Math.floor(new Date(`${dateRaw}T12:00:00Z`).getTime() / 1000);
+      if (!Number.isFinite(datepUnix)) return res.status(400).json({ error: 'Date invalide' });
+
+      // Normalisation splits (multi-méthode ou mono-méthode).
+      const rawSplits = Array.isArray(req.body?.splits) && req.body.splits.length
+        ? req.body.splits
+        : [{ method: req.body?.method, amount: req.body?.amount, num_payment: req.body?.num_payment }];
+      const splits = rawSplits
+        .map(s => ({
+          method: String(s?.method || '').toUpperCase(),
+          amount: Math.round(Number(s?.amount) * 100) / 100,
+          num_payment: String(s?.num_payment || '').slice(0, 64),
+        }))
+        .filter(s => s.method && s.amount > 0);
+      if (!splits.length) return res.status(400).json({ error: 'Au moins une ligne de paiement requise' });
+      for (const s of splits) {
+        if (!PAYMENT_METHODS_ALLOWED.has(s.method)) return res.status(400).json({ error: `Méthode de paiement invalide : ${s.method}` });
+      }
+      const totalSplit = Math.round(splits.reduce((sum, s) => sum + s.amount, 0) * 100) / 100;
+
+      // ── 1. S'assurer qu'une facture existe (création idempotente) ──
+      let invoiceId = quote.dolibarr_invoice_id;
+      let invoiceRef = quote.invoice_ref;
+      if (!invoiceId) {
+        const socid = await contractSoc(quote.contract_id);
+        if (!socid) return res.status(400).json({ error: "Le contrat n'a pas de tiers auteur associé — facturation impossible" });
+
+        const items = JSON.parse(quote.items_json);
+        const createRes = await adminApi.post('/invoices', {
+          socid,
+          date: dateRaw,
+          type: 0,
+          note_public: `Devis de contribution ${quote.ref} — ${quote.book_title}`,
+          note_private: `Facturation du devis ${quote.ref} (contrat #${quote.contract_id}) par ${req.admin.username}`,
+          // Lignes en SERVICES (product_type=1, sans fk_product) → la validation ne
+          // décrémente aucun stock. TVA=0 (L'Harmattan SN ne facture pas la TVA).
+          lines: items.map(it => ({
+            desc: String(it.label || '').slice(0, 250),
+            subprice: Number(it.price) || 0,
+            qty: 1,
+            tva_tx: 0,
+            product_type: 1,
+          })),
+        });
+        invoiceId = createRes.data;
+        // Validation sans idwarehouse → aucun mouvement de stock.
+        await adminApi.post(`/invoices/${invoiceId}/validate`);
+        try {
+          const inv = await adminApi.get(`/invoices/${invoiceId}`);
+          invoiceRef = inv.data?.ref || null;
+        } catch (e) { void e; }
+        db.prepare('UPDATE contract_quotes SET dolibarr_invoice_id = ?, invoice_ref = ?, status = ? WHERE id = ?')
+          .run(invoiceId, invoiceRef, 'invoiced', quoteId);
+      }
+
+      // ── 2. Contrôle du reste à payer ──
+      const before = await invoicePaidInfo(invoiceId);
+      if (!before) return res.status(404).json({ error: 'Facture liée introuvable' });
+      if (before.remaining <= 0.01) {
+        return res.status(409).json({ error: 'Facture déjà soldée', invoice_ref: invoiceRef });
+      }
+      if (totalSplit > before.remaining + 0.01) {
+        return res.status(400).json({ error: `Montant (${totalSplit}) supérieur au reste à payer (${before.remaining})` });
+      }
+
+      // ── 3. Enregistrement du/des règlement(s) ──
+      const willSolde = Math.abs(before.remaining - totalSplit) < 0.01;
+      const comment = `Encaissement devis ${quote.ref}`;
+      const paymentIds = [];
+      for (let i = 0; i < splits.length; i++) {
+        const s = splits[i];
+        const paymentId = await resolvePaymentId(dolibarrPool, s.method);
+        if (!paymentId) return res.status(400).json({ error: `Code paiement inconnu dans Dolibarr : ${s.method}` });
+        const pid = await recordInvoicePayment(adminApi, {
+          invoiceId,
+          amount: s.amount,
+          paymentId,
+          accountId: bankAccount,
+          datepaye: datepUnix,
+          isLast: willSolde && i === splits.length - 1,
+          numPayment: s.num_payment,
+          comment,
+        });
+        paymentIds.push(pid);
+      }
+
+      // ── 4. Solde + statut ──
+      const after = await invoicePaidInfo(invoiceId);
+      const solded = after && after.remaining <= 0.01;
+      if (solded) {
+        try { await adminApi.post(`/invoices/${invoiceId}/settopaid`); } catch (e) { void e; }
+      }
+      const newStatus = solded ? 'paid' : 'partial';
+      db.prepare('UPDATE contract_quotes SET status = ? WHERE id = ?').run(newStatus, quoteId);
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'pay_quote',
+          `Devis ${quote.ref} → facture ${invoiceRef || invoiceId} : encaissé ${totalSplit.toLocaleString('fr-FR')} FCFA (${solded ? 'soldé' : 'acompte'})`);
+
+      try {
+        const msId = manuscriptIdForContract(quote.contract_id);
+        if (msId) {
+          logManuscriptEvent(db, msId, 'quote_paid',
+            { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+            `Devis ${quote.ref} — encaissé ${totalSplit.toLocaleString('fr-FR')} FCFA (${solded ? 'soldé' : 'acompte'})`);
+        }
+      } catch (e) { console.warn('Manuscript event (quote_paid) warning:', e.message); }
+
+      res.json({
+        success: true,
+        invoice_id: invoiceId,
+        invoice_ref: invoiceRef,
+        paid: after?.paid,
+        remaining: after?.remaining,
+        status: newStatus,
+        payment_ids: paymentIds,
+      });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('Pay quote error:', msg);
+      res.status(500).json({ error: 'Erreur encaissement du devis', detail: msg });
     }
   });
 

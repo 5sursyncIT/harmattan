@@ -205,6 +205,17 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     const stages = db.prepare('SELECT * FROM manuscript_stages WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     const evaluations = db.prepare('SELECT * FROM manuscript_evaluations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     const validations = db.prepare('SELECT * FROM manuscript_validations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
+
+    // Tomes frères (même série) pour le bandeau de navigation entre tomes.
+    let series = null;
+    if (manuscript.series_ref) {
+      series = db.prepare(
+        `SELECT id, ref, title, tome_number, tome_total, current_stage
+         FROM manuscripts WHERE series_ref = ? ORDER BY tome_number ASC, id ASC`
+      ).all(manuscript.series_ref)
+        .map((s) => ({ ...s, stage_label: STAGE_LABELS[s.current_stage] || s.current_stage }));
+    }
+
     res.json({
       manuscript: describeManuscript(manuscript),
       files,
@@ -216,6 +227,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       })),
       evaluations,
       validations,
+      series,
     });
   });
 
@@ -230,7 +242,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     const col = roleColumns[req.admin.role];
     if (!col) return res.json([]); // super_admin/admin/editor n'utilisent pas cet endpoint
     const rows = db.prepare(
-      `SELECT m.id, m.ref, m.title, m.current_stage, m.created_at, m.updated_at,
+      `SELECT m.id, m.ref, m.title, m.subtitle, m.current_stage, m.created_at, m.updated_at,
               a.firstname || ' ' || a.lastname AS author_name
        FROM manuscripts m JOIN authors a ON a.id = m.author_id
        WHERE m.${col} = ? ORDER BY m.updated_at DESC`
@@ -245,6 +257,8 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     }
     const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ?').get(req.params.fileId, req.params.id);
     if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
+    // Dépôt par lien externe (> 20 Mo) : pas de fichier local, on redirige.
+    if (file.external_url) return res.redirect(file.external_url);
     if (!existsSync(file.file_path)) return res.status(404).json({ error: 'Fichier introuvable sur le serveur' });
     res.download(file.file_path, file.file_name);
   });
@@ -253,7 +267,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   // Les 4 acteurs externes sont affectés depuis le carnet d'intervenants
   // (colonnes *_contact_id) ; l'éditeur interne reste un compte admin_users.
   router.post('/manuscripts/v2/:id/assign', auth, editorOnly, csrfProtection, (req, res) => {
-    const { role, user_id } = req.body;
+    const { role, user_id, apply_to_series } = req.body;
     const contactColMap = {
       evaluateur: 'assigned_evaluator_contact_id',
       correcteur: 'assigned_corrector_contact_id',
@@ -280,11 +294,13 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       }
     }
 
-    // Capter l'assigné précédent pour pouvoir le notifier de la désassignation.
-    const before = db.prepare(`SELECT ${col} AS prev_id FROM manuscripts WHERE id = ?`).get(req.params.id);
-    db.prepare(`UPDATE manuscripts SET ${col} = ?, updated_at = datetime('now') WHERE id = ?`)
-      .run(user_id || null, req.params.id);
-    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    const baseManuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!baseManuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+
+    // Cibles : le manuscrit seul, ou tous les tomes de la série si demandé.
+    const targets = (apply_to_series && baseManuscript.series_ref)
+      ? db.prepare('SELECT * FROM manuscripts WHERE series_ref = ? ORDER BY tome_number ASC, id ASC').all(baseManuscript.series_ref)
+      : [baseManuscript];
 
     // Résout {email,label} d'un id selon la source (carnet ou admin_users).
     const resolveRecipient = (id) => {
@@ -297,33 +313,54 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       return r?.email ? { email: r.email, label: r.username } : null;
     };
 
-    // Notifier l'ancien assigné de son retrait (si changement).
-    if (before?.prev_id && before.prev_id !== user_id) {
-      try {
-        const prev = resolveRecipient(before.prev_id);
-        if (prev) sendAssignmentEmail(transporter, manuscript, role, prev, siteUrl, 'unassigned');
-      } catch (err) { console.warn('[WORKFLOW] previous assignee notify error:', err.message); }
+    // Applique l'assignation à un manuscrit + ses effets de bord (notifications,
+    // transition auto évaluateur). Renvoie true si auto-transition déclenchée.
+    const assignOne = (msId) => {
+      const before = db.prepare(`SELECT ${col} AS prev_id FROM manuscripts WHERE id = ?`).get(msId);
+      db.prepare(`UPDATE manuscripts SET ${col} = ?, updated_at = datetime('now') WHERE id = ?`)
+        .run(user_id || null, msId);
+      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(msId);
+
+      // Notifier l'ancien assigné de son retrait (si changement).
+      if (before?.prev_id && before.prev_id !== user_id) {
+        try {
+          const prev = resolveRecipient(before.prev_id);
+          if (prev) sendAssignmentEmail(transporter, manuscript, role, prev, siteUrl, 'unassigned');
+        } catch (err) { console.warn('[WORKFLOW] previous assignee notify error:', err.message); }
+      }
+
+      // L'évaluateur affecté sur un manuscrit « submitted » déclenche la transition
+      // auto vers in_evaluation : l'email de tâche (avec lien) part alors via notifyTransition.
+      const willAutoTransition = role === 'evaluateur' && user_id && manuscript.current_stage === 'submitted';
+      if (user_id && before?.prev_id !== user_id && !willAutoTransition) {
+        try {
+          const next = resolveRecipient(user_id);
+          if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
+        } catch (err) { console.warn('[WORKFLOW] new assignee notify error:', err.message); }
+      }
+
+      if (willAutoTransition) {
+        const updated = transition(db, manuscript.id, 'in_evaluation',
+          { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+          { note: `Assignation évaluateur (intervenant #${user_id})` });
+        notifyTransition(db, transporter, updated, 'in_evaluation',
+          { role: req.admin.role, id: req.admin.id, label: req.admin.username }, siteUrl);
+        return true;
+      }
+      return false;
+    };
+
+    let autoTransitioned = 0;
+    for (const ms of targets) {
+      if (assignOne(ms.id)) autoTransitioned += 1;
     }
 
-    // L'évaluateur affecté sur un manuscrit « submitted » déclenche la transition
-    // auto vers in_evaluation : l'email de tâche (avec lien) part alors via notifyTransition.
-    const willAutoTransition = role === 'evaluateur' && user_id && manuscript.current_stage === 'submitted';
-    if (user_id && before?.prev_id !== user_id && !willAutoTransition) {
-      try {
-        const next = resolveRecipient(user_id);
-        if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
-      } catch (err) { console.warn('[WORKFLOW] new assignee notify error:', err.message); }
-    }
-
-    if (willAutoTransition) {
-      const updated = transition(db, manuscript.id, 'in_evaluation',
-        { role: req.admin.role, id: req.admin.id, label: req.admin.username },
-        { note: `Assignation évaluateur (intervenant #${user_id})` });
-      notifyTransition(db, transporter, updated, 'in_evaluation',
-        { role: req.admin.role, id: req.admin.id, label: req.admin.username }, siteUrl);
-      return res.json({ success: true, stage: 'in_evaluation' });
-    }
-    res.json({ success: true });
+    res.json({
+      success: true,
+      count: targets.length,
+      autoTransitioned,
+      ...(targets.length === 1 && autoTransitioned ? { stage: 'in_evaluation' } : {}),
+    });
   });
 
   // Transition générique (éditeur / admin / super_admin)
@@ -637,10 +674,14 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       ).all(role);
       return res.json(rows);
     }
-    // Éditeur interne → comptes admin_users actifs.
+    // Production éditoriale interne → comptes admin_users actifs. La couverture
+    // étant fusionnée avec l'éditorial, les rôles `editor` ET `production` sont
+    // proposés (plus les administrateurs).
+    const editorialRoles = role === 'editor' ? ['editor', 'production'] : [role];
+    const placeholders = editorialRoles.map(() => '?').join(',');
     const rows = db.prepare(
-      `SELECT id, username, role FROM admin_users WHERE (role = ? OR role IN ('super_admin','admin')) AND is_active = 1`
-    ).all(role);
+      `SELECT id, username, role FROM admin_users WHERE (role IN (${placeholders}) OR role IN ('super_admin','admin')) AND is_active = 1 ORDER BY username ASC`
+    ).all(...editorialRoles);
     res.json(rows);
   });
 

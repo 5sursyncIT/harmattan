@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { FiArrowLeft, FiDownload, FiCheck, FiX } from 'react-icons/fi';
+import { FiArrowLeft, FiDownload, FiCheck, FiX, FiExternalLink } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
 import ManuscriptTimeline from '../../components/common/ManuscriptTimeline';
@@ -75,6 +75,9 @@ export default function AuthorManuscriptDetail() {
         <div className="author-detail-header">
           <div>
             <h1>{manuscript.title}</h1>
+            {manuscript.subtitle && (
+              <p style={{ margin: '-4px 0 6px', fontSize: '1.1rem', fontStyle: 'italic', color: '#475569' }}>{manuscript.subtitle}</p>
+            )}
             <p className="author-subtitle">
               Référence : <strong>{manuscript.ref}</strong> · Statut : <strong>{manuscript.stage_label}</strong>
             </p>
@@ -129,16 +132,29 @@ export default function AuthorManuscriptDetail() {
                   <div>
                     <strong>{KIND_LABELS[f.kind] || f.kind}</strong>
                     {f.version > 1 && <span> (v{f.version})</span>}
-                    <div className="author-file-meta">{f.file_name} · {formatSize(f.file_size)}</div>
+                    <div className="author-file-meta">
+                      {f.external_url ? 'Lien de téléchargement externe' : `${f.file_name} · ${formatSize(f.file_size)}`}
+                    </div>
                   </div>
-                  <a
-                    href={authorApi.downloadFile(manuscript.id, f.id)}
-                    className="btn btn-ghost"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <FiDownload /> Télécharger
-                  </a>
+                  {f.external_url ? (
+                    <a
+                      href={f.external_url}
+                      className="btn btn-ghost"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <FiExternalLink /> Ouvrir le lien
+                    </a>
+                  ) : (
+                    <a
+                      href={authorApi.downloadFile(manuscript.id, f.id)}
+                      className="btn btn-ghost"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <FiDownload /> Télécharger
+                    </a>
+                  )}
                 </li>
               ))}
             </ul>

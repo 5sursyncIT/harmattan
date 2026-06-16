@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { FiArrowLeft, FiDownload, FiUser, FiPlus } from 'react-icons/fi';
+import { FiArrowLeft, FiDownload, FiUser, FiPlus, FiExternalLink } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { manuscriptsApi, intervenantsApi } from '../../../api/manuscripts';
 
@@ -9,33 +9,30 @@ import ManuscriptTimeline from '../../../components/common/ManuscriptTimeline';
 import './ManuscriptsWorkflow.css';
 
 // Acteurs externes affectés depuis le carnet d'intervenants (colonnes *_contact_id).
-// L'éditeur interne reste un compte admin_users (assigned_editor_id).
+// La Production éditoriale (validation éditoriale + couverture/BAT) reste un
+// compte admin_users (assigned_editor_id) : fusion Éditeur + Infographiste.
 const ASSIGN_ROWS = [
   'assigned_evaluator_contact_id',
   'assigned_corrector_contact_id',
   'assigned_editor_id',
-  'assigned_infographist_contact_id',
   'assigned_printer_contact_id',
 ];
 const ROLE_LABELS = {
   assigned_evaluator_contact_id: 'Évaluateur / lecteur',
   assigned_corrector_contact_id: 'Correcteur',
-  assigned_editor_id: 'Éditeur',
-  assigned_infographist_contact_id: 'Infographiste',
+  assigned_editor_id: 'Production éditoriale',
   assigned_printer_contact_id: 'Imprimeur',
 };
 const ROLE_API = {
   assigned_evaluator_contact_id: 'evaluateur',
   assigned_corrector_contact_id: 'correcteur',
   assigned_editor_id: 'editor',
-  assigned_infographist_contact_id: 'infographiste',
   assigned_printer_contact_id: 'imprimeur',
 };
 // Ancienne colonne (historique admin_users) associée à chaque ligne, pour rappel en lecture seule.
 const LEGACY_COL = {
   assigned_evaluator_contact_id: 'assigned_evaluator_id',
   assigned_corrector_contact_id: 'assigned_corrector_id',
-  assigned_infographist_contact_id: 'assigned_infographist_id',
   assigned_printer_contact_id: 'assigned_printer_id',
 };
 
@@ -46,6 +43,7 @@ export default function ManuscriptDetailPanel() {
   const [assignModal, setAssignModal] = useState(null); // col name
   const [adminUsers, setAdminUsers] = useState([]);
   const [selectedUser, setSelectedUser] = useState('');
+  const [applyToSeries, setApplyToSeries] = useState(false);
   // Création d'un intervenant directement depuis la fenêtre d'affectation.
   const [showNewIntervenant, setShowNewIntervenant] = useState(false);
   const [newIntervenant, setNewIntervenant] = useState({ nom: '', email: '' });
@@ -64,6 +62,7 @@ export default function ManuscriptDetailPanel() {
   const openAssign = (col) => {
     setAssignModal(col);
     setSelectedUser('');
+    setApplyToSeries(false);
     setShowNewIntervenant(false);
     setNewIntervenant({ nom: '', email: '' });
     manuscriptsApi.adminsByRole(ROLE_API[col])
@@ -96,8 +95,9 @@ export default function ManuscriptDetailPanel() {
 
   const confirmAssign = async () => {
     try {
-      await manuscriptsApi.assign(id, ROLE_API[assignModal], selectedUser ? parseInt(selectedUser, 10) : null);
-      toast.success('Assignation mise à jour');
+      const res = await manuscriptsApi.assign(id, ROLE_API[assignModal], selectedUser ? parseInt(selectedUser, 10) : null, applyToSeries);
+      const count = res.data?.count || 1;
+      toast.success(applyToSeries && count > 1 ? `Assignation appliquée à ${count} tomes` : 'Assignation mise à jour');
       setAssignModal(null);
       load();
     } catch (err) {
@@ -118,7 +118,9 @@ export default function ManuscriptDetailPanel() {
 
   if (loading) return <p>Chargement...</p>;
   if (!data) return null;
-  const { manuscript, stages, files, evaluations, validations } = data;
+  const { manuscript, stages, files, evaluations, validations, series } = data;
+  const seriesTomes = Array.isArray(series) ? series : [];
+  const isSeries = Boolean(manuscript.series_ref) && seriesTomes.length > 1;
 
   return (
     <div className="ms-panel">
@@ -126,12 +128,39 @@ export default function ManuscriptDetailPanel() {
         <FiArrowLeft /> Retour à la liste
       </Link>
       <h2>{manuscript.title}</h2>
+      {manuscript.subtitle && (
+        <p style={{ margin: '-6px 0 8px', fontSize: '1.05rem', fontStyle: 'italic', color: '#475569' }}>{manuscript.subtitle}</p>
+      )}
       <p className="ms-subtitle">
         Référence <strong>{manuscript.ref}</strong> ·
         <span className={`ms-stage-badge ms-stage-${manuscript.current_stage}`} style={{ marginLeft: 8 }}>
           {manuscript.stage_label}
         </span>
       </p>
+
+      {isSeries && (
+        <div className="ms-series-banner">
+          <div className="ms-series-banner-head">
+            <span>
+              Fait partie de la série <strong>« {manuscript.series_title || manuscript.title} »</strong>
+              {manuscript.tome_number ? ` — Tome ${manuscript.tome_number} sur ${manuscript.tome_total || seriesTomes.length}` : ''}
+            </span>
+          </div>
+          <div className="ms-series-tomes">
+            {seriesTomes.map((t) => (
+              t.id === manuscript.id ? (
+                <span key={t.id} className="ms-series-tome current" title={t.title}>
+                  Tome {t.tome_number || '?'} (ce dossier)
+                </span>
+              ) : (
+                <Link key={t.id} to={`/admin/manuscripts/${t.id}`} className="ms-series-tome" title={t.title}>
+                  Tome {t.tome_number || '?'} — {t.stage_label}
+                </Link>
+              )
+            ))}
+          </div>
+        </div>
+      )}
 
       {manuscript.current_stage === 'payment_pending' && (
         <div className="ms-action-banner">
@@ -195,11 +224,19 @@ export default function ManuscriptDetailPanel() {
                       <span className="ms-file-kind">{f.kind}</span>
                       {f.version > 1 && <strong>v{f.version}</strong>} {f.file_name}
                     </div>
-                    <a href={manuscriptsApi.downloadUrl(manuscript.id, f.id)}
-                      target="_blank" rel="noopener noreferrer"
-                      className="ms-btn">
-                      <FiDownload /> Télécharger
-                    </a>
+                    {f.external_url ? (
+                      <a href={f.external_url}
+                        target="_blank" rel="noopener noreferrer"
+                        className="ms-btn">
+                        <FiExternalLink /> Ouvrir le lien
+                      </a>
+                    ) : (
+                      <a href={manuscriptsApi.downloadUrl(manuscript.id, f.id)}
+                        target="_blank" rel="noopener noreferrer"
+                        className="ms-btn">
+                        <FiDownload /> Télécharger
+                      </a>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -252,6 +289,11 @@ export default function ManuscriptDetailPanel() {
                   {legacyVal && (
                     <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginTop: 2 }}>
                       Ancien (historique) : {manuscript[`${legacyCol}_name`] || `#${legacyVal}`}
+                    </div>
+                  )}
+                  {col === 'assigned_editor_id' && manuscript.assigned_infographist_contact_id && (
+                    <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginTop: 2 }}>
+                      Ancien infographiste : {manuscript.assigned_infographist_contact_id_name || `#${manuscript.assigned_infographist_contact_id}`}
                     </div>
                   )}
                 </div>
@@ -314,6 +356,16 @@ export default function ManuscriptDetailPanel() {
                 )
               )}
             </div>
+            {isSeries && (
+              <label className="ms-series-apply">
+                <input
+                  type="checkbox"
+                  checked={applyToSeries}
+                  onChange={(e) => setApplyToSeries(e.target.checked)}
+                />
+                <span>Appliquer à toute la série ({seriesTomes.length} tomes)</span>
+              </label>
+            )}
             <div className="ms-modal-actions">
               <button type="button" className="ms-btn" onClick={() => setAssignModal(null)}>Annuler</button>
               <button type="button" className="ms-btn ms-btn-primary" onClick={confirmAssign}>Confirmer</button>

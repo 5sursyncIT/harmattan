@@ -57,3 +57,23 @@ export async function recordInvoicePayment(adminApi, {
   const r = await adminApi.post('/invoices/paymentsdistributed', body);
   return r.data;
 }
+
+/**
+ * Résout un code de mode de paiement (LIQ/CB/CHQ/WAVE/OM/VIR) en son id entier
+ * Dolibarr (llx_c_paiement.id) — requis par v21 qui n'accepte plus le code seul.
+ * Cache mémoire (les ids sont stables). Centralisé ici pour rester l'unique
+ * source de vérité de l'enregistrement des paiements.
+ *
+ * @param {any} pool  pool mysql2 (dolibarrPool)
+ * @param {string} code  code du mode de paiement
+ * @returns {Promise<number|null>}
+ */
+const paymentIdCache = new Map();
+export async function resolvePaymentId(pool, code) {
+  const key = String(code || '').toUpperCase();
+  if (paymentIdCache.has(key)) return paymentIdCache.get(key);
+  const [rows] = await pool.query('SELECT id FROM llx_c_paiement WHERE code = ? LIMIT 1', [key]);
+  const id = rows[0]?.id ? Number(rows[0].id) : null;
+  if (id) paymentIdCache.set(key, id);
+  return id;
+}

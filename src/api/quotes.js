@@ -7,6 +7,10 @@ export const markQuoteSent = (id) => api.post(`/quotes/${id}/send`);
 export const deleteQuote = (id) => api.delete(`/quotes/${id}`);
 export const getQuoteDefaults = (params) => api.get('/quotes/defaults', { params });
 
+// Encaissement d'un devis de contribution (crée la facture + enregistre le règlement).
+export const getQuoteBanks = () => api.get('/quotes/banks');
+export const payQuote = (id, payload) => api.post(`/quotes/${id}/pay`, payload);
+
 export const downloadQuotePdf = async (quote) => {
   const res = await api.get(`/quotes/${quote.id}/pdf`, { responseType: 'blob' });
   const url = URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));

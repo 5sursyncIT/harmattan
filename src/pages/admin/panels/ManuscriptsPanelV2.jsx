@@ -68,7 +68,17 @@ export default function ManuscriptsPanelV2() {
             {rows.map((m) => (
               <tr key={m.id} onClick={() => navigate(`/admin/manuscripts/${m.id}`)}>
                 <td>{m.ref}</td>
-                <td>{m.title}</td>
+                <td>
+                  {m.title}
+                  {m.tome_number ? (
+                    <span className="ms-series-badge" title={m.series_title ? `Série : ${m.series_title}` : 'Ouvrage en plusieurs tomes'}>
+                      Série • Tome {m.tome_number}{m.tome_total ? `/${m.tome_total}` : ''}
+                    </span>
+                  ) : null}
+                  {m.subtitle ? (
+                    <span style={{ display: 'block', fontSize: '0.82rem', fontStyle: 'italic', color: '#64748b' }}>{m.subtitle}</span>
+                  ) : null}
+                </td>
                 <td>{m.author_name}</td>
                 <td>
                   <span className={`ms-stage-badge ms-stage-${m.current_stage}`}>

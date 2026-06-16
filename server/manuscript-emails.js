@@ -208,6 +208,10 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
 
   const msTitle = escapeHtml(manuscript.title || 'votre manuscrit');
   const msRef = escapeHtml(manuscript.ref || '');
+  const msSubtitle = manuscript.subtitle ? escapeHtml(manuscript.subtitle) : '';
+  const subtitleLine = msSubtitle
+    ? `<p style="color:#475569;font-style:italic;margin:-6px 0 10px">Sous-titre : « ${msSubtitle} »</p>`
+    : '';
   const authorUrl = `${siteUrl}/auteur/manuscrits/${manuscript.id}`;
   const adminUrl = (tab) => `${siteUrl}/admin/${tab}`;
 
@@ -223,6 +227,7 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         body = header('Manuscrit bien reçu')
           + greeting
           + `<p>Nous avons bien reçu votre manuscrit <strong>« ${msTitle} »</strong> (référence ${msRef}).</p>`
+          + subtitleLine
           + `<p>Vous pouvez suivre son évolution à tout moment depuis votre espace auteur.</p>`
           + btn('Accéder à mon espace', authorUrl);
         break;
@@ -347,6 +352,7 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         body = header('Nouvelle soumission')
           + greeting
           + `<p>Un nouveau manuscrit <strong>« ${msTitle} »</strong> (réf. ${msRef}) vient d'être soumis.</p>`
+          + subtitleLine
           + btn('Voir dans l\'admin', adminUrl('manuscripts'));
         break;
       case 'in_evaluation':
@@ -527,6 +533,67 @@ export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recip
 }
 
 /**
+ * Soumission d'un ouvrage en plusieurs tomes (chaque tome = un manuscrit lié
+ * en série). Au lieu de N notifications « submitted », on envoie :
+ *   - une notification in-app par tome (chaque dossier est suivi séparément) ;
+ *   - UN seul email de confirmation à l'auteur, récapitulant tous les tomes ;
+ *   - UN seul email aux admins.
+ */
+export function notifySeriesSubmission(db, transporter, manuscripts, author, seriesTitle, siteUrl) {
+  if (!Array.isArray(manuscripts) || manuscripts.length === 0) return;
+
+  // 1. Notification in-app par tome (toujours, même sans transporter)
+  if (author?.id) {
+    for (const m of manuscripts) createAuthorNotification(db, m, 'submitted', author, siteUrl);
+  }
+  if (!transporter) return;
+
+  const work = escapeHtml(seriesTitle || manuscripts[0]?.title || 'votre ouvrage');
+  const count = manuscripts.length;
+  const tomesList = manuscripts
+    .map((m) => `<li><strong>${escapeHtml(m.title || '')}</strong> — réf. ${escapeHtml(m.ref || '')}</li>`)
+    .join('');
+
+  // 2. Confirmation auteur — un seul email groupé (selon préférences)
+  if (author?.email && shouldEmailAuthor(db, author.id, 'submitted')) {
+    const authorUrl = `${siteUrl || ''}/auteur`;
+    const body = header('Manuscrits bien reçus')
+      + `<p>Bonjour ${escapeHtml(author.firstname || '')},</p>`
+      + `<p>Nous avons bien reçu votre ouvrage <strong>« ${work} »</strong> en <strong>${count} tomes</strong> :</p>`
+      + `<ul>${tomesList}</ul>`
+      + `<p>Chaque tome suit son propre parcours éditorial. Vous pouvez en suivre l'évolution depuis votre espace auteur.</p>`
+      + btn('Accéder à mon espace', authorUrl);
+    transporter.sendMail({
+      from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+      to: author.email,
+      subject: `Confirmation de réception — ${work} (${count} tomes)`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+    }).catch((err) => console.error('[WORKFLOW] series author email error:', err.message));
+  }
+
+  // 3. Admin général — un seul email groupé
+  try {
+    const fs = global.__siteConfigFallback;
+    const configEmail = fs?.contact?.emails?.[0];
+    if (configEmail) {
+      const adminUrl = `${siteUrl || ''}/admin/manuscripts`;
+      const body = header('Nouvelle soumission multi-tomes')
+        + `<p>Bonjour,</p>`
+        + `<p>Un nouvel ouvrage en <strong>${count} tomes</strong> vient d'être soumis : <strong>« ${work} »</strong>.</p>`
+        + `<ul>${tomesList}</ul>`
+        + `<p>Chaque tome est un dossier distinct (ISBN, contrat et impression propres).</p>`
+        + btn('Voir dans l\'admin', adminUrl);
+      transporter.sendMail({
+        from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+        to: configEmail,
+        subject: `[Manuscrit] Nouvelle soumission multi-tomes — ${work}`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+      }).catch((err) => console.error('[WORKFLOW] series admin email error:', err.message));
+    }
+  } catch (err) { void err; }
+}
+
+/**
  * Résout la liste des destinataires pour une transition, envoie les mails
  * et crée une notification in-app pour l'auteur.
  */
@@ -554,9 +621,15 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
   const roleToContact = {
     in_evaluation: 'assigned_evaluator_contact_id',
     in_correction: 'assigned_corrector_contact_id',
-    cover_design: 'assigned_infographist_contact_id',
     printing: 'assigned_printer_contact_id',
   };
+  // Couverture : désormais conçue en interne par la Production éditoriale
+  // (assigned_editor_id, notifié plus bas). On ne sollicite l'ancien
+  // intervenant externe « infographiste » que pour un manuscrit hérité dépourvu
+  // d'éditeur interne assigné.
+  if (toStage === 'cover_design' && !manuscript.assigned_editor_id) {
+    roleToContact.cover_design = 'assigned_infographist_contact_id';
+  }
   const contactCol = roleToContact[toStage];
   let notifiedContact = false;
   if (contactCol && manuscript[contactCol]) {
@@ -579,14 +652,16 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
     }
   }
 
-  // 2b. Éditeur interne (validation éditoriale) : reste un compte admin_users.
-  if (toStage === 'in_editorial' && manuscript.assigned_editor_id) {
+  // 2b. Production éditoriale interne (compte admin_users) : validation
+  //     éditoriale ET conception de la couverture (fusion Éditeur/Infographiste).
+  if ((toStage === 'in_editorial' || toStage === 'cover_design') && manuscript.assigned_editor_id) {
     try {
       const admin = db.prepare('SELECT username, role, email FROM admin_users WHERE id = ?').get(manuscript.assigned_editor_id);
       if (admin?.email) {
         sendTransitionEmail(transporter, manuscript, toStage, {
           type: 'admin', email: admin.email, role: admin.role, label: admin.username,
         }, siteUrl);
+        notifiedContact = true;
       }
     } catch (err) { console.warn('[WORKFLOW] editor notify error:', err.message); }
   }
@@ -635,7 +710,7 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
   // 4. Comptable : élaboration du contrat et du devis dès l'évaluation favorable.
   //    Destinataire configurable, par défaut Issa NDIAYE (demande direction).
   if (toStage === 'evaluation_positive') {
-    const accountantEmail = process.env.MANUSCRIPT_ACCOUNTANT_EMAIL || 'issa.ndiaye@senharmattan.sn';
+    const accountantEmail = process.env.MANUSCRIPT_ACCOUNTANT_EMAIL || 'issa.ndiaye@senharmattan.com';
     const accountantName = process.env.MANUSCRIPT_ACCOUNTANT_NAME || 'Issa NDIAYE';
     if (accountantEmail) {
       try {
