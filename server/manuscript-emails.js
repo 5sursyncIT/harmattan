@@ -10,8 +10,14 @@
  *   3. sendTransitionEmail() vers l'acteur métier suivant (si connu)
  */
 
+import { existsSync, statSync } from 'fs';
 import { STAGE_LABELS } from './manuscript-workflow.js';
 import { createFileToken, pickFileForActor } from './manuscript-file-tokens.js';
+
+// Plafond raisonnable pour joindre un fichier directement à un email (les
+// fournisseurs SMTP rejettent généralement au-delà de ~25 Mo). Au-delà, on se
+// rabat sur le seul lien de téléchargement sécurisé.
+const MAX_EMAIL_ATTACHMENT_BYTES = 18 * 1024 * 1024;
 
 // Stages dits "terminaux" pour l'auteur — on ne génère pas de notification car
 // l'utilisateur n'a plus d'action à mener ou ce sont des états techniques internes.
@@ -202,8 +208,9 @@ function header(title) {
 /**
  * Envoie un email de transition à un destinataire.
  * recipient = { type: 'author'|'admin', email, role?, firstname?, label? }
+ * attachments = pièces jointes nodemailer optionnelles ([{ filename, path }]).
  */
-export function sendTransitionEmail(transporter, manuscript, toStage, recipient, siteUrl) {
+export function sendTransitionEmail(transporter, manuscript, toStage, recipient, siteUrl, attachments = null) {
   if (!transporter || !recipient?.email) return Promise.resolve();
 
   const msTitle = escapeHtml(manuscript.title || 'votre manuscrit');
@@ -243,6 +250,9 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         body = header('Bonne nouvelle !')
           + greeting
           + `<p>Votre manuscrit <strong>« ${msTitle} »</strong> a reçu une évaluation favorable. Nous préparons votre contrat d'édition.</p>`
+          + (attachments && attachments.length
+            ? `<p>Vous trouverez <strong>ci-joint le rapport de lecture</strong> de votre manuscrit.</p>`
+            : '')
           + btn('Accéder à mon espace', authorUrl);
         break;
       case 'evaluation_negative':
@@ -295,7 +305,7 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         subject = `${msTitle} — Validation éditoriale en cours`;
         body = header('Phase éditoriale')
           + greeting
-          + `<p>Vos corrections ont été validées. Votre manuscrit est maintenant en validation éditoriale finale.</p>`
+          + `<p>Les corrections de votre manuscrit <strong>« ${msTitle} »</strong> sont finalisées. Il est maintenant en validation éditoriale finale.</p>`
           + btn('Suivre le manuscrit', authorUrl);
         break;
       case 'editorial_validated':
@@ -387,7 +397,7 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         subject = `[Éditorial] ${msTitle} — Validation à faire`;
         body = header('Validation éditoriale à faire')
           + greeting
-          + `<p>Le manuscrit <strong>« ${msTitle} »</strong> a été validé par l'auteur. Merci de procéder à la validation éditoriale finale.</p>`
+          + `<p>Le manuscrit <strong>« ${msTitle} »</strong> est prêt pour la validation éditoriale finale (corrections finalisées).</p>`
           + btn('Valider', adminUrl('editorial'));
         break;
       case 'cover_design':
@@ -413,12 +423,14 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
     }
   }
 
-  return transporter.sendMail({
+  const mail = {
     from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
     to: recipient.email,
     subject,
     html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
-  }).catch((err) => console.error('[WORKFLOW] Email error:', err.message));
+  };
+  if (attachments && attachments.length) mail.attachments = attachments;
+  return transporter.sendMail(mail).catch((err) => console.error('[WORKFLOW] Email error:', err.message));
 }
 
 /**
@@ -497,7 +509,7 @@ export function sendAssignmentEmail(transporter, manuscript, role, recipient, si
  * Le retour du travail se fait par réponse email à l'équipe éditoriale.
  * recipient = { nom, email, metier }
  */
-export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recipient, downloadUrl, siteUrl) {
+export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recipient, downloadUrl, siteUrl, attachments = null) {
   if (!transporter || !recipient?.email) return Promise.resolve();
   void siteUrl;
   const roleInfo = ROLE_LABELS[recipient.metier] || { label: recipient.metier || 'intervenant' };
@@ -513,10 +525,18 @@ export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recip
   };
   const copy = TASK_COPY[toStage] || { subject: 'Nouvelle tâche', intro: `Une tâche vous est confiée pour <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le fichier' };
 
+  const hasAttachment = !!(attachments && attachments.length);
+
   let body = header(copy.subject)
     + greeting
     + `<p>${copy.intro} (référence ${msRef}).</p>`;
-  if (downloadUrl) {
+  if (hasAttachment) {
+    body += `<p>Vous trouverez <strong>le fichier à traiter en pièce jointe</strong> de cet email.</p>`;
+    if (downloadUrl) {
+      body += `<p>Il reste également téléchargeable via ce lien sécurisé (valable 7 jours) :</p>`
+        + btn(copy.fileLabel, downloadUrl);
+    }
+  } else if (downloadUrl) {
     body += `<p>Le fichier à traiter est disponible via ce lien sécurisé (valable 7 jours) :</p>`
       + btn(copy.fileLabel, downloadUrl);
   } else {
@@ -524,12 +544,14 @@ export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recip
   }
   body += `<p style="color:#555">Une fois votre travail terminé, merci de le renvoyer par retour d'email à l'équipe éditoriale.</p>`;
 
-  return transporter.sendMail({
+  const mail = {
     from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
     to: recipient.email,
     subject: `[${roleInfo.label}] ${manuscript?.title || 'Manuscrit'}`,
     html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
-  }).catch((err) => console.error('[WORKFLOW] Intervenant email error:', err.message));
+  };
+  if (hasAttachment) mail.attachments = attachments;
+  return transporter.sendMail(mail).catch((err) => console.error('[WORKFLOW] Intervenant email error:', err.message));
 }
 
 /**
@@ -597,7 +619,7 @@ export function notifySeriesSubmission(db, transporter, manuscripts, author, ser
  * Résout la liste des destinataires pour une transition, envoie les mails
  * et crée une notification in-app pour l'auteur.
  */
-export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl) {
+export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl, opts = {}) {
   // 1. Auteur : notification in-app (toujours) + email (selon préférences)
   const author = db.prepare('SELECT id, email, firstname, lastname FROM authors WHERE id = ?').get(manuscript.author_id);
   if (author?.id) {
@@ -606,11 +628,28 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
 
     // Email — uniquement si transporter dispo, email connu, ET préférence active pour la catégorie
     if (transporter && author.email && shouldEmailAuthor(db, author.id, toStage)) {
+      // Pièce jointe optionnelle : le rapport de lecture, joint à l'email
+      // d'acceptation lorsque l'évaluateur l'a explicitement demandé.
+      let authorAttachments = null;
+      if (opts.attachEvaluationReport && toStage === 'evaluation_positive') {
+        try {
+          const report = db.prepare(
+            `SELECT file_path, file_name FROM manuscript_files
+             WHERE manuscript_id = ? AND kind = 'evaluation_report'
+             ORDER BY version DESC, uploaded_at DESC LIMIT 1`
+          ).get(manuscript.id);
+          if (report?.file_path && existsSync(report.file_path)) {
+            authorAttachments = [{ filename: report.file_name || 'rapport-de-lecture', path: report.file_path }];
+          } else {
+            console.warn('[WORKFLOW] Rapport de lecture introuvable — email d\'acceptation envoyé sans pièce jointe (manuscrit', manuscript.id, ')');
+          }
+        } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe rapport de lecture:', err.message); }
+      }
       sendTransitionEmail(transporter, manuscript, toStage, {
         type: 'author',
         email: author.email,
         firstname: author.firstname,
-      }, siteUrl);
+      }, siteUrl, authorAttachments);
     }
   }
 
@@ -639,12 +678,26 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
       ).get(manuscript[contactCol]);
       if (intervenant?.email) {
         let downloadUrl = null;
+        let attachments = null;
         const file = pickFileForActor(db, manuscript.id, toStage);
         if (file) {
           const token = createFileToken(db, { manuscriptId: manuscript.id, fileId: file.id, intervenantId: intervenant.id });
           downloadUrl = `${siteUrl || ''}/api/files/manuscript/${token}/download`;
+          // En plus du lien, on joint le fichier directement à l'email pour le
+          // confort de l'intervenant (ex. correcteur), tant qu'il reste sous le
+          // plafond raisonnable des pièces jointes. Sinon, le lien suffit.
+          try {
+            if (file.file_path && existsSync(file.file_path)) {
+              const size = statSync(file.file_path).size;
+              if (size > 0 && size <= MAX_EMAIL_ATTACHMENT_BYTES) {
+                attachments = [{ filename: file.file_name || 'manuscrit', path: file.file_path }];
+              } else {
+                console.warn('[WORKFLOW] Fichier trop volumineux pour pièce jointe — lien seul (manuscrit', manuscript.id, ',', size, 'octets)');
+              }
+            }
+          } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe intervenant:', err.message); }
         }
-        sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl);
+        sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl, attachments);
         notifiedContact = true;
       }
     } catch (err) {

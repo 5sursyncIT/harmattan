@@ -31,6 +31,8 @@ export const manuscriptsApi = {
     }),
   submitCorrectionToAuthor: (manuscriptId) =>
     api.post(`/admin/corrections/${manuscriptId}/submit-to-author`),
+  sendCorrectionToEditorial: (manuscriptId, editorId = null) =>
+    api.post(`/admin/corrections/${manuscriptId}/to-editorial`, { editor_id: editorId }),
 
   // Éditorial
   listEditorial: () => api.get('/admin/editorial'),

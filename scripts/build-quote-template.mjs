@@ -4,9 +4,12 @@
  *
  * Placeholders : {REF} {DATE} {RECIPIENT_TITLE} {RECIPIENT_NAME} {BOOK_TITLE}
  *                {BOOK_PAGES} {BOOK_FORMAT} {BOOK_INTERIOR} {BOOK_PAPER}
- *                {BOOK_COVER} {BOOK_PRICE_EUR} {DIFFUSION}
+ *                {BOOK_COVER} {BOOK_PRICE_EUR} {DISCOUNT_PCT} {DIFFUSION}
  *                {ITEM_LABEL} {ITEM_PRICE} (dans une ligne dupliquée)
  *                {TOTAL_AMOUNT} {TOTAL_TEXT}
+ *
+ * La ligne « Remise auteur… » ({DISCOUNT_PCT}) est retirée par le backend quand
+ * la remise est nulle ou absente (anciens devis sans remise enregistrée).
  *
  * Usage : node scripts/build-quote-template.mjs
  *         (sortie : server/templates/devis-contrat.odt)
@@ -270,7 +273,8 @@ const CONTENT = `<?xml version="1.0" encoding="UTF-8"?>
    <text:p text:style-name="SpecBullet">- L'intérieur du livre sera en {BOOK_INTERIOR} imprimé sur du papier {BOOK_PAPER}</text:p>
    <text:p text:style-name="SpecBullet">- Couverture {BOOK_COVER}</text:p>
    <text:p text:style-name="SpecBullet">- Prix public du livre à l'international : {BOOK_PRICE_EUR} euros</text:p>
-   <text:p text:style-name="SpecBullet">- Parution mondiale, simultanément à {DIFFUSION}</text:p>
+   <text:p text:style-name="SpecBullet">- Remise auteur sur le prix public : {DISCOUNT_PCT}&#160;% (appliquée aux exemplaires contractuels)</text:p>
+   <text:p text:style-name="SpecBullet">- Parution mondiale, à {DIFFUSION}</text:p>
 
    <text:p text:style-name="QuoteIntro">Ainsi votre participation aux frais d'édition est&#160;:</text:p>
 

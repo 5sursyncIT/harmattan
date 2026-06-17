@@ -12,6 +12,10 @@ export default function CorrectionsPanel() {
   const [modal, setModal] = useState(null);
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  // Transmission à la Production éditoriale
+  const [editorialModal, setEditorialModal] = useState(null);
+  const [editorialUsers, setEditorialUsers] = useState([]);
+  const [selectedEditor, setSelectedEditor] = useState('');
 
   const load = () => {
     setLoading(true);
@@ -50,6 +54,26 @@ export default function CorrectionsPanel() {
     }
   };
 
+  const openEditorial = (id) => {
+    setEditorialModal(id);
+    setSelectedEditor('');
+    manuscriptsApi.adminsByRole('editor')
+      .then((res) => setEditorialUsers(res.data || []))
+      .catch(() => setEditorialUsers([]));
+  };
+
+  const confirmEditorial = async () => {
+    setSubmitting(true);
+    try {
+      await manuscriptsApi.sendCorrectionToEditorial(editorialModal, selectedEditor ? parseInt(selectedEditor, 10) : null);
+      toast.success('Document transmis à la Production éditoriale');
+      setEditorialModal(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setSubmitting(false); }
+  };
+
   return (
     <div className="ms-panel">
       <h2>Corrections</h2>
@@ -79,6 +103,9 @@ export default function CorrectionsPanel() {
                       <button className="ms-btn ms-btn-primary" style={{ marginLeft: 6 }} onClick={() => sendToAuthor(m.id)}>
                         Envoyer à l'auteur
                       </button>
+                      <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => openEditorial(m.id)}>
+                        → Production éditoriale
+                      </button>
                     </>
                   )}
                 </td>
@@ -103,6 +130,33 @@ export default function CorrectionsPanel() {
               <button className="ms-btn" onClick={() => setModal(null)} disabled={submitting}>Annuler</button>
               <button className="ms-btn ms-btn-primary" onClick={upload} disabled={submitting || !file}>
                 {submitting ? 'Envoi...' : 'Uploader'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editorialModal && (
+        <div className="ms-modal-backdrop" onClick={() => setEditorialModal(null)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Transmettre à la Production éditoriale</h3>
+            <p className="ms-subtitle" style={{ marginTop: 0 }}>
+              Le document corrigé (renvoyé par le correcteur) doit avoir été <strong>uploadé</strong> au préalable.
+              Cette action transmet le manuscrit à la Production éditoriale, sans relecture par l'auteur.
+            </p>
+            <div className="form-group">
+              <label>Responsable de la production éditoriale (facultatif)</label>
+              <select value={selectedEditor} onChange={(e) => setSelectedEditor(e.target.value)}>
+                <option value="">Toute l'équipe de production éditoriale</option>
+                {editorialUsers.map((u) => (
+                  <option key={u.id} value={u.id}>{u.username} ({u.role})</option>
+                ))}
+              </select>
+            </div>
+            <div className="ms-modal-actions">
+              <button className="ms-btn" onClick={() => setEditorialModal(null)} disabled={submitting}>Annuler</button>
+              <button className="ms-btn ms-btn-primary" onClick={confirmEditorial} disabled={submitting}>
+                {submitting ? 'Envoi...' : 'Transmettre'}
               </button>
             </div>
           </div>

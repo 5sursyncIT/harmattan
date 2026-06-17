@@ -105,8 +105,9 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contract_quotes_contract ON contract_quotes(contract_id)`);
-  // Migration : lien vers la facture Dolibarr générée lors de l'encaissement.
-  for (const col of ['dolibarr_invoice_id INTEGER', 'invoice_ref TEXT']) {
+  // Migration : lien vers la facture Dolibarr générée lors de l'encaissement,
+  // et remise auteur (%) retenue pour ce devis (traçabilité / réimpression).
+  for (const col of ['dolibarr_invoice_id INTEGER', 'invoice_ref TEXT', 'discount_pct REAL']) {
     try { db.exec(`ALTER TABLE contract_quotes ADD COLUMN ${col}`); } catch { /* déjà présente */ }
   }
 
@@ -173,8 +174,15 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
 
       const {
         recipient_title, recipient_name, book_title, book_pages, book_format,
-        book_interior, book_paper, book_cover, book_price_eur, diffusion, items,
+        book_interior, book_paper, book_cover, book_price_eur, diffusion, items, discount_pct,
       } = req.body;
+
+      // Remise auteur (%) retenue pour ce devis : bornée [0,100], repli sur le défaut
+      // si absente/invalide. Stockée pour mémoire — la ligne 4 encode déjà le prix remisé.
+      const rawDiscount = parseFloat(discount_pct);
+      const discountPct = Number.isFinite(rawDiscount)
+        ? Math.min(100, Math.max(0, rawDiscount))
+        : DEFAULT_AUTHOR_DISCOUNT;
 
       if (!recipient_name?.trim()) return res.status(400).json({ error: 'Nom du destinataire requis' });
       if (!book_title?.trim()) return res.status(400).json({ error: 'Titre de l\'ouvrage requis' });
@@ -195,8 +203,8 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
         const r = db.prepare(`INSERT INTO contract_quotes (
           contract_id, ref, recipient_title, recipient_name, book_title, book_pages,
           book_format, book_interior, book_paper, book_cover, book_price_eur, diffusion,
-          items_json, total, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          items_json, total, discount_pct, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           contractId, ref,
           String(recipient_title || 'Monsieur').slice(0, 20),
           recipient_name.trim().slice(0, 120),
@@ -207,9 +215,10 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
           String(book_paper || 'bouffant 80 grammes').slice(0, 60),
           String(book_cover || 'cartonné, coucher brillant, quadrichromie avec pellicule').slice(0, 200),
           parseFloat(book_price_eur) || 0,
-          String(diffusion || 'Paris, Dakar, dans les grandes capitales européennes et sur Internet').slice(0, 200),
+          String(diffusion || 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet').slice(0, 200),
           JSON.stringify(sanitizedItems),
           total,
+          discountPct,
           req.admin.username,
         );
         return { id: r.lastInsertRowid, ref };
@@ -364,6 +373,19 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
 
       // Locale-aware date
       const dateStr = new Date(quote.created_at).toLocaleDateString('fr-FR');
+
+      // Remise auteur : affichée uniquement si une valeur > 0 a été enregistrée.
+      // Les anciens devis (colonne NULL) ou une remise à 0 % font disparaître la
+      // puce entière du document pour ne pas afficher « Remise : 0 % ».
+      const disc = Number(quote.discount_pct);
+      const hasDiscount = Number.isFinite(disc) && disc > 0;
+      const discountStr = hasDiscount
+        ? (Number.isInteger(disc) ? String(disc) : disc.toFixed(1).replace('.', ','))
+        : '';
+      if (!hasDiscount) {
+        content = content.replace(/\s*<text:p text:style-name="SpecBullet">- Remise auteur[^<]*<\/text:p>/, '');
+      }
+
       const replacements = {
         REF: quote.ref,
         DATE: dateStr,
@@ -376,6 +398,7 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
         BOOK_PAPER: quote.book_paper,
         BOOK_COVER: quote.book_cover,
         BOOK_PRICE_EUR: Number(quote.book_price_eur).toFixed(2),
+        DISCOUNT_PCT: discountStr,
         DIFFUSION: quote.diffusion,
         TOTAL_AMOUNT: Number(quote.total).toLocaleString('fr-FR'),
         TOTAL_TEXT: numberToWordsFR(quote.total) + ' Francs CFA',

@@ -109,6 +109,9 @@ export const ALLOWED_TRANSITIONS = {
   ],
   in_correction: [
     { to: 'correction_author_review', roles: ['correcteur', 'editor', 'super_admin', 'admin'] },
+    // Chemin direct : l'admin charge le document corrigé (renvoyé par email par le
+    // correcteur) et le transmet à la Production éditoriale, sans relecture auteur.
+    { to: 'in_editorial', roles: ['editor', 'production', 'super_admin', 'admin'] },
   ],
   correction_author_review: [
     { to: 'in_correction', roles: ['author', 'super_admin', 'admin'] },

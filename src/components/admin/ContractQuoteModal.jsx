@@ -7,6 +7,26 @@ const FCFA_PER_EUR = 655.957;
 const DEFAULT_AUTHOR_DISCOUNT = 30;  // remise auteur par défaut (%) si non renseignée au contrat
 const COLOR_FLAT_PRICE = 852000;     // Prix fixe contribution impression couleur (item 6)
 
+// Choix figés par la direction (menus déroulants). `value` = texte rendu sur le PDF,
+// `label` = libellé court affiché à l'éditeur. Le format accepte une saisie libre
+// via l'option « Autre » (sentinelle FORMAT_CUSTOM).
+const FORMAT_CUSTOM = '__custom__';
+const FORMAT_OPTIONS = [
+  { label: '135 × 215 mm', value: '13.5 cm sur 21.5 cm' },
+  { label: '155 × 240 mm', value: '15.5 cm sur 24 cm' },
+  { label: 'A4 (210 × 297 mm)', value: 'A4 (21 cm sur 29.7 cm)' },
+];
+const INTERIOR_OPTIONS = [
+  { label: '1 couleur N&B', value: 'une couleur N & B' },
+  { label: 'Mix N&B/Couleur', value: 'mixte N & B / couleur' },
+  { label: 'Couleur intégrale', value: 'couleur intégrale' },
+];
+const PAPER_OPTIONS = [
+  { label: 'Bouffant 80 g', value: 'bouffant 80 grammes' },
+  { label: 'Offset 90 g', value: 'offset 90 grammes' },
+  { label: 'Papier photo 115 g', value: 'papier photo 115 grammes' },
+];
+
 function buildDefaultItems({ pages, priceEur, qty, color, discountPct }) {
   const items = [];
   if (pages > 0) {
@@ -64,9 +84,16 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     book_paper: 'bouffant 80 grammes',
     book_cover: 'cartonné, coucher brillant, quadrichromie avec pellicule',
     book_price_eur: numPriceEur,
-    diffusion: 'Paris, Dakar, dans les grandes capitales européennes et sur Internet',
+    // Remise auteur (%) pré-remplie depuis le contrat mais librement modifiable
+    // pour ce devis ; pilote la ligne 4 « Achat de N exemplaires ».
+    discount_pct: purchaseDiscount,
+    diffusion: 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet',
     color: false,
   });
+  // Format « Autre » : saisie libre dès que la valeur ne fait pas partie des choix figés.
+  const [formatCustom, setFormatCustom] = useState(
+    () => !FORMAT_OPTIONS.some(o => o.value === form.book_format),
+  );
   const [items, setItems] = useState(() => buildDefaultItems({
     pages: parseInt(form.book_pages) || 0,
     priceEur: parseFloat(form.book_price_eur) || 0,
@@ -97,10 +124,10 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     const priceEur = parseFloat(form.book_price_eur) || 0;
     setItems(prev => {
       const customs = prev.filter(i => i.id >= 100);
-      const next = buildDefaultItems({ pages, priceEur, qty: initialQty, color: form.color, discountPct: purchaseDiscount });
+      const next = buildDefaultItems({ pages, priceEur, qty: initialQty, color: form.color, discountPct: form.discount_pct });
       return [...next, ...customs];
     });
-  }, [form.book_pages, form.book_price_eur, form.color, initialQty, purchaseDiscount]);
+  }, [form.book_pages, form.book_price_eur, form.color, form.discount_pct, initialQty]);
 
   const updateItem = (idx, patch) => {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
@@ -131,6 +158,7 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
         book_paper: form.book_paper,
         book_cover: form.book_cover,
         book_price_eur: parseFloat(form.book_price_eur) || 0,
+        discount_pct: Math.min(100, Math.max(0, parseFloat(form.discount_pct) || 0)),
         diffusion: form.diffusion,
         items: cleanItems,
       });
@@ -184,28 +212,59 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
             </div>
             <div className="ct-field">
               <label>Format</label>
-              <input value={form.book_format} onChange={e => set('book_format', e.target.value)} />
+              <select
+                value={formatCustom ? FORMAT_CUSTOM : form.book_format}
+                onChange={e => {
+                  const v = e.target.value;
+                  if (v === FORMAT_CUSTOM) { setFormatCustom(true); set('book_format', ''); }
+                  else { setFormatCustom(false); set('book_format', v); }
+                }}>
+                {FORMAT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                <option value={FORMAT_CUSTOM}>Autre format (saisie manuelle)</option>
+              </select>
+              {formatCustom && (
+                <input
+                  value={form.book_format}
+                  onChange={e => set('book_format', e.target.value)}
+                  placeholder="ex. 16 cm sur 24 cm"
+                  maxLength={60}
+                  style={{ marginTop: 4 }}
+                />
+              )}
             </div>
             <div className="ct-field">
               <label>Intérieur</label>
-              <input value={form.book_interior} onChange={e => set('book_interior', e.target.value)} />
+              <select value={form.book_interior} onChange={e => set('book_interior', e.target.value)}>
+                {INTERIOR_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
             </div>
             <div className="ct-field">
-              <label>Prix public (€)</label>
-              <input type="number" step={0.5} value={form.book_price_eur} onChange={e => set('book_price_eur', e.target.value)} min={0} />
+              <label>Papier</label>
+              <select value={form.book_paper} onChange={e => set('book_paper', e.target.value)}>
+                {PAPER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
             </div>
           </div>
           <div className="ct-form-row cols-2">
             <div className="ct-field">
-              <label>Papier</label>
-              <input value={form.book_paper} onChange={e => set('book_paper', e.target.value)} />
+              <label>Prix public (€)</label>
+              <input type="number" step={0.5} value={form.book_price_eur} onChange={e => set('book_price_eur', e.target.value)} min={0} />
             </div>
+            <div className="ct-field">
+              <label>Remise auteur (%)</label>
+              <input type="number" step={1} min={0} max={100}
+                value={form.discount_pct}
+                onChange={e => set('discount_pct', e.target.value)} />
+              <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+                Sur le prix public — ligne « Achat de N exemplaires »
+              </span>
+            </div>
+          </div>
+          <div className="ct-form-row cols-2">
             <div className="ct-field">
               <label>Couverture</label>
               <input value={form.book_cover} onChange={e => set('book_cover', e.target.value)} maxLength={200} />
             </div>
-          </div>
-          <div className="ct-form-row">
             <div className="ct-field">
               <label>Diffusion</label>
               <input value={form.diffusion} onChange={e => set('diffusion', e.target.value)} maxLength={200} />

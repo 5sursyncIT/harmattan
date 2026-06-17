@@ -426,7 +426,12 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       const updated = transition(db, manuscript.id, nextStage, actor, {
         note: `Verdict : ${verdict}${recommendation ? ' — ' + recommendation : ''}`,
       });
-      notifyTransition(db, transporter, updated, nextStage, actor, siteUrl);
+      // Option : joindre le rapport de lecture qui vient d'être déposé à l'email
+      // d'acceptation envoyé à l'auteur (uniquement si verdict favorable + fichier fourni).
+      const attachEvaluationReport = verdict === 'positive'
+        && !!req.file
+        && ['1', 'true', 'on', 'yes'].includes(String(req.body.attach_report || '').toLowerCase());
+      notifyTransition(db, transporter, updated, nextStage, actor, siteUrl, { attachEvaluationReport });
 
       // Hook contrat auto si positive et disponible
       if (verdict === 'positive' && hooks.onEvaluationPositive) {
@@ -482,6 +487,55 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     const updated = transition(db, manuscript.id, 'correction_author_review', actor, { note: 'Envoi à l\'auteur pour validation' });
     notifyTransition(db, transporter, updated, 'correction_author_review', actor, siteUrl);
     res.json({ success: true });
+  });
+
+  // Transmission directe à la Production éditoriale : un admin charge le document
+  // corrigé (renvoyé par email par le correcteur) via /upload, puis l'envoie à
+  // l'équipe de production éditoriale sans passer par la relecture auteur. On peut
+  // au passage assigner le responsable de la production (assigned_editor_id).
+  router.post('/corrections/:manuscriptId/to-editorial', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin', 'editor', 'production'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Action réservée à l\'équipe éditoriale' });
+    }
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (manuscript.current_stage !== 'in_correction') {
+      return res.status(400).json({ error: `Transmission impossible au stade ${manuscript.current_stage}` });
+    }
+    // Garde-fou : le document corrigé doit avoir été chargé au préalable.
+    const hasCorrection = db.prepare(
+      `SELECT 1 FROM manuscript_files WHERE manuscript_id = ? AND kind = 'correction' LIMIT 1`
+    ).get(manuscript.id);
+    if (!hasCorrection) {
+      return res.status(400).json({ error: 'Aucun document corrigé n\'a été chargé. Uploadez-le d\'abord.' });
+    }
+
+    // Assignation optionnelle du responsable de la production éditoriale.
+    const updates = {};
+    let assignedEditor = null;
+    const editorId = req.body?.editor_id ? parseInt(req.body.editor_id, 10) : null;
+    if (editorId) {
+      const target = db.prepare('SELECT id, username, role FROM admin_users WHERE id = ? AND is_active = 1').get(editorId);
+      if (!target) return res.status(404).json({ error: 'Responsable éditorial introuvable' });
+      if (!['editor', 'production', 'super_admin', 'admin'].includes(target.role)) {
+        return res.status(400).json({ error: 'Cet utilisateur ne peut pas piloter la production éditoriale' });
+      }
+      updates.assigned_editor_id = editorId;
+      assignedEditor = target;
+    }
+
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    const updated = transition(db, manuscript.id, 'in_editorial', actor, {
+      note: 'Document corrigé transmis à la Production éditoriale',
+      updates,
+    });
+    notifyTransition(db, transporter, updated, 'in_editorial', actor, siteUrl);
+    res.json({
+      success: true,
+      stage: 'in_editorial',
+      assignedEditor: assignedEditor ? { id: assignedEditor.id, username: assignedEditor.username } : null,
+    });
   });
 
   // ─── ÉDITORIAL ───────────────────────────────────────────
