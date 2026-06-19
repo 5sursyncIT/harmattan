@@ -171,6 +171,8 @@ export const adjustStock = (product_id, counted_qty, reason, warehouse_id) => ap
 // Transfert entre entrepôts : liste des dépôts (+ stock du produit par dépôt) et déplacement
 export const getStockWarehouses = (product_id) => api.get('/admin/stock/warehouses', { params: product_id ? { product_id } : {} });
 export const transferStock = (payload) => api.post('/admin/stock/transfer', payload);
+// Historique des transferts (mouvements appariés TRF-… + auteur réel)
+export const getStockTransfers = (params = {}) => api.get('/admin/stock/transfers', { params });
 // Commandes d'approvisionnement (suivi local + réception)
 export const getPurchaseOrders = (params = {}) => api.get('/admin/stock/purchase-orders', { params });
 export const getPurchaseOrder = (id) => api.get(`/admin/stock/purchase-orders/${id}`);

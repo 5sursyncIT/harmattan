@@ -189,3 +189,54 @@
 @media (pointer: coarse) {
   .btn-icon, .sk-alert-btn, .sk-filter-btn, .sk-btn-ghost, .sk-btn-order, .sk-subnav-link { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
 }
+
+/* ─── Transfert entre entrepôts ────────────────────────── */
+/* Bandeau produit + stock total dans la modale */
+.sk-trf-prod { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+.sk-trf-prod-total { text-align: center; flex-shrink: 0; }
+.sk-trf-prod-total b { display: block; font-size: 1.35rem; font-weight: 800; color: #0f172a; line-height: 1; }
+.sk-trf-prod-total span { font-size: 0.66rem; text-transform: uppercase; letter-spacing: .5px; color: #94a3b8; }
+
+/* Répartition par entrepôt (chips) */
+.sk-trf-dist { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.sk-trf-chip { flex: 1 1 calc(50% - 8px); min-width: 128px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; background: #fff; transition: all .15s; }
+.sk-trf-chip-ref { font-size: 0.74rem; font-weight: 700; color: #475569; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-trf-chip-qty { font-size: 1.05rem; font-weight: 800; color: #0f172a; margin-top: 1px; }
+.sk-trf-chip-qty .delta { font-size: 0.78rem; font-weight: 700; margin-left: 6px; }
+.sk-trf-chip-qty .delta.down { color: #dc2626; }
+.sk-trf-chip-qty .delta.up { color: #16a34a; }
+.sk-trf-chip.is-src { border-color: #bfdbfe; background: #eff6ff; }
+.sk-trf-chip.is-dst { border-color: #bbf7d0; background: #f0fdf4; }
+
+/* Sélecteurs source / destination + bouton d'inversion */
+.sk-trf-route { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 8px; margin-bottom: 8px; }
+.sk-trf-route label { display: block; font-weight: 600; font-size: 0.8rem; margin-bottom: 4px; color: #334155; }
+.sk-trf-select { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #d1d5db; font-size: 0.85rem; background: #fff; }
+.sk-trf-swap { width: 38px; height: 38px; border-radius: 50%; border: 1px solid #d1d5db; background: #fff; color: #1e40af; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: transform .25s, background .15s, border-color .15s; flex-shrink: 0; }
+.sk-trf-swap:hover { background: #eff6ff; border-color: #1e40af; transform: rotate(180deg); }
+
+/* Stepper quantité + bouton « Tout » */
+.sk-trf-qty-row { display: flex; align-items: stretch; gap: 8px; }
+.sk-trf-stepper { display: flex; align-items: stretch; flex: 1; border: 2px solid #1e40af; border-radius: 10px; overflow: hidden; }
+.sk-trf-stepper.over { border-color: #dc2626; }
+.sk-trf-step-btn { width: 46px; border: none; background: #f8fafc; color: #1e40af; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: background .12s; }
+.sk-trf-step-btn:hover:not(:disabled) { background: #e0e7ff; }
+.sk-trf-step-btn:disabled { color: #cbd5e1; cursor: default; }
+.sk-trf-qty-input { flex: 1; border: none; text-align: center; font-size: 1.3rem; font-weight: 800; color: #0f172a; min-width: 0; background: #fff; }
+.sk-trf-qty-input:focus { outline: none; }
+.sk-trf-max { padding: 0 14px; border: 1px solid #1e40af; border-radius: 10px; background: #fff; color: #1e40af; font-weight: 700; font-size: 0.82rem; cursor: pointer; white-space: nowrap; transition: all .15s; }
+.sk-trf-max:hover:not(:disabled) { background: #1e40af; color: #fff; }
+.sk-trf-max:disabled { opacity: .45; cursor: default; }
+
+/* Liste de recherche : lignes cliquables + badge stock */
+.sk-table tr.sk-trf-clickable { cursor: pointer; }
+.sk-trf-stock-badge { display: inline-block; min-width: 34px; padding: 2px 10px; border-radius: 999px; font-weight: 800; font-size: 0.82rem; }
+.sk-trf-stock-badge.ok { background: #f0fdf4; color: #166534; }
+.sk-trf-stock-badge.low { background: #fffbeb; color: #b45309; }
+.sk-trf-stock-badge.zero { background: #fef2f2; color: #dc2626; }
+
+@media (max-width: 520px) {
+  .sk-trf-chip { flex-basis: 100%; }
+  .sk-trf-qty-row { flex-wrap: wrap; }
+  .sk-trf-max { flex: 1; }
+}

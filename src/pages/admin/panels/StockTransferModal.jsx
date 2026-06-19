@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { getStockWarehouses, transferStock } from '../../../api/admin';
-import { FiRepeat, FiArrowRight, FiAlertCircle } from 'react-icons/fi';
+import { FiRepeat, FiAlertCircle, FiPlus, FiMinus, FiArrowRight } from 'react-icons/fi';
 import toast from 'react-hot-toast';
+import './Stock.css';
 
 /**
  * Modale de transfert de stock entre entrepôts (circulation de livres dépôt → dépôt).
@@ -45,6 +46,7 @@ export default function StockTransferModal({ product, onClose, onDone }) {
 
   const srcWh = useMemo(() => warehouses.find(w => w.id === src), [warehouses, src]);
   const dstWh = useMemo(() => warehouses.find(w => w.id === dst), [warehouses, dst]);
+  const totalStock = useMemo(() => warehouses.reduce((s, w) => s + Number(w.reel || 0), 0), [warehouses]);
   const available = Number(srcWh?.reel ?? 0);
   const qtyNum = qty === '' ? null : Math.max(0, parseInt(qty, 10) || 0);
 
@@ -53,6 +55,10 @@ export default function StockTransferModal({ product, onClose, onDone }) {
   const overStock = qtyNum != null && qtyNum > available;
   const invalidQty = qtyNum === null || qtyNum < 1;
   const canSubmit = !saving && !tooFew && !sameWh && !overStock && !invalidQty && src != null && dst != null;
+  const showDelta = !invalidQty && !overStock && !sameWh;
+
+  const setQtyClamped = (n) => setQty(String(Math.max(1, Math.min(available || 1, n))));
+  const swap = () => { setSrc(dst); setDst(src); };
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -75,11 +81,12 @@ export default function StockTransferModal({ product, onClose, onDone }) {
     }
   };
 
-  const whLabel = (w) => `${w.ref}${w.label && w.label !== w.ref ? ' — ' + w.label : ''} (${Number(w.reel ?? 0)})`;
+  const whName = (w) => `${w.ref}${w.label && w.label !== w.ref ? ' — ' + w.label : ''}`;
+  const whLabel = (w) => `${whName(w)} (${Number(w.reel ?? 0)})`;
 
   return (
     <div className="ct-modal-overlay" onClick={() => !saving && onClose?.()}>
-      <div className="ct-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+      <div className="ct-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <h3 style={{ margin: '0 0 4px', display: 'flex', alignItems: 'center', gap: 8 }}>
           <FiRepeat size={18} style={{ color: '#1e40af' }} /> Transférer entre entrepôts
         </h3>
@@ -87,9 +94,15 @@ export default function StockTransferModal({ product, onClose, onDone }) {
           Déplace des exemplaires d'un dépôt à un autre. Le stock total est inchangé : seule sa répartition par entrepôt évolue.
         </p>
 
-        <div style={{ background: '#f8fafc', borderRadius: 10, padding: 12, marginBottom: 14, border: '1px solid #e2e8f0' }}>
-          <div style={{ fontWeight: 700 }}>{product.label}</div>
-          <div style={{ fontSize: '0.82rem', color: '#64748b' }}>Réf. {product.ref}</div>
+        {/* Produit + stock total */}
+        <div className="sk-trf-prod">
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{product.label}</div>
+            <div style={{ fontSize: '0.82rem', color: '#64748b' }}>Réf. {product.ref}</div>
+          </div>
+          {!loadingWh && !whError && (
+            <div className="sk-trf-prod-total"><b>{totalStock}</b><span>en stock</span></div>
+          )}
         </div>
 
         {loadingWh ? (
@@ -104,20 +117,43 @@ export default function StockTransferModal({ product, onClose, onDone }) {
           </div>
         ) : (
           <>
-            {/* Source → Destination */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'end', gap: 8, marginBottom: 12 }}>
+            {/* Répartition par entrepôt + aperçu en direct */}
+            <div style={{ fontWeight: 600, fontSize: '0.8rem', color: '#334155', marginBottom: 6 }}>Répartition par entrepôt</div>
+            <div className="sk-trf-dist">
+              {warehouses.map(w => {
+                const isSrc = w.id === src;
+                const isDst = w.id === dst;
+                const base = Number(w.reel || 0);
+                const live = showDelta && (isSrc || isDst);
+                const after = isSrc ? base - qtyNum : isDst ? base + qtyNum : base;
+                return (
+                  <div key={w.id} className={`sk-trf-chip${isSrc ? ' is-src' : ''}${isDst ? ' is-dst' : ''}`}>
+                    <div className="sk-trf-chip-ref" title={whName(w)}>
+                      {w.ref}{isSrc ? ' · source' : isDst ? ' · destination' : ''}
+                    </div>
+                    <div className="sk-trf-chip-qty">
+                      {live ? after : base}
+                      {live && <span className={`delta ${isSrc ? 'down' : 'up'}`}>{isSrc ? '−' : '+'}{qtyNum}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Source → (inverser) → Destination */}
+            <div className="sk-trf-route">
               <div>
-                <label style={{ display: 'block', fontWeight: 600, fontSize: '0.8rem', marginBottom: 4 }}>Depuis (source)</label>
-                <select value={src ?? ''} onChange={e => setSrc(parseInt(e.target.value, 10))}
-                  style={{ width: '100%', padding: '10px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: '0.85rem', background: '#fff' }}>
+                <label>Depuis (source)</label>
+                <select className="sk-trf-select" value={src ?? ''} onChange={e => setSrc(parseInt(e.target.value, 10))}>
                   {warehouses.map(w => <option key={w.id} value={w.id}>{whLabel(w)}</option>)}
                 </select>
               </div>
-              <FiArrowRight size={18} style={{ color: '#94a3b8', marginBottom: 10 }} />
+              <button type="button" className="sk-trf-swap" title="Inverser source et destination" onClick={swap}>
+                <FiRepeat size={15} />
+              </button>
               <div>
-                <label style={{ display: 'block', fontWeight: 600, fontSize: '0.8rem', marginBottom: 4 }}>Vers (destination)</label>
-                <select value={dst ?? ''} onChange={e => setDst(parseInt(e.target.value, 10))}
-                  style={{ width: '100%', padding: '10px', borderRadius: 8, border: `1px solid ${sameWh ? '#dc2626' : '#d1d5db'}`, fontSize: '0.85rem', background: '#fff' }}>
+                <label>Vers (destination)</label>
+                <select className="sk-trf-select" style={{ borderColor: sameWh ? '#dc2626' : undefined }} value={dst ?? ''} onChange={e => setDst(parseInt(e.target.value, 10))}>
                   {warehouses.map(w => <option key={w.id} value={w.id}>{whLabel(w)}</option>)}
                 </select>
               </div>
@@ -129,32 +165,47 @@ export default function StockTransferModal({ product, onClose, onDone }) {
               </div>
             )}
 
-            <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>
+            {/* Quantité : stepper + « Tout » */}
+            <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', margin: '12px 0 4px' }}>
               Quantité à transférer
               <span style={{ fontWeight: 400, color: '#64748b' }}> · {available} disponible(s) en source</span>
             </label>
-            <input
-              type="number" min={1} max={available || undefined} value={qty} autoFocus
-              onChange={e => setQty(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && canSubmit) submit(); }}
-              style={{ width: '100%', padding: '12px 14px', borderRadius: 10, border: `2px solid ${overStock ? '#dc2626' : '#1e40af'}`, fontSize: '1.3rem', fontWeight: 700, textAlign: 'center', marginBottom: overStock ? 4 : 10 }}
-            />
+            <div className="sk-trf-qty-row">
+              <div className={`sk-trf-stepper${overStock ? ' over' : ''}`}>
+                <button type="button" className="sk-trf-step-btn" title="Diminuer" disabled={!qtyNum || qtyNum <= 1} onClick={() => setQtyClamped((qtyNum || 1) - 1)}>
+                  <FiMinus size={16} />
+                </button>
+                <input
+                  className="sk-trf-qty-input"
+                  type="number" min={1} max={available || undefined} value={qty} autoFocus
+                  onChange={e => setQty(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && canSubmit) submit(); }}
+                />
+                <button type="button" className="sk-trf-step-btn" title="Augmenter" disabled={available > 0 && (qtyNum || 0) >= available} onClick={() => setQtyClamped((qtyNum || 0) + 1)}>
+                  <FiPlus size={16} />
+                </button>
+              </div>
+              <button type="button" className="sk-trf-max" disabled={available <= 0} onClick={() => setQty(String(available))}>
+                Tout ({available})
+              </button>
+            </div>
             {overStock && (
-              <div style={{ color: '#b91c1c', fontSize: '0.8rem', marginBottom: 10 }}>
+              <div style={{ color: '#b91c1c', fontSize: '0.8rem', marginTop: 6 }}>
                 Quantité supérieure au stock disponible ({available}).
               </div>
             )}
 
-            {/* Aperçu du résultat */}
-            {!invalidQty && !overStock && !sameWh && srcWh && dstWh && (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginBottom: 12, fontSize: '0.85rem', color: '#334155' }}>
-                <span>{srcWh.ref}: <strong>{available}</strong> → <strong>{available - qtyNum}</strong></span>
-                <FiArrowRight size={14} style={{ color: '#94a3b8' }} />
-                <span>{dstWh.ref}: <strong>{Number(dstWh.reel ?? 0)}</strong> → <strong>{Number(dstWh.reel ?? 0) + qtyNum}</strong></span>
+            {/* Récapitulatif compact source → destination */}
+            {showDelta && srcWh && dstWh && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, margin: '12px 0 0', fontSize: '0.85rem', color: '#334155', flexWrap: 'wrap' }}>
+                <strong>{qtyNum}</strong> ex.&nbsp;: {srcWh.ref}
+                <FiArrowRight size={13} style={{ color: '#94a3b8' }} />
+                {dstWh.ref}
               </div>
             )}
 
-            <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>Motif (facultatif)</label>
+            {/* Motif */}
+            <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', margin: '14px 0 4px' }}>Motif (facultatif)</label>
             <input
               type="text" value={reason} maxLength={60}
               onChange={e => setReason(e.target.value)}
@@ -167,7 +218,7 @@ export default function StockTransferModal({ product, onClose, onDone }) {
         <div className="ct-modal-actions">
           <button className="ct-btn ct-btn-outline" onClick={() => onClose?.()} disabled={saving}>Annuler</button>
           <button className="ct-btn ct-btn-primary" onClick={submit} disabled={!canSubmit}>
-            {saving ? 'Transfert…' : 'Transférer'}
+            {saving ? 'Transfert…' : showDelta ? `Transférer ${qtyNum} ex.` : 'Transférer'}
           </button>
         </div>
       </div>

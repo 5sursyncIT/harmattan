@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { getStockProducts } from '../../../api/admin';
-import { FiArrowLeft, FiSearch, FiRepeat, FiPackage, FiAlertCircle } from 'react-icons/fi';
+import { FiArrowLeft, FiSearch, FiRepeat, FiPackage, FiAlertCircle, FiClock } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import StockNav from './StockNav';
 import StockTransferModal from './StockTransferModal';
+import StockTransferHistory from './StockTransferHistory';
 import './Stock.css';
 
 /**
@@ -13,6 +14,8 @@ import './Stock.css';
  * destination + quantité. Pour la circulation de livres réserve ↔ rayon ↔ dépôts.
  */
 export default function StockTransferPanel() {
+  const [view, setView] = useState('transfer'); // 'transfer' | 'history'
+  const [refreshKey, setRefreshKey] = useState(0);
   const [q, setQ] = useState('');
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -44,6 +47,29 @@ export default function StockTransferPanel() {
 
       <StockNav />
 
+      {/* Bascule : effectuer un transfert / consulter l'historique */}
+      <div style={{ display: 'inline-flex', background: '#f1f5f9', borderRadius: 10, padding: 4, gap: 4, marginBottom: 16 }}>
+        {[
+          { k: 'transfer', label: 'Nouveau transfert', icon: <FiRepeat size={14} /> },
+          { k: 'history', label: 'Historique', icon: <FiClock size={14} /> },
+        ].map(t => (
+          <button key={t.k} onClick={() => setView(t.k)}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 16px', borderRadius: 8,
+              border: 'none', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700,
+              background: view === t.k ? '#fff' : 'transparent',
+              color: view === t.k ? '#10531a' : '#64748b',
+              boxShadow: view === t.k ? '0 1px 3px rgba(0,0,0,.1)' : 'none',
+            }}>
+            {t.icon} {t.label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'history' ? (
+        <StockTransferHistory refreshKey={refreshKey} />
+      ) : (
+      <>
       <p style={{ color: '#64748b', fontSize: '0.88rem', marginTop: 0 }}>
         Cherchez un titre, puis déplacez des exemplaires d'un <strong>entrepôt</strong> à un autre (réserve, rayon, dépôt…). Le stock total reste inchangé.
       </p>
@@ -72,40 +98,58 @@ export default function StockTransferPanel() {
           <p style={{ fontWeight: 600 }}>Aucun produit pour « {q} »</p>
         </div>
       ) : (
-        <div className="sk-table-wrap">
-          <table className="sk-table">
-            <thead>
-              <tr>
-                <th>Réf.</th>
-                <th>Titre</th>
-                <th style={{ textAlign: 'center' }}>Stock total</th>
-                <th style={{ width: 130 }}>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {products.map(p => (
-                <tr key={p.product_id}>
-                  <td className="mono">{p.ref}</td>
-                  <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</td>
-                  <td style={{ textAlign: 'center', fontWeight: 700, color: p.stock <= 0 ? '#dc2626' : p.stock < 5 ? '#f59e0b' : '#0f172a' }}>{p.stock}</td>
-                  <td>
-                    <button onClick={() => setTransfer(p)} className="sk-alert-btn"
-                      style={{ display: 'flex', alignItems: 'center', gap: 5, color: '#1e40af', borderColor: '#bfdbfe', background: '#eff6ff', fontSize: '0.78rem' }}>
-                      <FiRepeat size={12} /> Transférer
-                    </button>
-                  </td>
+        <>
+          <div style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 8px' }}>
+            {products.length} titre{products.length > 1 ? 's' : ''} · cliquez une ligne pour transférer
+          </div>
+          <div className="sk-table-wrap">
+            <table className="sk-table">
+              <thead>
+                <tr>
+                  <th>Réf.</th>
+                  <th>Titre</th>
+                  <th style={{ textAlign: 'center' }}>Stock total</th>
+                  <th style={{ width: 130 }}>Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {products.map(p => {
+                  const noStock = p.stock <= 0;
+                  const badge = noStock ? 'zero' : p.stock < 5 ? 'low' : 'ok';
+                  return (
+                    <tr key={p.product_id}
+                      className={noStock ? '' : 'sk-trf-clickable'}
+                      onClick={noStock ? undefined : () => setTransfer(p)}>
+                      <td className="mono">{p.ref}</td>
+                      <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</td>
+                      <td style={{ textAlign: 'center' }}>
+                        <span className={`sk-trf-stock-badge ${badge}`}>{p.stock}</span>
+                      </td>
+                      <td onClick={e => e.stopPropagation()}>
+                        <button onClick={() => setTransfer(p)} disabled={noStock} className="sk-alert-btn"
+                          title={noStock ? 'Aucun exemplaire à déplacer' : 'Transférer entre entrepôts'}
+                          style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: '0.78rem',
+                            color: noStock ? '#94a3b8' : '#1e40af', borderColor: noStock ? '#e2e8f0' : '#bfdbfe',
+                            background: noStock ? '#f8fafc' : '#eff6ff', cursor: noStock ? 'not-allowed' : 'pointer' }}>
+                          <FiRepeat size={12} /> Transférer
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      </>
       )}
 
       {transfer && (
         <StockTransferModal
           product={transfer}
           onClose={() => setTransfer(null)}
-          onDone={() => { /* le stock total ne change pas : rien à rafraîchir ici */ }}
+          onDone={() => setRefreshKey(k => k + 1)}
         />
       )}
     </div>

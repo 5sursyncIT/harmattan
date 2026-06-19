@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FiFileText, FiSearch, FiX, FiMail, FiPhone, FiMapPin, FiDownload,
   FiClock, FiAlertCircle, FiChevronLeft, FiChevronRight,
-  FiPlus, FiTrash2, FiUser, FiSave,
+  FiPlus, FiTrash2, FiUser, FiUserPlus, FiSave,
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import Loader from '../../../components/common/Loader';
@@ -12,6 +12,7 @@ import {
   createPropal, searchPropalClients, searchPropalProducts,
   listPosQuotes, deletePosQuote,
 } from '../../../api/propals';
+import { createAdminSociete } from '../../../api/admin';
 import POSQuoteReceipt from '../../../components/pos/POSQuoteReceipt';
 import useAdminRole from '../../../hooks/useAdminRole';
 import './Contracts.css';
@@ -128,6 +129,11 @@ function CreatePropalModal({ onClose, onCreated }) {
   const [note, setNote] = useState('');
   const [validity, setValidity] = useState(30);
   const [saving, setSaving] = useState(false);
+  // Création d'un client à la volée (pour un nouveau client sans fiche).
+  const [showCreateClient, setShowCreateClient] = useState(false);
+  const [isCompany, setIsCompany] = useState(false);
+  const [nc, setNc] = useState({ name: '', firstname: '', phone: '', email: '' });
+  const [creatingClient, setCreatingClient] = useState(false);
   const timers = useRef({});
 
   useEffect(() => {
@@ -147,6 +153,41 @@ function CreatePropalModal({ onClose, onCreated }) {
     debounce('client', () => searchPropalClients(q).then(r => setClientResults(r.data.clients || [])).catch(() => {}));
   };
   const pickClient = (c) => { setClient(c); setClientResults([]); setClientQuery(''); };
+
+  const ncSet = (k, v) => setNc(prev => ({ ...prev, [k]: v }));
+  const createClient = async () => {
+    const name = nc.name.trim();
+    if (!name) return toast.error('Nom requis');
+    if (!isCompany && !nc.firstname.trim()) return toast.error('Prénom requis pour un particulier');
+    if (!nc.phone.trim() && !nc.email.trim()) return toast.error('Téléphone ou email requis');
+    setCreatingClient(true);
+    try {
+      const res = await createAdminSociete({
+        name,
+        firstname: isCompany ? '' : nc.firstname.trim(),
+        phone: nc.phone,
+        email: nc.email,
+        is_company: isCompany,
+        client: 1,
+      });
+      toast.success(`Client « ${res.data.name} » créé`);
+      pickClient({ id: res.data.id, name: res.data.name });
+      setShowCreateClient(false);
+      setNc({ name: '', firstname: '', phone: '', email: '' });
+    } catch (err) {
+      // Le tiers existe déjà (même email/téléphone) → on le réutilise au lieu de bloquer.
+      const existing = err.response?.data?.existing;
+      if (err.response?.status === 409 && existing?.id) {
+        pickClient({ id: existing.id, name: existing.name });
+        setShowCreateClient(false);
+        toast(`Client existant réutilisé : « ${existing.name} »`);
+      } else {
+        toast.error(err.response?.data?.error || 'Erreur création client');
+      }
+    } finally {
+      setCreatingClient(false);
+    }
+  };
 
   const onProductSearch = (q) => {
     setProductQuery(q);
@@ -206,6 +247,50 @@ function CreatePropalModal({ onClose, onCreated }) {
             <span style={{ fontWeight: 600 }}><FiUser size={14} style={{ verticalAlign: -2, marginRight: 6 }} />{client.name}{client.town ? ` · ${client.town}` : ''}</span>
             <button className="ct-btn-ghost" onClick={() => setClient(null)} title="Changer"><FiX size={16} /></button>
           </div>
+        ) : showCreateClient ? (
+          <div style={{ margin: '6px 0 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 14 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+              {[{ k: false, l: 'Particulier' }, { k: true, l: 'Entreprise' }].map(t => (
+                <button key={t.l} type="button" onClick={() => setIsCompany(t.k)}
+                  style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
+                    border: `1px solid ${isCompany === t.k ? '#10531a' : '#d1d5db'}`,
+                    background: isCompany === t.k ? '#10531a' : '#fff', color: isCompany === t.k ? '#fff' : '#475569' }}>
+                  {t.l}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isCompany ? '1fr' : '1fr 1fr', gap: 10 }}>
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#334155' }}>{isCompany ? 'Raison sociale *' : 'Nom *'}</label>
+                <input value={nc.name} onChange={e => ncSet('name', e.target.value)} autoFocus
+                  placeholder={isCompany ? "Nom de l'entreprise" : 'Nom de famille'} style={{ ...inputStyle, marginTop: 4 }} />
+              </div>
+              {!isCompany && (
+                <div>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#334155' }}>Prénom *</label>
+                  <input value={nc.firstname} onChange={e => ncSet('firstname', e.target.value)}
+                    placeholder="Prénom" style={{ ...inputStyle, marginTop: 4 }} />
+                </div>
+              )}
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#334155' }}>Téléphone {!nc.email.trim() ? '*' : ''}</label>
+                <input type="tel" value={nc.phone} onChange={e => ncSet('phone', e.target.value)}
+                  placeholder="77 000 00 00" style={{ ...inputStyle, marginTop: 4 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#334155' }}>Email {!nc.phone.trim() ? '*' : ''}</label>
+                <input type="email" value={nc.email} onChange={e => ncSet('email', e.target.value)}
+                  placeholder="email@exemple.com" style={{ ...inputStyle, marginTop: 4 }} />
+              </div>
+            </div>
+            <p style={{ fontSize: '0.78rem', color: '#94a3b8', margin: '8px 0 10px' }}>Téléphone ou email obligatoire.</p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button type="button" className="ct-btn ct-btn-outline" onClick={() => setShowCreateClient(false)} disabled={creatingClient}>Retour</button>
+              <button type="button" className="ct-btn ct-btn-primary" onClick={createClient} disabled={creatingClient}>
+                <FiUserPlus size={14} /> {creatingClient ? 'Création...' : 'Créer et sélectionner'}
+              </button>
+            </div>
+          </div>
         ) : (
           <div style={{ position: 'relative', margin: '6px 0 14px' }}>
             <FiSearch size={15} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
@@ -220,6 +305,10 @@ function CreatePropalModal({ onClose, onCreated }) {
                 ))}
               </ResultsBox>
             )}
+            <button type="button" onClick={() => setShowCreateClient(true)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 8, padding: 0, background: 'none', border: 'none', color: '#10531a', fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer' }}>
+              <FiUserPlus size={15} /> Nouveau client
+            </button>
           </div>
         )}
 

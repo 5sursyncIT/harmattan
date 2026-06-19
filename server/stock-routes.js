@@ -793,6 +793,106 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // HISTORIQUE DES TRANSFERTS
+  // Source de vérité : llx_stock_mouvement. Un transfert = DEUX mouvements
+  // (SORTIE value<0 + ENTRÉE value>0) partageant le même `inventorycode` :
+  //   • natif Dolibarr → inventorycode = horodatage (ex. 20260616083313)
+  //   • via cette app  → inventorycode = code TRF-… (movementcode)
+  // On ré-apparie les jambes par (inventorycode, produit) en filtrant sur le
+  // libellé « Transfert… » (exclut les ajustements ENTREE/SORTIE qui partagent
+  // un même code). L'auteur = utilisateur Dolibarr du mouvement, avec repli sur
+  // le journal app (admin_activity_log) pour les transferts faits via l'app.
+  // Les transferts annulés (code …-RB) sont exclus.
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/transfers', auth, async (req, res) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+      const offset = (page - 1) * limit;
+      const term = String(req.query.q || '').trim();
+
+      // Regroupe les 2 mouvements d'un même transfert par code + produit.
+      const grouped = `
+        SELECT m.inventorycode AS code, m.fk_product AS fk_product,
+               MAX(ABS(m.value)) AS qty, MAX(m.datem) AS date,
+               MAX(CASE WHEN m.value < 0 THEN m.fk_entrepot END) AS src_id,
+               MAX(CASE WHEN m.value > 0 THEN m.fk_entrepot END) AS dst_id,
+               MAX(m.label) AS label, MAX(m.fk_user_author) AS user_id
+        FROM llx_stock_mouvement m
+        WHERE m.label LIKE 'Transfert%'
+          AND m.inventorycode IS NOT NULL AND m.inventorycode <> ''
+          AND m.inventorycode NOT LIKE '%-RB'
+        GROUP BY m.inventorycode, m.fk_product
+        HAVING src_id IS NOT NULL AND dst_id IS NOT NULL`;
+
+      const params = [];
+      let whereSql = '';
+      if (term) {
+        const like = `%${term}%`;
+        whereSql = 'WHERE (p.ref LIKE ? OR p.label LIKE ? OR ps.ref LIKE ? OR pd.ref LIKE ? OR t.code LIKE ?)';
+        params.push(like, like, like, like, like);
+      }
+
+      const base = `
+        FROM ( ${grouped} ) t
+        JOIN llx_product p ON p.rowid = t.fk_product
+        LEFT JOIN llx_entrepot ps ON ps.rowid = t.src_id
+        LEFT JOIN llx_entrepot pd ON pd.rowid = t.dst_id
+        LEFT JOIN llx_user u ON u.rowid = t.user_id
+        ${whereSql}`;
+
+      const [[{ total }]] = await dolibarrPool.query(`SELECT COUNT(*) AS total ${base}`, params);
+
+      const [rows] = await dolibarrPool.query(
+        `SELECT t.code, t.date, t.qty, t.fk_product AS product_id, t.label,
+                p.ref AS product_ref, p.label AS product_label,
+                ps.ref AS source_ref, pd.ref AS dest_ref,
+                u.firstname AS u_first, u.lastname AS u_last, u.login AS u_login
+         ${base}
+         ORDER BY t.date DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limit, offset]
+      );
+
+      // Auteur app depuis le journal d'activité (clé = code [TRF-…]).
+      const logRows = db.prepare(
+        "SELECT admin_username, details FROM admin_activity_log WHERE action = 'stock_transfer'"
+      ).all();
+      const byCode = new Map();
+      for (const r of logRows) {
+        const m = /\[(TRF-[A-Z0-9-]+)\]/.exec(r.details || '');
+        if (m && !byCode.has(m[1])) byCode.set(m[1], r.admin_username);
+      }
+
+      const transfers = rows.map(r => {
+        // Motif = partie après « — » dans le libellé (transferts app uniquement).
+        const dash = (r.label || '').indexOf(' — ');
+        const reason = dash >= 0 ? r.label.slice(dash + 3).trim() : '';
+        const dolUser = [r.u_first, r.u_last].filter(Boolean).join(' ').trim() || r.u_login || null;
+        return {
+          id: `${r.code}-${r.product_id}`,
+          code: r.code,
+          date: r.date,
+          product_id: r.product_id,
+          product_ref: r.product_ref,
+          product_label: r.product_label,
+          qty: Number(r.qty),
+          source_ref: r.source_ref,
+          dest_ref: r.dest_ref,
+          reason,
+          user: byCode.get(r.code) || dolUser,
+        };
+      });
+
+      res.json({ transfers, total, pages: Math.max(1, Math.ceil(total / limit)) });
+    } catch (err) {
+      console.error('[STOCK] transfers history error:', err.message);
+      res.status(500).json({ error: "Erreur chargement de l'historique des transferts" });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // SUPPLIER ORDER (titre externe → commande fournisseur Dolibarr)
   // ═══════════════════════════════════════════════════════════
 
