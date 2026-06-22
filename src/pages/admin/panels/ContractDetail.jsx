@@ -731,7 +731,7 @@ export default function ContractDetail() {
         <ContractQuoteModal
           contract={contract}
           onClose={() => setShowQuoteModal(false)}
-          onCreated={loadQuotes}
+          onCreated={() => { loadQuotes(); load(); }}
         />
       )}
 

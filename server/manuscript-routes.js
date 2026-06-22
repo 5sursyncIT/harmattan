@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
-import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS } from './manuscript-workflow.js';
+import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS, logManuscriptEvent } from './manuscript-workflow.js';
 import { notifyTransition, sendAssignmentEmail } from './manuscript-emails.js';
 import { createManuscriptMulter } from './author-routes.js';
 import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS } from './intervenants.js';
@@ -171,7 +171,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     res.json({ stages: MANUSCRIPT_STAGES, labels: STAGE_LABELS });
   });
 
-  router.get('/manuscripts/v2/:id', auth, (req, res) => {
+  router.get('/manuscripts/v2/:id', auth, async (req, res) => {
     const manuscript = db.prepare(
       `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name, a.email AS author_email, a.phone AS author_phone
        FROM manuscripts m JOIN authors a ON a.id = m.author_id WHERE m.id = ?`
@@ -216,6 +216,13 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         .map((s) => ({ ...s, stage_label: STAGE_LABELS[s.current_stage] || s.current_stage }));
     }
 
+    // Résumé du contrat lié (+ devis) pour la carte « Contrat & Devis ».
+    let contract = null;
+    if (manuscript.contract_id && hooks.getContractSummary) {
+      try { contract = await hooks.getContractSummary(manuscript.contract_id); }
+      catch (e) { console.warn('[WORKFLOW] contract summary error:', e.message); }
+    }
+
     res.json({
       manuscript: describeManuscript(manuscript),
       files,
@@ -228,7 +235,42 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       evaluations,
       validations,
       series,
+      contract,
     });
+  });
+
+  // ─── CONTRAT : créer / rattacher depuis la fiche manuscrit ───
+  // Crée un contrat brouillon Dolibarr lié au manuscrit (auto-création réparée).
+  router.post('/manuscripts/v2/:id/create-contract', auth, editorOnly, csrfProtection, async (req, res) => {
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (manuscript.contract_id) return res.status(409).json({ error: 'Un contrat est déjà rattaché à ce manuscrit' });
+    if (!hooks.onCreateContract) return res.status(503).json({ error: 'Création de contrat indisponible' });
+    try {
+      const result = await hooks.onCreateContract(manuscript);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('[WORKFLOW] create-contract error:', err.message);
+      res.status(502).json({ error: err.message || 'Échec de la création du contrat' });
+    }
+  });
+
+  // Rattache un contrat Dolibarr EXISTANT (créé à part) au manuscrit.
+  router.post('/manuscripts/v2/:id/link-contract', auth, editorOnly, csrfProtection, async (req, res) => {
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (manuscript.contract_id) return res.status(409).json({ error: 'Un contrat est déjà rattaché à ce manuscrit' });
+    const contractId = parseInt(req.body?.contract_id, 10);
+    if (!contractId) return res.status(400).json({ error: 'Contrat à rattacher requis' });
+    if (!hooks.onLinkContract) return res.status(503).json({ error: 'Rattachement indisponible' });
+    try {
+      const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+      const result = await hooks.onLinkContract(manuscript, contractId, actor);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('[WORKFLOW] link-contract error:', err.message);
+      res.status(400).json({ error: err.message || 'Échec du rattachement' });
+    }
   });
 
   // ─── MANUSCRITS ASSIGNÉS (dashboard par rôle) ────────────
@@ -313,6 +355,13 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       return r?.email ? { email: r.email, label: r.username } : null;
     };
 
+    const ROLE_LABELS = {
+      evaluateur: 'Évaluateur', correcteur: 'Correcteur', infographiste: 'Infographiste',
+      imprimeur: 'Imprimeur', editor: 'Éditeur de production',
+    };
+    const roleLabel = ROLE_LABELS[role] || role;
+    const wfActor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+
     // Applique l'assignation à un manuscrit + ses effets de bord (notifications,
     // transition auto évaluateur). Renvoie true si auto-transition déclenchée.
     const assignOne = (msId) => {
@@ -321,11 +370,13 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         .run(user_id || null, msId);
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(msId);
 
-      // Notifier l'ancien assigné de son retrait (si changement).
+      // Notifier l'ancien assigné de son retrait (si changement) + tracer la frise.
       if (before?.prev_id && before.prev_id !== user_id) {
         try {
           const prev = resolveRecipient(before.prev_id);
           if (prev) sendAssignmentEmail(transporter, manuscript, role, prev, siteUrl, 'unassigned');
+          logManuscriptEvent(db, msId, 'intervenant_unassigned', wfActor,
+            `${roleLabel} retiré : ${prev?.label || '#' + before.prev_id}`);
         } catch (err) { console.warn('[WORKFLOW] previous assignee notify error:', err.message); }
       }
 
@@ -336,6 +387,10 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         try {
           const next = resolveRecipient(user_id);
           if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
+          // Cas auto-transition évaluateur exclu : la transition « En évaluation »
+          // trace déjà l'affectation, inutile de la dédoubler.
+          logManuscriptEvent(db, msId, 'intervenant_assigned', wfActor,
+            `${roleLabel} : ${resolveRecipient(user_id)?.label || '#' + user_id}`);
         } catch (err) { console.warn('[WORKFLOW] new assignee notify error:', err.message); }
       }
 
@@ -419,6 +474,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
           `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
            VALUES (?, 'evaluation_report', 1, ?, ?, ?, ?, ?, ?)`
         ).run(manuscript.id, req.file.path, req.file.originalname, req.file.size || null, req.file.mimetype || null, req.admin.role, req.admin.id);
+        logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+          { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+          `Rapport de lecture — ${req.file.originalname}`);
       }
 
       const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
@@ -473,6 +531,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
          VALUES (?, 'correction', ?, ?, ?, ?, ?, ?, ?)`
       ).run(manuscript.id, version, req.file.path, req.file.originalname, req.file.size || null, req.file.mimetype || null, req.admin.role, req.admin.id);
+      logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+        { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+        `Document corrigé v${version} — ${req.file.originalname}`);
       res.json({ success: true, version });
     });
 
@@ -612,6 +673,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
          VALUES (?, 'cover_artwork', ?, ?, ?, ?, ?, ?, ?)`
       ).run(manuscript.id, version, req.file.path, req.file.originalname, req.file.size || null, req.file.mimetype || null, req.admin.role, req.admin.id);
+      logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+        { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+        `Visuel couverture v${version} — ${req.file.originalname}`);
       res.json({ success: true, version });
     });
 
@@ -633,6 +697,8 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       ).run(manuscript.id, version, req.file.path, req.file.originalname, req.file.size || null, req.file.mimetype || null, req.admin.role, req.admin.id);
 
       const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+      logManuscriptEvent(db, manuscript.id, 'file_uploaded', actor,
+        `BAT couverture v${version} — ${req.file.originalname}`);
       const updated = transition(db, manuscript.id, 'bat_author_review', actor, { note: 'BAT couverture soumis' });
       notifyTransition(db, transporter, updated, 'bat_author_review', actor, siteUrl);
       res.json({ success: true, version });

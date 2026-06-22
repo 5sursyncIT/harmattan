@@ -261,6 +261,21 @@ a.ct-card { text-decoration: none; color: inherit; }
 }
 .ct-field-error { font-size: 0.78rem; color: #ef4444; display: flex; align-items: center; gap: 4px; }
 
+/* Stepper « incrémenter / décrémenter » (ex. nombre d'exemplaires contractuels) */
+.ct-stepper { display: flex; align-items: stretch; gap: 6px; }
+.ct-stepper input {
+  flex: 1; min-width: 0; text-align: center; -moz-appearance: textfield;
+}
+.ct-stepper input::-webkit-outer-spin-button,
+.ct-stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.ct-stepper-btn {
+  flex: 0 0 auto; width: 42px; border: 2px solid #e5e7eb; border-radius: 8px;
+  background: #f8fafc; color: #374151; font-size: 1.2rem; font-weight: 700;
+  line-height: 1; cursor: pointer; transition: border-color 0.2s, background 0.2s;
+}
+.ct-stepper-btn:hover:not(:disabled) { border-color: var(--color-green-deep); background: #f1f5f9; }
+.ct-stepper-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
 /* ── Review Grid ──────────────────────────────────────── */
 .ct-review-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
 .ct-review-card { background: #f8fafc; border-radius: 10px; padding: 16px; }

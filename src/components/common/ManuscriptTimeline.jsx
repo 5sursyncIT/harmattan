@@ -1,4 +1,4 @@
-import { FiCheck, FiClock, FiFileText, FiAlertTriangle, FiSend, FiMail, FiTrash2, FiDollarSign } from 'react-icons/fi';
+import { FiCheck, FiClock, FiFileText, FiAlertTriangle, FiSend, FiMail, FiTrash2, FiDollarSign, FiCreditCard, FiDownload, FiUserPlus, FiUserMinus, FiUpload, FiHash, FiLink2 } from 'react-icons/fi';
 import './ManuscriptTimeline.css';
 
 const STAGE_ICONS = {
@@ -21,8 +21,18 @@ const STAGE_ICONS = {
   // Évènements informatifs (colonne `event`)
   quote_created: FiDollarSign,
   quote_sent: FiSend,
+  quote_paid: FiCreditCard,
   quote_deleted: FiTrash2,
-  contract_doc_sent: FiMail,
+  contract_doc_sent: FiDownload,
+  contract_sent: FiMail,
+  contract_deleted: FiTrash2,
+  contract_validated: FiCheck,
+  contract_linked: FiLink2,
+  isbn_assigned: FiHash,
+  intervenant_assigned: FiUserPlus,
+  intervenant_unassigned: FiUserMinus,
+  file_uploaded: FiUpload,
+  email_sent: FiMail,
 };
 
 function formatDate(iso) {

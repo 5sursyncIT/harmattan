@@ -8,6 +8,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync, createReadStream, readFileSync, statSync, rmSync, unlinkSync } from 'fs';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
+import { createAuthorNotification, sendTransitionEmail } from './manuscript-emails.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { makeAdminAuth } from './admin-auth.js';
 
@@ -312,25 +313,24 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
     )
   `);
 
-  // Admin auth middleware — vérifie session + rôle autorisé pour les contrats
-  const CONTRACT_ALLOWED_ROLES = ['super_admin', 'admin', 'editor'];
-  // Le comptable peut CRÉER et MODIFIER un contrat, ainsi que le VALIDER et
-  // TÉLÉCHARGER son PDF. Il n'a PAS les actions de cycle de vie sensibles
-  // (clôture, suppression, envoi en signature, export CSV) qui restent
-  // réservées aux profils éditoriaux via `auth`.
-  const CONTRACT_WRITE_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
-  // Validation + téléchargement du PDF : profils éditoriaux + comptable.
-  const CONTRACT_VALIDATE_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
-  // Lecture de navigation (fiches + devis de contribution) : inclut aussi le comptable.
-  const CONTRACT_READ_ROLES = [...CONTRACT_ALLOWED_ROLES, 'comptable'];
+  // Admin auth middleware — vérifie session + rôle autorisé pour les contrats.
+  // Le comptable a désormais l'accès COMPLET aux contrats, au même titre que les
+  // profils éditoriaux : création, modification, validation, clôture, suppression,
+  // envoi en signature et export CSV (CRUD complet + cycle de vie).
+  const CONTRACT_ALLOWED_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
+  // Création + modification, validation + téléchargement PDF, lecture de
+  // navigation : mêmes profils que le cycle de vie complet ci-dessus.
+  const CONTRACT_WRITE_ROLES = CONTRACT_ALLOWED_ROLES;
+  const CONTRACT_VALIDATE_ROLES = CONTRACT_ALLOWED_ROLES;
+  const CONTRACT_READ_ROLES = CONTRACT_ALLOWED_ROLES;
   // Réouverture d'un contrat validé en brouillon : action de correction
   // exceptionnelle, réservée aux seuls administrateurs (ni éditeur, ni comptable).
   const CONTRACT_REOPEN_ROLES = ['super_admin', 'admin'];
   const makeAuth = (allowedRoles) => makeAdminAuth(db, allowedRoles);
-  const auth = makeAuth(CONTRACT_ALLOWED_ROLES);    // cycle de vie sensible (clôture, suppression, signature, export)
-  const authWrite = makeAuth(CONTRACT_WRITE_ROLES); // création + modification (inclut le comptable)
-  const authValidate = makeAuth(CONTRACT_VALIDATE_ROLES); // validation + téléchargement PDF (inclut le comptable)
-  const authRead = makeAuth(CONTRACT_READ_ROLES);   // lecture de navigation (inclut le comptable)
+  const auth = makeAuth(CONTRACT_ALLOWED_ROLES);    // cycle de vie complet (clôture, suppression, signature, export)
+  const authWrite = makeAuth(CONTRACT_WRITE_ROLES); // création + modification
+  const authValidate = makeAuth(CONTRACT_VALIDATE_ROLES); // validation + téléchargement PDF
+  const authRead = makeAuth(CONTRACT_READ_ROLES);   // lecture de navigation
   const authReopen = makeAuth(CONTRACT_REOPEN_ROLES); // réouverture en brouillon (admins uniquement)
 
   // SQL filter sanitizer — UNIQUEMENT pour les valeurs interpolées dans un
@@ -957,6 +957,13 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'validate_contract', `Contrat ${detail.data.ref} validé`);
 
+      try {
+        const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(id);
+        if (ms) logManuscriptEvent(db, ms.id, 'contract_validated',
+          { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
+          `Contrat ${detail.data.ref} validé`);
+      } catch (e) { console.warn('Manuscript event (contract_validated) warning:', e.message); }
+
       // Génération automatique du document ODT+PDF juste après validation.
       // Bloquant (attendu avant la réponse) pour que le front trouve le document
       // dès le rechargement de la fiche. L'échec est logué mais ne fait pas échouer la validation.
@@ -1077,6 +1084,13 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'set_contract_isbn', `ISBN ${isbn} renseigné sur ${contract.ref}`);
+
+      try {
+        const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(id);
+        if (ms) logManuscriptEvent(db, ms.id, 'isbn_assigned',
+          { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
+          `ISBN ${isbn} — ${contract.ref}`);
+      } catch (e) { console.warn('Manuscript event (isbn_assigned) warning:', e.message); }
 
       res.json({
         success: true,
@@ -1234,6 +1248,18 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'send_signature', `Lien de signature envoyé pour ${ref} à ${email}`);
+
+      // Trace « contrat envoyé à l'auteur » sur la frise du manuscrit lié. Contrairement
+      // au téléchargement (GET /document), c'est un vrai envoi : on le journalise à
+      // chaque émission (un renvoi est une action volontaire et utile à tracer).
+      try {
+        const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(id);
+        if (ms) {
+          logManuscriptEvent(db, ms.id, 'contract_sent',
+            { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
+            `Lien de signature envoyé à ${email}`);
+        }
+      } catch (e) { console.warn('Manuscript event (contract_sent) warning:', e.message); }
 
       res.json({ success: true, email });
     } catch (err) {
@@ -1415,6 +1441,32 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         .run(req.admin.username, 'sign_contract_physical',
           `Signature manuscrite enregistrée pour ${contract.ref} (signataire: ${signerName}, le ${signedDate})`);
 
+      // Signature manuelle = nouvel état validé : on fait avancer IMMÉDIATEMENT le
+      // manuscrit lié (contract_pending → contract_signed → payment_pending), sans
+      // attendre le cron de polling 5 min, exactement comme une signature en ligne.
+      try {
+        const ms = db.prepare(
+          "SELECT * FROM manuscripts WHERE contract_id = ? AND current_stage = 'contract_pending'"
+        ).get(id);
+        if (ms) {
+          const siteUrl = process.env.SITE_URL || '';
+          const sysActor = { role: 'system', label: `signature manuelle (${req.admin.username})` };
+          const signed = wfTransition(db, ms.id, 'contract_signed', sysActor,
+            { note: `Signature manuscrite attestée — ${signerName}` });
+          const pending = wfTransition(db, ms.id, 'payment_pending', sysActor,
+            { note: 'Paiement attendu après signature' });
+          const author = db.prepare('SELECT id, email, firstname FROM authors WHERE id = ?').get(ms.author_id);
+          if (author) {
+            createAuthorNotification(db, signed, 'contract_signed', author, siteUrl);
+            createAuthorNotification(db, pending, 'payment_pending', author, siteUrl);
+            if (transporter && author.email) {
+              sendTransitionEmail(transporter, signed, 'contract_signed',
+                { type: 'author', email: author.email, firstname: author.firstname }, siteUrl);
+            }
+          }
+        }
+      } catch (advErr) { console.warn('[CONTRACTS] avancement manuscrit après signature warning:', advErr.message); }
+
       res.json({ success: true, method: 'manuscrite', signer_name: signerName, signed_date: signedDate, scan_hash: hash });
     } catch (err) {
       discardUpload();
@@ -1538,9 +1590,10 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'download_contract', `Téléchargement ${doc.name}`);
 
-      // Trace « document de contrat envoyé » sur la frise du manuscrit lié, une
+      // Trace « document de contrat téléchargé » sur la frise du manuscrit lié, une
       // seule fois : la route est appelée à chaque consultation du PDF, on ne
-      // veut pas répéter l'évènement à chaque ouverture.
+      // veut pas répéter l'évènement à chaque ouverture. L'envoi réel à l'auteur
+      // (e-mail du lien de signature) est tracé séparément via 'contract_sent'.
       try {
         const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(id);
         if (ms) {

@@ -59,10 +59,24 @@ export const STAGE_LABELS = {
  *   authorVisible : visible dans l'espace auteur (sinon réservé à l'admin).
  */
 export const MANUSCRIPT_EVENTS = {
-  quote_created:     { label: 'Devis généré',                authorVisible: false },
-  quote_sent:        { label: "Devis envoyé à l'auteur",     authorVisible: true },
-  quote_deleted:     { label: 'Devis supprimé',              authorVisible: false },
-  contract_doc_sent: { label: "Document de contrat envoyé",  authorVisible: true },
+  quote_created:     { label: 'Devis généré',                   authorVisible: false },
+  quote_sent:        { label: "Devis envoyé à l'auteur",        authorVisible: true },
+  quote_paid:        { label: 'Devis encaissé',                 authorVisible: false },
+  quote_deleted:     { label: 'Devis supprimé',                 authorVisible: false },
+  // Action interne : un admin récupère le PDF/ODT du contrat (route GET /document).
+  contract_doc_sent: { label: 'Document de contrat téléchargé', authorVisible: false },
+  // Vrai envoi à l'auteur : e-mail du lien de signature (route POST /send-signature).
+  contract_sent:     { label: "Contrat envoyé à l'auteur",      authorVisible: true },
+  contract_deleted:  { label: 'Contrat supprimé',               authorVisible: false },
+  contract_validated:{ label: 'Contrat validé',                 authorVisible: false },
+  contract_linked:   { label: 'Contrat rattaché',               authorVisible: false },
+  isbn_assigned:     { label: 'ISBN attribué',                  authorVisible: false },
+  // Interventions humaines & documents — traçabilité complète demandée par la
+  // direction (qui/quand). Réservés à l'admin (authorVisible:false).
+  intervenant_assigned:   { label: 'Intervenant affecté', authorVisible: false },
+  intervenant_unassigned: { label: 'Intervenant retiré',  authorVisible: false },
+  file_uploaded:          { label: 'Document déposé',     authorVisible: false },
+  email_sent:             { label: 'E-mail envoyé',       authorVisible: false },
 };
 
 export const STAGE_ACTORS = {

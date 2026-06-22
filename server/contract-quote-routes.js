@@ -111,10 +111,11 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     try { db.exec(`ALTER TABLE contract_quotes ADD COLUMN ${col}`); } catch { /* déjà présente */ }
   }
 
-  // Le comptable peut créer/consulter les devis de contribution, mais pas les supprimer
-  // (la suppression reste réservée aux rôles éditoriaux — cf. route DELETE).
+  // Le comptable a l'accès complet aux contrats (cf. contract-routes.js) : il peut
+  // donc créer/consulter, encaisser ET supprimer les devis de contribution, au même
+  // titre que les profils éditoriaux.
   const ALLOWED_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
-  const QUOTE_DELETE_ROLES = ['super_admin', 'admin', 'editor'];
+  const QUOTE_DELETE_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
   // L'encaissement (écriture comptable : facture + règlement) est réservé aux profils financiers.
   const QUOTE_PAY_ROLES = ['super_admin', 'admin', 'comptable'];
   const auth = makeAdminAuth(db, ALLOWED_ROLES);
@@ -175,7 +176,15 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
       const {
         recipient_title, recipient_name, book_title, book_pages, book_format,
         book_interior, book_paper, book_cover, book_price_eur, diffusion, items, discount_pct,
+        copies_qty,
       } = req.body;
+
+      // Nombre d'exemplaires contractuels retenu par la direction pour ce devis.
+      // `undefined` (anciens clients) → on ne touche pas au contrat ; sinon on borne
+      // à un entier >= 0 et on persiste plus bas (extrafield author_purchase_qty).
+      const copiesQty = copies_qty === undefined
+        ? null
+        : Math.max(0, parseInt(copies_qty) || 0);
 
       // Remise auteur (%) retenue pour ce devis : bornée [0,100], repli sur le défaut
       // si absente/invalide. Stockée pour mémoire — la ligne 4 encode déjà le prix remisé.
@@ -227,6 +236,23 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'create_quote', `Devis ${ref} (contrat #${contractId}) — total ${total} FCFA`);
+
+      // Persiste le nombre d'exemplaires contractuels choisi sur le contrat Dolibarr
+      // (extrafield author_purchase_qty) afin de pré-remplir les prochains devis.
+      // qty > 0 active aussi la clause d'achat ; qty = 0 la désactive. Best-effort :
+      // un échec de persistance ne doit pas casser la création du devis déjà enregistré.
+      if (copiesQty !== null) {
+        try {
+          await adminApi.put(`/contracts/${contractId}`, {
+            array_options: {
+              options_author_purchase_qty: copiesQty,
+              options_author_purchase_enabled: copiesQty > 0 ? 1 : 0,
+            },
+          });
+        } catch (e) {
+          console.warn('Persist author_purchase_qty warning:', e.response?.data?.error || e.message);
+        }
+      }
 
       // Trace sur la frise du manuscrit lié (ne bloque pas la création du devis)
       try {

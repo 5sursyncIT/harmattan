@@ -11,7 +11,7 @@
  */
 
 import { existsSync, statSync } from 'fs';
-import { STAGE_LABELS } from './manuscript-workflow.js';
+import { STAGE_LABELS, logManuscriptEvent } from './manuscript-workflow.js';
 import { createFileToken, pickFileForActor } from './manuscript-file-tokens.js';
 
 // Plafond raisonnable pour joindre un fichier directement à un email (les
@@ -650,6 +650,11 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
         email: author.email,
         firstname: author.firstname,
       }, siteUrl, authorAttachments);
+      // Trace l'envoi sur la frise (audit direction : preuve que l'auteur a été notifié).
+      try {
+        logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+          `« ${STAGE_LABELS[toStage] || toStage} » → auteur (${author.email})`);
+      } catch (e) { console.warn('[WORKFLOW] log email_sent (author) warning:', e.message); }
     }
   }
 
@@ -698,6 +703,10 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
           } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe intervenant:', err.message); }
         }
         sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl, attachments);
+        try {
+          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+            `Tâche « ${STAGE_LABELS[toStage] || toStage} » → ${intervenant.nom} (${intervenant.metier})`);
+        } catch (e) { console.warn('[WORKFLOW] log email_sent (intervenant) warning:', e.message); }
         notifiedContact = true;
       }
     } catch (err) {
@@ -756,6 +765,10 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
           role: 'admin',
           label: 'Administrateur',
         }, siteUrl);
+        try {
+          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+            `« ${STAGE_LABELS[toStage] || toStage} » → équipe (admins)`);
+        } catch (e) { void e; }
       }
     } catch (err) { /* fallback silencieux */ void err; }
   }
@@ -771,6 +784,10 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
         sendAccountantEvaluationEmail(transporter, {
           manuscript, authorName, accountantEmail, accountantName, siteUrl,
         });
+        try {
+          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+            `Élaboration contrat & devis → comptable (${accountantEmail})`);
+        } catch (e) { console.warn('[WORKFLOW] log email_sent (accountant) warning:', e.message); }
       } catch (err) { console.warn('[WORKFLOW] accountant notify error:', err.message); }
     }
   }

@@ -11,6 +11,8 @@ export const manuscriptsApi = {
   transition: (id, toStage, note, force = false) =>
     api.post(`/admin/manuscripts/v2/${id}/transition`, { to_stage: toStage, note, force }),
   markPaid: (id, note) => api.post(`/admin/manuscripts/v2/${id}/mark-paid`, { note }),
+  createContract: (id) => api.post(`/admin/manuscripts/v2/${id}/create-contract`),
+  linkContract: (id, contractId) => api.post(`/admin/manuscripts/v2/${id}/link-contract`, { contract_id: contractId }),
   downloadUrl: (manuscriptId, fileId) =>
     `/api/admin/manuscripts/v2/${manuscriptId}/files/${fileId}/download`,
   adminsByRole: (role) =>

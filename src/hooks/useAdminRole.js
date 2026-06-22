@@ -23,16 +23,15 @@ export default function useAdminRole() {
   return role;
 }
 
-// Rôles autorisés aux actions de CYCLE DE VIE SENSIBLES d'un contrat (clôture,
-// suppression, envoi en signature, export CSV). Le comptable n'en fait pas partie.
-export const CONTRACT_EDIT_ROLES = ['super_admin', 'admin', 'editor'];
+// Rôles autorisés à GÉRER les contrats, cycle de vie complet inclus (clôture,
+// suppression, envoi en signature, export CSV). Le comptable en fait désormais
+// partie, au même titre que les profils éditoriaux.
+export const CONTRACT_EDIT_ROLES = ['super_admin', 'admin', 'editor', 'comptable'];
 
-// Rôles autorisés à CRÉER et MODIFIER un contrat (création + édition des champs
-// d'un brouillon). Inclut le comptable, en plus des profils éditoriaux.
-export const CONTRACT_WRITE_ROLES = [...CONTRACT_EDIT_ROLES, 'comptable'];
-
-// Rôles autorisés à VALIDER un contrat et TÉLÉCHARGER son PDF. Inclut le comptable.
-export const CONTRACT_VALIDATE_ROLES = [...CONTRACT_EDIT_ROLES, 'comptable'];
+// Création + modification d'un contrat, et validation + téléchargement du PDF :
+// mêmes profils que ci-dessus (CRUD complet).
+export const CONTRACT_WRITE_ROLES = CONTRACT_EDIT_ROLES;
+export const CONTRACT_VALIDATE_ROLES = CONTRACT_EDIT_ROLES;
 
 // Rôles autorisés à ROUVRIR un contrat validé en brouillon (correction d'erreur
 // détectée après validation). Action exceptionnelle réservée aux seuls

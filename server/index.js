@@ -18,6 +18,7 @@ import mysql from 'mysql2/promise';
 import sharp from 'sharp';
 import axios from 'axios';
 import { dolibarrApi } from './dolibarr-client.js';
+import { adminApi } from './dolibarr-admin-client.js';
 import { fetchOrderDetail } from './order-detail.js';
 import { findExistingTier } from './tier-dedup.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
@@ -1012,7 +1013,7 @@ try {
 // ─── MANUSCRIPT WORKFLOW (admin) — monté APRÈS setupAdminRoutes
 // pour bénéficier du middleware RBAC global sur /api/admin
 import { createManuscriptRouter } from './manuscript-routes.js';
-import { transition as wfTransition } from './manuscript-workflow.js';
+import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
 import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences } from './manuscript-emails.js';
 import { ensureFileTokensSchema, createPublicFileRouter } from './manuscript-file-tokens.js';
 
@@ -1049,7 +1050,9 @@ async function createContractDraft(manuscript) {
       if (existing) {
         thirdpartyId = existing.id;
       } else {
-        const doliRes = await dolibarrApi.post('/thirdparties', {
+        // Écriture sensible → clé admin (DOLIBARR_ADMIN_API_KEY). La clé régulière
+        // n'a pas les droits de création de tiers/contrats (403 Insufficient rights).
+        const doliRes = await adminApi.post('/thirdparties', {
           name: `${author.firstname} ${author.lastname}`,
           email: author.email,
           phone: author.phone || '',
@@ -1072,7 +1075,9 @@ async function createContractDraft(manuscript) {
   const TEMPLATE_FILE = 'template_harmattan_2024';
   const modelPdf = `generic_contract_odt:/var/www/html/dolibarr/documents/doctemplates/contracts/${TEMPLATE_FILE}.odt`;
   try {
-    const contractRes = await dolibarrApi.post('/contracts', {
+    // Écriture sensible → clé admin (cf. POST /thirdparties ci-dessus) : la clé
+    // régulière renvoyait 403 'Forbidden: Insufficient rights' sur POST /contracts.
+    const contractRes = await adminApi.post('/contracts', {
       socid: parseInt(thirdpartyId, 10),
       date_contrat: Math.floor(Date.now() / 1000),
       model_pdf: modelPdf,
@@ -1117,6 +1122,75 @@ async function createContractDraft(manuscript) {
     console.error('[WORKFLOW] Contract create error:', err.response?.data || err.message);
     throw new Error('Échec création contrat Dolibarr');
   }
+}
+
+// Résumé du contrat lié (+ devis) pour affichage sur la fiche manuscrit.
+async function getContractSummary(contractId) {
+  if (!contractId) return null;
+  try {
+    const [[c]] = await dolibarrPool.query(
+      `SELECT c.rowid, c.ref, c.statut, c.signed_status, c.date_contrat,
+              ce.book_title, ce.book_isbn, ce.contract_type,
+              ce.signature_auteur_nom, ce.signature_auteur_date
+         FROM llx_contrat c
+         LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+        WHERE c.rowid = ?`, [contractId]
+    );
+    if (!c) return null;
+    const quotes = db.prepare(
+      'SELECT id, ref, total, status, invoice_ref FROM contract_quotes WHERE contract_id = ? ORDER BY id'
+    ).all(contractId);
+    const STATUS = { 0: 'Brouillon', 1: 'Validé', 2: 'Clôturé' };
+    const SIGNED = { 0: 'Non signé', 1: 'Envoyé en signature', 2: 'Signé', 9: 'Signé' };
+    return {
+      id: c.rowid, ref: c.ref, statut: c.statut,
+      status_label: STATUS[c.statut] ?? String(c.statut),
+      signed_status: c.signed_status,
+      signed_label: SIGNED[c.signed_status] ?? 'Inconnu',
+      book_title: c.book_title, book_isbn: c.book_isbn, contract_type: c.contract_type,
+      signer_name: c.signature_auteur_nom, signed_date: c.signature_auteur_date,
+      quotes,
+    };
+  } catch (e) { console.warn('[WORKFLOW] getContractSummary error:', e.message); return null; }
+}
+
+// Rattache un contrat Dolibarr EXISTANT à un manuscrit : crée le lien, stocke le
+// contract_id, fait avancer le manuscrit favorable vers « Contrat à signer », et
+// journalise sur la frise (rattachement + validé + devis existants).
+async function linkContractToManuscript(manuscript, contractId, actor) {
+  const cid = parseInt(contractId, 10);
+  if (!cid) throw new Error('Identifiant de contrat invalide');
+  const [[c]] = await dolibarrPool.query(
+    'SELECT rowid, ref, statut FROM llx_contrat WHERE rowid = ?', [cid]
+  );
+  if (!c) throw new Error('Contrat introuvable dans Dolibarr');
+  const other = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ? AND id <> ?').get(cid, manuscript.id);
+  if (other) throw new Error(`Ce contrat est déjà rattaché au manuscrit #${other.id}`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS contract_manuscript_links (
+    contract_id INTEGER, manuscript_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (contract_id, manuscript_id))`);
+  db.prepare('INSERT OR IGNORE INTO contract_manuscript_links (contract_id, manuscript_id) VALUES (?, ?)')
+    .run(cid, manuscript.id);
+
+  // Favorable → on avance à contract_pending (stocke le contract_id). Sinon, on se
+  // contente d'écrire le contract_id sans changer l'étape.
+  if (manuscript.current_stage === 'evaluation_positive') {
+    wfTransition(db, manuscript.id, 'contract_pending', actor,
+      { note: `Contrat ${c.ref} rattaché`, updates: { contract_id: cid } });
+  } else {
+    db.prepare("UPDATE manuscripts SET contract_id = ?, updated_at = datetime('now') WHERE id = ?").run(cid, manuscript.id);
+  }
+  logManuscriptEvent(db, manuscript.id, 'contract_linked', actor, `Contrat ${c.ref} rattaché (#${cid})`);
+  if (parseInt(c.statut) >= 1) {
+    logManuscriptEvent(db, manuscript.id, 'contract_validated', actor, `Contrat ${c.ref} validé`);
+  }
+  const quotes = db.prepare('SELECT ref, total FROM contract_quotes WHERE contract_id = ?').all(cid);
+  for (const q of quotes) {
+    logManuscriptEvent(db, manuscript.id, 'quote_created', actor,
+      `Devis ${q.ref} — ${Number(q.total || 0).toLocaleString('fr-FR')} FCFA (rattaché)`);
+  }
+  return { contract_id: cid, ref: c.ref, quotes_linked: quotes.length };
 }
 
 // Hook 2 : créer produit Dolibarr + MO d'impression à la préparation
@@ -1177,6 +1251,10 @@ try {
         }
       },
       onPrintPrepare: createPrintMO,
+      // Création/rattachement de contrat depuis la fiche manuscrit + résumé pour l'affichage.
+      onCreateContract: (manuscript) => createContractDraft(manuscript),
+      onLinkContract: (manuscript, contractId, actor) => linkContractToManuscript(manuscript, contractId, actor),
+      getContractSummary: (contractId) => getContractSummary(contractId),
     },
   });
   app.use('/api/admin', manuscriptRouter);

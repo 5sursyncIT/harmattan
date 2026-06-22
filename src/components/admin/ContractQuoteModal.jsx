@@ -87,6 +87,10 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     // Remise auteur (%) pré-remplie depuis le contrat mais librement modifiable
     // pour ce devis ; pilote la ligne 4 « Achat de N exemplaires ».
     discount_pct: purchaseDiscount,
+    // Nombre d'exemplaires contractuels — la direction garde la main dessus au
+    // moment du devis (incrémenter / décrémenter). Pré-rempli depuis le contrat
+    // (ou 50 par défaut) ; pilote la ligne 4 « Achat de N exemplaires ».
+    copies_qty: initialQty,
     diffusion: 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet',
     color: false,
   });
@@ -112,6 +116,10 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
   }, [submitting, onClose]);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  // Incrémente / décrémente le nombre d'exemplaires contractuels (jamais < 0).
+  const adjustCopies = (delta) => setForm(f => ({
+    ...f, copies_qty: Math.max(0, (parseInt(f.copies_qty) || 0) + delta),
+  }));
   const total = items.reduce((s, i) => s + (parseInt(i.price) || 0), 0);
 
   // Recalcul auto des items standards (1, 2, 4, 6) quand pages/prix/couleur changent.
@@ -122,12 +130,13 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
   useEffect(() => {
     const pages = parseInt(form.book_pages) || 0;
     const priceEur = parseFloat(form.book_price_eur) || 0;
+    const qty = Math.max(0, parseInt(form.copies_qty) || 0);
     setItems(prev => {
       const customs = prev.filter(i => i.id >= 100);
-      const next = buildDefaultItems({ pages, priceEur, qty: initialQty, color: form.color, discountPct: form.discount_pct });
+      const next = buildDefaultItems({ pages, priceEur, qty, color: form.color, discountPct: form.discount_pct });
       return [...next, ...customs];
     });
-  }, [form.book_pages, form.book_price_eur, form.color, form.discount_pct, initialQty]);
+  }, [form.book_pages, form.book_price_eur, form.color, form.discount_pct, form.copies_qty]);
 
   const updateItem = (idx, patch) => {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
@@ -159,6 +168,9 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
         book_cover: form.book_cover,
         book_price_eur: parseFloat(form.book_price_eur) || 0,
         discount_pct: Math.min(100, Math.max(0, parseFloat(form.discount_pct) || 0)),
+        // Nombre d'exemplaires contractuels retenu : persisté sur le contrat côté
+        // serveur (extrafield author_purchase_qty) pour piloter les prochains devis.
+        copies_qty: Math.max(0, parseInt(form.copies_qty) || 0),
         diffusion: form.diffusion,
         items: cleanItems,
       });
@@ -245,7 +257,7 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
               </select>
             </div>
           </div>
-          <div className="ct-form-row cols-2">
+          <div className="ct-form-row cols-3">
             <div className="ct-field">
               <label>Prix public (€)</label>
               <input type="number" step={0.5} value={form.book_price_eur} onChange={e => set('book_price_eur', e.target.value)} min={0} />
@@ -257,6 +269,20 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
                 onChange={e => set('discount_pct', e.target.value)} />
               <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
                 Sur le prix public — ligne « Achat de N exemplaires »
+              </span>
+            </div>
+            <div className="ct-field">
+              <label>Exemplaires contractuels</label>
+              <div className="ct-stepper">
+                <button type="button" className="ct-stepper-btn" onClick={() => adjustCopies(-1)}
+                  disabled={(parseInt(form.copies_qty) || 0) <= 0} aria-label="Retirer un exemplaire">−</button>
+                <input type="number" min={0} step={1} value={form.copies_qty}
+                  onChange={e => set('copies_qty', e.target.value)} aria-label="Nombre d'exemplaires contractuels" />
+                <button type="button" className="ct-stepper-btn" onClick={() => adjustCopies(1)}
+                  aria-label="Ajouter un exemplaire">+</button>
+              </div>
+              <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+                Quantité de la ligne « Achat de N exemplaires »
               </span>
             </div>
           </div>

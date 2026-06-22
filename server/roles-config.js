@@ -228,7 +228,7 @@ export const MODULE_PERMISSIONS = {
     deliveries: 'crud', consignments: 'crud', legal_deposits: 'crud', profile: 'rw',
   }),
   comptable: M({
-    dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', contracts: 'rw', profile: 'rw',
+    dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', contracts: 'crud', profile: 'rw',
   }),
   vendeur: M({
     pos: 'crud', profile: 'rw',

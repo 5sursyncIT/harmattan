@@ -57,20 +57,6 @@
       "link": "/catalogue",
       "btnPrimary": "Découvrir le catalogue",
       "isBanner": false
-    },
-    {
-      "id": 2,
-      "image": "/images/slider/slide-tissou.jpg",
-      "title": "Prix KEN BUGUL",
-      "link": "/catalogue",
-      "isBanner": true
-    },
-    {
-      "id": 3,
-      "image": "/images/slider/slide-helene.jpg",
-      "title": "Prix des lycéennes",
-      "link": "/catalogue",
-      "isBanner": true
     }
   ],
   "upcoming_books": [],

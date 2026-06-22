@@ -16,6 +16,7 @@
 import { Router } from 'express';
 import axios from 'axios';
 import { recordInvoicePayment } from './dolibarr-payments.js';
+import { logManuscriptEvent } from './manuscript-workflow.js';
 
 // Client Dolibarr avec clé admin (opérations d'écriture sur factures).
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -669,6 +670,23 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         after:  { fk_statut: after?.fk_statut, paye: after?.paye, total_amount: totalSplit, bank_account: bankAccount,
                   splits: splits.map(s => ({ method: s.method, amount: s.amount })), payment_ids: paymentIds },
       });
+
+      // Si cette facture est issue d'un devis de contribution (FICHEFAB) rattaché
+      // à un manuscrit, tracer l'encaissement sur la frise — quel que soit le point
+      // d'entrée (cette route générale comme la route dédiée /quotes/:id/pay).
+      try {
+        const q = db.prepare('SELECT contract_id, ref FROM contract_quotes WHERE dolibarr_invoice_id = ?').get(id);
+        if (q?.contract_id) {
+          const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(q.contract_id);
+          if (ms) {
+            const solded = after?.paye === 1 || Math.abs(remaining - totalSplit) < 0.01;
+            logManuscriptEvent(db, ms.id, 'quote_paid',
+              { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
+              `Devis ${q.ref} — encaissé ${totalSplit.toLocaleString('fr-FR')} FCFA (${solded ? 'soldé' : 'acompte'})`);
+          }
+        }
+      } catch (e) { console.warn('Manuscript event (quote_paid via invoice) warning:', e.message); }
+
       res.json({ success: true, payment_ids: paymentIds, total: totalSplit });
     } catch (err) {
       const msg = err.response?.data?.error?.message || err.message;
