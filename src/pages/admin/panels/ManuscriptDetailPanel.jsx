@@ -4,6 +4,7 @@ import { FiArrowLeft, FiDownload, FiUser, FiPlus, FiExternalLink, FiFileText, Fi
 import toast from 'react-hot-toast';
 import { manuscriptsApi, intervenantsApi } from '../../../api/manuscripts';
 import { getContracts, signContractPhysical, validateContract } from '../../../api/contracts';
+import useAdminRole from '../../../hooks/useAdminRole';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 import ManuscriptTimeline from '../../../components/common/ManuscriptTimeline';
@@ -39,6 +40,13 @@ const LEGACY_COL = {
 
 export default function ManuscriptDetailPanel() {
   const { id } = useParams();
+  // Actions « éditeur » (affecter des intervenants, créer/rattacher/signer un
+  // contrat, confirmer un paiement) : réservées côté backend à super_admin/admin/
+  // editor (editorOnly). Les autres profils qui ouvrent cette fiche (Production
+  // éditoriale, évaluateur, correcteur, imprimeur) la consultent en lecture seule
+  // — on masque donc ces boutons pour eux (sinon ils s'affichent mais renvoient 403).
+  const role = useAdminRole();
+  const canEditWorkflow = ['super_admin', 'admin', 'editor'].includes(role);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [assignModal, setAssignModal] = useState(null); // col name
@@ -236,7 +244,7 @@ export default function ManuscriptDetailPanel() {
         </div>
       )}
 
-      {manuscript.current_stage === 'payment_pending' && (
+      {manuscript.current_stage === 'payment_pending' && canEditWorkflow && (
         <div className="ms-action-banner">
           <h4>Paiement en attente</h4>
           <p>Confirmez le paiement pour déclencher la phase de correction.</p>
@@ -246,7 +254,7 @@ export default function ManuscriptDetailPanel() {
         </div>
       )}
 
-      {manuscript.current_stage === 'contract_pending' && (
+      {manuscript.current_stage === 'contract_pending' && canEditWorkflow && (
         <div className="ms-action-banner">
           <h4>Contrat à signer</h4>
           <p>Si le contrat a été signé sur papier, enregistrez la <strong>signature manuelle</strong> (scan du contrat signé obligatoire) pour valider l'état « Contrat signé ».</p>
@@ -332,7 +340,7 @@ export default function ManuscriptDetailPanel() {
                 <p style={{ color: '#6b7280' }}>Aucun contrat rattaché à ce manuscrit.</p>
                 {['submitted', 'in_evaluation', 'evaluation_negative'].includes(manuscript.current_stage) ? (
                   <small style={{ color: '#9ca3af' }}>Un contrat se crée après une évaluation favorable.</small>
-                ) : (
+                ) : canEditWorkflow ? (
                   <div className="ms-actions">
                     {manuscript.current_stage === 'evaluation_positive' && (
                       <button type="button" className="ms-btn ms-btn-primary" onClick={createContract} disabled={contractBusy}>
@@ -343,7 +351,7 @@ export default function ManuscriptDetailPanel() {
                       <FiLink2 style={{ verticalAlign: 'middle', marginRight: 6 }} />Rattacher un contrat existant
                     </button>
                   </div>
-                )}
+                ) : null}
               </>
             )}
           </div>
@@ -418,7 +426,7 @@ export default function ManuscriptDetailPanel() {
                   <div style={{ color: '#6b7280', fontSize: '0.78rem' }}>{ROLE_LABELS[col]}</div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span>{manuscript[col] ? (manuscript[`${col}_name`] || `#${manuscript[col]}`) : <em style={{ color: '#6b7280' }}>non assigné</em>}</span>
-                    <button type="button" className="ms-btn" onClick={() => openAssign(col)}>Modifier</button>
+                    {canEditWorkflow && <button type="button" className="ms-btn" onClick={() => openAssign(col)}>Modifier</button>}
                   </div>
                   {legacyVal && (
                     <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginTop: 2 }}>

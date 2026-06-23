@@ -5,7 +5,7 @@ import {
   FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck,
   FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiLayers,
   FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss, FiArchive,
-  FiTrendingDown, FiBookmark,
+  FiTrendingDown, FiBookmark, FiInbox,
 } from 'react-icons/fi';
 import { adminLogout, adminMe, getNotificationCounts, adminChangePassword } from '../../api/admin';
 import AdminLogin from './AdminLogin';
@@ -58,6 +58,7 @@ const NAV_GROUPS = [
       { path: 'pos', label: 'POS', icon: <FiMonitor />, roles: ['super_admin', 'admin'] },
       { path: 'tiers', label: 'Tiers', icon: <FiUsers />, roles: ['super_admin', 'admin', 'librarian', 'comptable', 'gestionnaire_stock'] },
       { path: 'orders', label: 'Commandes web', icon: <FiShoppingBag />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
+      { path: 'special-orders', label: 'Commandes spéciales', icon: <FiInbox />, roles: ['super_admin', 'admin', 'librarian', 'comptable', 'gestionnaire_stock'] },
       { path: 'devis', label: 'Devis', icon: <FiClipboard />, roles: ['super_admin', 'admin', 'comptable', 'librarian'] },
       { path: 'invoices', label: 'Factures', icon: <FiFileText />, roles: ['super_admin', 'admin', 'librarian', 'comptable'] },
       { path: 'deliveries', label: 'Bons de livraison', icon: <FiTruck />, roles: ['super_admin', 'admin', 'librarian', 'comptable', 'gestionnaire_stock'] },
@@ -98,7 +99,7 @@ function flattenTabs() {
 
 // Correspondance chemin de nav → clé de module (pour les surcharges de permission).
 // La plupart des chemins == clé de module ; seuls quelques-uns diffèrent.
-const NAV_MODULE_ALIASES = { '': 'dashboard', 'legal-deposits': 'legal_deposits', devis: 'propals' };
+const NAV_MODULE_ALIASES = { '': 'dashboard', 'legal-deposits': 'legal_deposits', devis: 'propals', 'special-orders': 'special_orders' };
 function navModuleKey(path) {
   return NAV_MODULE_ALIASES[path] || path;
 }

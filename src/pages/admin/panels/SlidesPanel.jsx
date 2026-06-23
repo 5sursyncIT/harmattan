@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getFullSiteConfig, updateSiteConfig, uploadSliderImage } from '../../../api/admin';
+import { getAdminSlides, updateAdminSlides, uploadSliderImage } from '../../../api/admin';
 import { FiTrash2, FiPlus, FiUpload, FiArrowUp, FiArrowDown } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
@@ -8,13 +8,13 @@ export default function SlidesPanel() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    getFullSiteConfig().then((res) => setSlides(res.data.hero_slides || [])).catch(() => {});
+    getAdminSlides().then((res) => setSlides(res.data.hero_slides || [])).catch(() => {});
   }, []);
 
   const save = async () => {
     setSaving(true);
     try {
-      await updateSiteConfig({ hero_slides: slides });
+      await updateAdminSlides(slides);
       toast.success('Bannières sauvegardées');
     } catch {
       toast.error('Erreur sauvegarde');

@@ -291,8 +291,15 @@ function validateContractData(data) {
   return errors;
 }
 
-export function createContractRouter({ db, dolibarrPool, csrfProtection, transporter }) {
+export function createContractRouter({ db, dolibarrPool, csrfProtection, transporter, overridesStore }) {
   const router = Router();
+
+  // Gate de surcharges de permissions (matrice super-admin). Les contrats sont
+  // montés hors /api/admin : ce gate arbitre une éventuelle surcharge sur le
+  // module « contracts » AVANT l'auth par-route (makeAdminAuth). Restriction →
+  // 403 ; octroi → req.rbacGranted (makeAdminAuth l'honore). Sans surcharge, le
+  // comportement de base (rôles autorisés ci-dessous) est inchangé.
+  if (overridesStore?.gate) router.use(overridesStore.gate);
 
   // Attestations de signature manuscrite (papier). Une ligne par contrat signé
   // physiquement : méthode, signataire, date de signature déclarée, scan archivé

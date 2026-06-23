@@ -186,3 +186,148 @@ export async function sendNewOrderNotificationToAdmin({ transporter, order, admi
     console.error('[MAIL] sendNewOrderNotificationToAdmin failed:', err.message);
   }
 }
+
+// ─── Commandes spéciales (livres indisponibles en stock) ─────────────────────
+// Coordonnées librairie pour l'invitation au retrait.
+const STORE_ADDRESS = '10 VDN, après le pont de Fann (à côté de la Pédiatrie 24), Sicap Karak, Dakar';
+const STORE_PHONE = '+221 33 825 98 58';
+
+function fmtDateLong(s) {
+  if (!s) return '';
+  const d = new Date(String(s).replace(' ', 'T'));
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+}
+
+// Contenu (titre/corps/sujet) par événement du cycle de vie d'une commande spéciale.
+function buildSpecialOrderEmail({ order, event, siteUrl }) {
+  const greet = `Bonjour ${escapeHtml(order.customer?.firstname || order.customer?.name || 'cher client')},`;
+  const balanceBlock = order.balance > 0
+    ? `<p style="margin:10px 0;padding:10px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;color:#92400e">
+         Solde restant à régler : <strong>${fmtPrice(order.balance)}</strong>${order.paid > 0 ? ` (déjà réglé : ${fmtPrice(order.paid)} sur ${fmtPrice(order.total)})` : ''}
+       </p>`
+    : (order.total > 0
+      ? `<p style="margin:10px 0;color:#166534"><strong>Commande réglée intégralement.</strong></p>` : '');
+  const delay = order.expected_date ? fmtDateLong(order.expected_date) : (order.delay_estimate || '');
+  const ref = order.ref ? `<p style="color:#6b7280">Référence : <strong>${escapeHtml(order.ref)}</strong></p>` : '';
+  const trackingUrl = siteUrl ? `${siteUrl}/suivi-commande` : null;
+
+  switch (event) {
+    case 'order_confirmation':
+      return {
+        subject: `Commande spéciale ${order.ref || ''} enregistrée — ${SITE_NAME}`.trim(),
+        title: 'Votre commande spéciale est enregistrée',
+        body: `${greet}
+          <p>Nous avons bien enregistré votre demande pour le(s) ouvrage(s) ci-dessous, actuellement indisponible(s) en stock. Nous lançons les démarches pour vous le(s) procurer.</p>
+          ${itemsHtml(order.items)}
+          <p style="font-size:16px;font-weight:700;color:#111827">Total : ${fmtPrice(order.total)}</p>
+          ${balanceBlock}
+          ${delay ? `<p style="color:#6b7280">Disponibilité estimée : <strong>${escapeHtml(delay)}</strong></p>` : ''}
+          ${ref}
+          <p>Nous vous tiendrons informé(e) à chaque étape jusqu'à la mise à disposition de votre commande.</p>`,
+        ctaUrl: trackingUrl, ctaLabel: 'Suivre ma commande',
+      };
+    case 'validated':
+      return {
+        subject: `Commande spéciale ${order.ref || ''} validée — ${SITE_NAME}`.trim(),
+        title: 'Votre commande est validée',
+        body: `${greet}
+          <p>Votre commande spéciale <strong>${escapeHtml(order.ref || '')}</strong> a été validée et transmise à notre service d'approvisionnement.</p>
+          ${delay ? `<p style="color:#6b7280">Disponibilité estimée : <strong>${escapeHtml(delay)}</strong></p>` : ''}
+          ${balanceBlock}`,
+        ctaUrl: trackingUrl, ctaLabel: 'Suivre ma commande',
+      };
+    case 'in_processing':
+      return {
+        subject: `Commande spéciale ${order.ref || ''} en cours de traitement — ${SITE_NAME}`.trim(),
+        title: 'Votre livre est en cours d\'acquisition',
+        body: `${greet}
+          <p>Bonne nouvelle : votre commande spéciale <strong>${escapeHtml(order.ref || '')}</strong> est en cours d'acquisition auprès de notre réseau.</p>
+          ${delay ? `<p style="color:#6b7280">Disponibilité estimée : <strong>${escapeHtml(delay)}</strong></p>` : ''}`,
+        ctaUrl: trackingUrl, ctaLabel: 'Suivre ma commande',
+      };
+    case 'available':
+      return {
+        subject: `📚 Votre commande ${order.ref || ''} est disponible — ${SITE_NAME}`.trim(),
+        title: 'Votre livre est disponible !',
+        body: `${greet}
+          <p>Votre commande spéciale <strong>${escapeHtml(order.ref || '')}</strong> est arrivée et vous attend à notre librairie.</p>
+          ${itemsHtml(order.items)}
+          ${balanceBlock}
+          <p style="margin-top:12px">Vous pouvez venir la retirer à :</p>
+          <p style="padding:10px 14px;background:#f0fdf4;border-left:3px solid #10531a;border-radius:6px">
+            <strong>${escapeHtml(SITE_NAME)}</strong><br>${escapeHtml(STORE_ADDRESS)}<br>Tél : ${escapeHtml(STORE_PHONE)}
+          </p>`,
+        ctaUrl: trackingUrl, ctaLabel: 'Suivre ma commande',
+      };
+    case 'balance_reminder':
+      return {
+        subject: `Rappel — solde à régler pour la commande ${order.ref || ''}`.trim(),
+        title: 'Rappel : solde à régler',
+        body: `${greet}
+          <p>Nous vous rappelons qu'un solde reste à régler pour votre commande spéciale <strong>${escapeHtml(order.ref || '')}</strong>.</p>
+          ${balanceBlock}
+          ${ref}
+          <p>Vous pouvez régler ce solde directement à la librairie. Merci de votre confiance.</p>`,
+        ctaUrl: trackingUrl, ctaLabel: 'Suivre ma commande',
+      };
+    case 'pickup_confirmation':
+      return {
+        subject: `Merci ! Commande ${order.ref || ''} retirée — ${SITE_NAME}`.trim(),
+        title: 'Votre commande a bien été retirée',
+        body: `${greet}
+          <p>Nous vous confirmons le retrait de votre commande spéciale <strong>${escapeHtml(order.ref || '')}</strong>. Nous espérons que cet ouvrage vous comblera.</p>
+          ${itemsHtml(order.items)}
+          <p>Merci d'avoir fait confiance à ${escapeHtml(SITE_NAME)}. À très bientôt !</p>`,
+        ctaUrl: null, ctaLabel: null,
+      };
+    case 'cancelled':
+      return {
+        subject: `Commande spéciale ${order.ref || ''} annulée — ${SITE_NAME}`.trim(),
+        title: 'Votre commande a été annulée',
+        body: `${greet}
+          <p>Votre commande spéciale <strong>${escapeHtml(order.ref || '')}</strong> a été annulée.</p>
+          ${order.paid > 0 ? `<p>Un règlement de <strong>${fmtPrice(order.paid)}</strong> avait été enregistré : notre équipe vous recontactera pour les modalités de remboursement.</p>` : ''}
+          <p>Pour toute question, n'hésitez pas à nous contacter.</p>`,
+        ctaUrl: null, ctaLabel: null,
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Envoie une notification client liée à une commande spéciale.
+ * Renvoie true si l'email est parti, false sinon. Best-effort (ne throw pas).
+ *
+ * @param {Object} deps
+ * @param {Object} deps.transporter
+ * @param {Object} deps.order - { ref, customer:{name,firstname,email,phone}, items, total, paid, balance, expected_date, delay_estimate }
+ * @param {string} deps.event - order_confirmation | validated | in_processing | available | balance_reminder | pickup_confirmation | cancelled
+ * @param {string} [deps.siteUrl]
+ */
+export async function sendSpecialOrderNotification({ transporter, order, event, siteUrl }) {
+  if (!transporter) return false;
+  const to = order?.customer?.email;
+  if (!to) {
+    console.warn('[MAIL] sendSpecialOrderNotification : email client manquant');
+    return false;
+  }
+  const tpl = buildSpecialOrderEmail({ order, event, siteUrl });
+  if (!tpl) {
+    console.warn('[MAIL] sendSpecialOrderNotification : événement inconnu', event);
+    return false;
+  }
+  try {
+    await transporter.sendMail({
+      from: `"${SITE_NAME}" <commandes@senharmattan.com>`,
+      to,
+      subject: tpl.subject,
+      html: shellHtml({ title: tpl.title, body: tpl.body, ctaUrl: tpl.ctaUrl, ctaLabel: tpl.ctaLabel }),
+    });
+    return true;
+  } catch (err) {
+    console.error('[MAIL] sendSpecialOrderNotification failed:', err.message);
+    return false;
+  }
+}

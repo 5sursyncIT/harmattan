@@ -28,10 +28,15 @@ export const adminChangePassword = (current, newPassword) => api.put('/admin/pas
 export const getSiteConfig = () => api.get('/admin/config');
 export const getFullSiteConfig = () => api.get('/admin/config/full');
 export const updateSiteConfig = (data) => api.put('/admin/config', data);
+
+// Bannières (hero_slides) — module RBAC « slides » dédié : gérable par l'éditeur et
+// le libraire sans accès en écriture à toute la config du site.
+export const getAdminSlides = () => api.get('/admin/slides');
+export const updateAdminSlides = (hero_slides) => api.put('/admin/slides', { hero_slides });
 export const uploadSliderImage = (file) => {
   const fd = new FormData();
   fd.append('image', file);
-  return api.post('/admin/config/slider-image', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  return api.post('/admin/slides/image', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
 };
 
 export const uploadCoverImage = (file) => {
@@ -43,6 +48,8 @@ export const uploadCoverImage = (file) => {
 // ─── Books management ──────────────────────────────────
 export const listBooks = (params = {}, config = {}) => api.get('/admin/books', { params, ...config });
 export const getBook = (id) => api.get(`/admin/books/${id}`);
+// Quantité écoulée (toute facturation confondue) + stock — réservé aux administrateurs
+export const getBookSales = (id) => api.get(`/admin/books/${id}/sales`);
 export const createBook = (data) => api.post('/admin/books', data);
 export const updateBook = (id, data) => api.put(`/admin/books/${id}`, data);
 export const deleteBook = (id, hard = false) => api.delete(`/admin/books/${id}`, { params: { soft: hard ? '0' : '1' } });

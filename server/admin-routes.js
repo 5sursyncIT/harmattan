@@ -22,6 +22,7 @@ import {
   methodAllowedForLevel,
 } from './roles-config.js';
 import { generateBase32Secret, verifyTotp, buildOtpAuthUrl } from './totp.js';
+import { createOverridesStore } from './permission-overrides.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -155,9 +156,12 @@ export function blockLibrarian(req, res, next) {
 // ─── CREATE ROUTER ──────────────────────────────────────────
 export { setupAdminRoutes };
 export function createAdminRouter(opts) { return setupAdminRoutes(null, opts); }
-function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure = false, authLimiter, manuscriptSubmitLimiter, siteUrl = '' }) {
+function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure = false, authLimiter, manuscriptSubmitLimiter, siteUrl = '', overridesStore }) {
   const app = appRef || appFromOpts;
   const auth = adminAuth(db);
+  // Filet de sécurité : si le store n'a pas été injecté (anciens appels), on en
+  // crée un local pour conserver le comportement. En prod il est fourni par index.js.
+  const overrides = overridesStore || createOverridesStore(db);
 
   // ─── Role-based access control ─────────────────────────────
   // ROLE_ALLOWED_PATHS / FULL_ACCESS_ROLES sont importés depuis roles-config.js
@@ -186,7 +190,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     // la config de base (octroi OU restriction). N'affecte que les modules dont
     // l'accès transite par /api/admin/<x> (cf. MODULE_PATHS).
     const ovModule = moduleForPath(path);
-    const ovLevel = ovModule ? overridesCache[role]?.[ovModule] : undefined;
+    const ovLevel = ovModule ? overrides.get(role, ovModule) : undefined;
     if (ovLevel !== undefined) {
       if (methodAllowedForLevel(ovLevel, req.method)) return next();
       return res.status(403).json({ error: 'Accès non autorisé (permission temporaire en vigueur)' });
@@ -258,31 +262,45 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)').run(username, action, details);
   }
 
-  // ─── Surcharges temporaires de permissions (pilotées par le super-admin) ────
+  // ─── Surcharges de permissions (pilotées par le super-admin) ────────────────
   // Permettent d'élargir OU de restreindre l'accès d'un rôle à un module, à chaud.
   // Manuel uniquement (pas d'expiration auto) : restauration explicite par cellule
   // ou globale. Prennent le pas sur la config de base (roles-config.js) par module.
-  db.exec(`CREATE TABLE IF NOT EXISTS role_permission_overrides (
-    role TEXT NOT NULL,
-    module TEXT NOT NULL,
-    level TEXT NOT NULL,
-    created_by TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (role, module)
-  )`);
+  // La table, le cache et le rechargement sont désormais portés par le store
+  // partagé `overrides` (permission-overrides.js), injecté depuis index.js, afin
+  // que les routeurs hors /api/admin (contrats…) voient les mêmes surcharges.
 
-  // Cache mémoire : { [role]: { [module]: level } }. Rechargé au démarrage et
-  // après chaque écriture (les surcharges sont rares → coût négligeable).
-  let overridesCache = {};
-  function reloadOverrides() {
-    const rows = db.prepare('SELECT role, module, level FROM role_permission_overrides').all();
-    const map = {};
-    for (const r of rows) {
-      (map[r.role] || (map[r.role] = {}))[r.module] = r.level;
-    }
-    overridesCache = map;
+  // Création réservée au super-administrateur, OU à un rôle explicitement autorisé
+  // sur le module « users » via une surcharge (délégation pilotée par le super-admin).
+  function requireUsersManage(req, res, next) {
+    const role = req.admin?.role;
+    if (role === 'super_admin') return next();
+    const level = overrides.get(role, 'users');
+    if (level !== undefined && methodAllowedForLevel(level, req.method)) return next();
+    return res.status(403).json({ error: 'Action réservée au super administrateur' });
   }
-  reloadOverrides();
+
+  // Garde anti-escalade : un gestionnaire d'équipe DÉLÉGUÉ (non super_admin, à qui
+  // le super-admin a ouvert le module « users ») ne peut jamais créer, promouvoir
+  // ni modifier un compte à ACCÈS TOTAL (admin / super_admin). Il gère uniquement
+  // les rôles métier (éditeur, libraire, comptable…). Seul un super_admin mint des
+  // comptes admin/super_admin et manipule leurs comptes. Cela évite qu'un délégué
+  // ne s'auto-promeuve à un palier supérieur.
+  function blockSuperAdminEscalation(req, res, next) {
+    if (req.admin?.role === 'super_admin') return next();
+    const wantedRole = String(req.body?.role || '');
+    if (wantedRole && FULL_ACCESS_ROLES.includes(wantedRole)) {
+      return res.status(403).json({ error: 'Seul un super administrateur peut attribuer un rôle à accès total (admin / super administrateur)' });
+    }
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isNaN(id)) {
+      const target = db.prepare('SELECT role FROM admin_users WHERE id = ?').get(id);
+      if (target && FULL_ACCESS_ROLES.includes(target.role || 'admin')) {
+        return res.status(403).json({ error: 'Seul un super administrateur peut modifier un compte à accès total (admin / super administrateur)' });
+      }
+    }
+    next();
+  }
 
   // Create contact_messages table
   db.exec(`CREATE TABLE IF NOT EXISTS contact_messages (
@@ -604,7 +622,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       mustChangePassword: req.admin.must_change_password === 1,
       totpEnabled: req.admin.totp_enabled === 1,
       // Surcharges actives pour CE rôle → la nav peut afficher/masquer en conséquence.
-      permissionOverrides: overridesCache[req.admin.role] || {},
+      permissionOverrides: overrides.forRole(req.admin.role),
     });
   });
 
@@ -837,6 +855,46 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   // Admin: upload slider image
   app.post('/api/admin/config/slider-image', auth, sliderUpload.single('image'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Aucune image' });
+    res.json({ path: `/images/slider/${req.file.filename}` });
+  });
+
+  // ─── BANNIÈRES (hero_slides) — module RBAC « slides » dédié ─────────────────
+  // Les bannières sont persistées dans la config du site, mais leur gestion est un
+  // module à part entière (cf. roles-config.js → module « slides »). On expose des
+  // routes /api/admin/slides dédiées pour que les profils ayant la permission
+  // « slides » (éditeur, libraire…) puissent gérer les bannières SANS disposer d'un
+  // accès en écriture à toute la config (SMTP, paiements, e-mails…). Le panneau
+  // Bannières du back-office passe par ces routes plutôt que par PUT /config.
+  app.get('/api/admin/slides', auth, (req, res) => {
+    try {
+      res.json({ hero_slides: readConfig().hero_slides || [] });
+    } catch (err) {
+      console.error('Slides read error:', err);
+      res.status(500).json({ error: 'Erreur lecture des bannières' });
+    }
+  });
+
+  app.put('/api/admin/slides', auth, csrfProtection, (req, res) => {
+    try {
+      const slides = req.body?.hero_slides;
+      if (!Array.isArray(slides)) {
+        return res.status(400).json({ error: 'hero_slides doit être un tableau' });
+      }
+      const config = readConfig();
+      config.hero_slides = slides;
+      writeConfig(config);
+      logActivity(req.admin.username, 'update_slides', `Bannières mises à jour (${slides.length})`);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Slides update error:', err);
+      res.status(500).json({ error: 'Erreur sauvegarde des bannières' });
+    }
+  });
+
+  // Upload d'image de bannière sous le module « slides » (≠ /config/slider-image,
+  // réservé aux profils ayant l'accès config) afin que l'éditeur puisse l'utiliser.
+  app.post('/api/admin/slides/image', auth, sliderUpload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Aucune image' });
     res.json({ path: `/images/slider/${req.file.filename}` });
   });
@@ -1385,7 +1443,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // Définition des rôles et matrice de permissions — accessible à tout admin
   // authentifié (la matrice est purement informative pour l'UI).
   app.get('/api/admin/roles', auth, (req, res) => {
-    res.json({ ...serializeRolesForClient(), overrides: overridesCache });
+    res.json({ ...serializeRolesForClient(), overrides: overrides.all() });
   });
 
   // ── Surcharges de permissions : RÉSERVÉ AU SUPER-ADMIN ──────────────────────
@@ -1403,20 +1461,14 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     if (!PERMISSION_LEVELS.includes(level)) {
       return res.status(400).json({ error: 'Niveau de permission invalide' });
     }
-    db.prepare(`INSERT INTO role_permission_overrides (role, module, level, created_by, created_at)
-                VALUES (?, ?, ?, ?, datetime('now'))
-                ON CONFLICT(role, module) DO UPDATE SET
-                  level = excluded.level, created_by = excluded.created_by, created_at = datetime('now')`)
-      .run(role, module, level, req.admin.username);
-    reloadOverrides();
+    overrides.set(role, module, level, req.admin.username);
     logActivity(req.admin.username, 'permission_override', `${role} · ${module} → ${level}`);
-    res.json({ role, module, level, overrides: overridesCache });
+    res.json({ role, module, level, overrides: overrides.all() });
   });
 
   // Restaure TOUTES les surcharges (placé avant la route paramétrée pour la lisibilité).
   app.delete('/api/admin/roles/overrides', auth, csrfProtection, requireSuperAdmin, (req, res) => {
-    db.prepare('DELETE FROM role_permission_overrides').run();
-    reloadOverrides();
+    overrides.clearAll();
     logActivity(req.admin.username, 'permission_override_reset_all', 'Toutes les surcharges supprimées');
     res.json({ overrides: {} });
   });
@@ -1424,10 +1476,9 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // Restaure une cellule (role × module) à sa valeur de base.
   app.delete('/api/admin/roles/:role/permissions/:module', auth, csrfProtection, requireSuperAdmin, (req, res) => {
     const { role, module } = req.params;
-    db.prepare('DELETE FROM role_permission_overrides WHERE role = ? AND module = ?').run(role, module);
-    reloadOverrides();
+    overrides.clear(role, module);
     logActivity(req.admin.username, 'permission_override_reset', `${role} · ${module}`);
-    res.json({ role, module, overrides: overridesCache });
+    res.json({ role, module, overrides: overrides.all() });
   });
 
   // Construit l'objet exposé au client à partir d'une ligne admin_users (sans
@@ -1450,14 +1501,14 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     };
   }
 
-  app.get('/api/admin/users', auth, requireSuperAdmin, (req, res) => {
+  app.get('/api/admin/users', auth, requireUsersManage, (req, res) => {
     const users = db.prepare(
       "SELECT id, username, role, email, created_at, is_active, last_login_at, last_login_ip, must_change_password, totp_enabled, session_token, session_expires_at FROM admin_users ORDER BY id ASC"
     ).all();
     res.json(users.map(publicUser));
   });
 
-  app.post('/api/admin/users', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.post('/api/admin/users', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     try {
       const { username, password, role = 'admin', email, mustChangePassword } = req.body;
       if (!username || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
@@ -1486,7 +1537,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     }
   });
 
-  app.put('/api/admin/users/:id', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.put('/api/admin/users/:id', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { username, role, password, email } = req.body;
@@ -1571,7 +1622,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // Activer / désactiver un compte
-  app.patch('/api/admin/users/:id/active', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.patch('/api/admin/users/:id/active', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { is_active } = req.body;
@@ -1597,7 +1648,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // Forcer la déconnexion d'un utilisateur (révoque sa session)
-  app.post('/api/admin/users/:id/force-logout', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.post('/api/admin/users/:id/force-logout', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     const id = parseInt(req.params.id);
     const target = db.prepare('SELECT id, username FROM admin_users WHERE id = ?').get(id);
     if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
@@ -1611,7 +1662,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // Forcer le renouvellement du mot de passe au prochain login
-  app.post('/api/admin/users/:id/force-password-reset', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.post('/api/admin/users/:id/force-password-reset', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     const id = parseInt(req.params.id);
     const target = db.prepare('SELECT id, username FROM admin_users WHERE id = ?').get(id);
     if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
@@ -1625,7 +1676,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // Désactiver la 2FA d'un autre utilisateur (clé d'urgence pour super_admin)
-  app.post('/api/admin/users/:id/reset-2fa', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.post('/api/admin/users/:id/reset-2fa', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     const id = parseInt(req.params.id);
     const target = db.prepare('SELECT id, username, totp_enabled FROM admin_users WHERE id = ?').get(id);
     if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
@@ -1638,7 +1689,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     res.json(publicUser(fresh));
   });
 
-  app.delete('/api/admin/users/:id', auth, requireSuperAdmin, csrfProtection, (req, res) => {
+  app.delete('/api/admin/users/:id', auth, requireUsersManage, csrfProtection, blockSuperAdminEscalation, (req, res) => {
     const target = db.prepare('SELECT username FROM admin_users WHERE id = ?').get(req.params.id);
     if (!target) return res.status(404).json({ error: 'Utilisateur non trouvé' });
     if (target.username === req.admin.username) return res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte' });

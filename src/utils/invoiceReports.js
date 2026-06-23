@@ -306,7 +306,7 @@ export function openInvoicesPdf({ invoices, encaissements, kpis, paymentsByMetho
 <meta charset="UTF-8">
 <title>${escapeHtml(title)} — ${escapeHtml(periodLabel)}</title>
 <style>
-  @page { size: A4 landscape; margin: 12mm; }
+  @page { size: A4 portrait; margin: 12mm; }
   * { box-sizing: border-box; }
   body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #0f172a; font-size: 11px; margin: 0; padding: 16px; }
   h1 { font-size: 18px; margin: 0 0 4px; color: #0f172a; }
@@ -320,7 +320,7 @@ export function openInvoicesPdf({ invoices, encaissements, kpis, paymentsByMetho
   .kpi.warn { background: #fff7ed; border-color: #fed7aa; }
   h2 { font-size: 13px; margin: 18px 0 8px; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 10px; }
-  th, td { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+  th, td { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
   th { background: #f1f5f9; font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: 0.3px; }
   .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .mono { font-family: 'Courier New', monospace; }
@@ -337,11 +337,11 @@ export function openInvoicesPdf({ invoices, encaissements, kpis, paymentsByMetho
   .total-row td { border-top: 2px solid #0f172a; background: #f1f5f9; }
   .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
   .payment-block { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 16px; }
-  .payment-block .chart { flex: 0 0 260px; text-align: center; }
+  .payment-block .chart { flex: 0 0 220px; text-align: center; }
   .payment-block .chart-title { font-size: 10px; color: #64748b; text-align: center; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
   .payment-block .legend { margin-top: 8px; font-size: 10px; color: #475569; }
   .legend-item { display: inline-block; margin-right: 12px; }
-  .payment-block .table-wrap { flex: 1 1 360px; min-width: 320px; }
+  .payment-block .table-wrap { flex: 1 1 300px; min-width: 280px; }
   @media print {
     .no-print { display: none; }
     body { padding: 0; }

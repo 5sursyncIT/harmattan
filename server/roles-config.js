@@ -101,6 +101,8 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/propals(\/.*)?$/,
     // Commandes web : lecture seule pour le libraire.
     { re: /^\/api\/admin\/orders(\/.*)?$/, methods: ['GET'] },
+    // Commandes spéciales (livres indisponibles) : gestion complète au comptoir.
+    /^\/api\/admin\/special-orders(\/.*)?$/,
     // ── Volet support ──
     /^\/api\/admin\/stats(\/.*)?$/,
     /^\/api\/admin\/contact(\/.*)?$/,
@@ -129,6 +131,8 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/societes(\/.*)?$/,
     /^\/api\/admin\/legal-deposits(\/.*)?$/,
     /^\/api\/admin\/stats(\/.*)?$/,
+    // Commandes spéciales : le gestionnaire pilote l'approvisionnement.
+    /^\/api\/admin\/special-orders(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
   comptable: [
@@ -141,6 +145,8 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/deliveries(\/.*)?$/,
     /^\/api\/admin\/consignments(\/.*)?$/,
     /^\/api\/admin\/orders(\/.*)?$/,
+    // Commandes spéciales : suivi des encaissements et soldes.
+    /^\/api\/admin\/special-orders(\/.*)?$/,
     /^\/api\/admin\/societes(\/.*)?$/,
     /^\/api\/admin\/propals(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
@@ -180,7 +186,7 @@ const M = (modules) => {
     dashboard: '-', books: '-', tags: '-', authors: '-', stock: '-', inventory: '-', suppliers: '-',
     manuscripts: '-', evaluations: '-', corrections: '-', editorial: '-', covers: '-',
     printing: '-', contracts: '-', pos: '-', payments: '-', accounting: '-',
-    invoices: '-', deliveries: '-', consignments: '-', orders: '-', propals: '-',
+    invoices: '-', deliveries: '-', consignments: '-', orders: '-', special_orders: '-', propals: '-',
     expenses: '-', legal_deposits: '-',
     config: '-', slides: '-', news: '-', faq: '-', contacts: '-', newsletter: '-',
     customers: '-', users: '-', activity: '-', profile: 'rw',
@@ -193,7 +199,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
+    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: 'crud', activity: 'r', profile: 'rw',
   }),
@@ -201,7 +207,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
+    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: '-', activity: 'r', profile: 'rw',
   }),
@@ -217,7 +223,7 @@ export const MODULE_PERMISSIONS = {
   // Profil fusionné « Libraire & Support » : union des permissions des deux anciens rôles.
   librarian: M({
     dashboard: 'r',
-    books: 'crud', tags: 'r', stock: 'r', inventory: 'rw', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'crud', orders: 'r',
+    books: 'crud', tags: 'r', stock: 'r', inventory: 'rw', invoices: 'crud', deliveries: 'crud', consignments: 'r', propals: 'crud', orders: 'r', special_orders: 'crud',
     authors: 'r', contacts: 'crud', faq: 'crud', newsletter: 'crud', customers: 'rw', news: 'crud',
     // Rubrique « Site & contenu » : contrôle total config + bannières.
     config: 'crud', slides: 'crud',
@@ -225,10 +231,10 @@ export const MODULE_PERMISSIONS = {
   }),
   gestionnaire_stock: M({
     dashboard: 'r', books: 'crud', tags: 'crud', authors: 'rw', stock: 'crud', inventory: 'crud', suppliers: 'crud',
-    deliveries: 'crud', consignments: 'crud', legal_deposits: 'crud', profile: 'rw',
+    deliveries: 'crud', consignments: 'crud', special_orders: 'crud', legal_deposits: 'crud', profile: 'rw',
   }),
   comptable: M({
-    dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', propals: 'crud', contracts: 'crud', profile: 'rw',
+    dashboard: 'r', payments: 'crud', accounting: 'crud', expenses: 'crud', invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', contracts: 'crud', profile: 'rw',
   }),
   vendeur: M({
     pos: 'crud', profile: 'rw',
@@ -270,6 +276,7 @@ export const MODULE_LABELS = {
   consignments: 'Dépôt-vente',
   expenses: "Sorties d'argent",
   orders: 'Commandes web',
+  special_orders: 'Commandes spéciales',
   propals: 'Devis',
   legal_deposits: 'Dépôt légal',
   config: 'Configuration',
@@ -284,13 +291,22 @@ export const MODULE_LABELS = {
   profile: 'Mon profil',
 };
 
-// ─── Surcharges temporaires de permissions (pilotées par le super-admin) ──────
+// ─── Surcharges de permissions (pilotées par le super-admin) ──────────────────
 // Mapping module → chemins API permettant au middleware RBAC d'arbitrer une
-// surcharge. SEULS ces modules sont « surchargeables » : leur accès transite par
-// une route /api/admin/<x> gérable par la whitelist. Les autres modules de la
-// matrice (contracts hors /api/admin, pos via PIN, users via requireSuperAdmin,
-// profile personnel, faq/slides = sous-clés de config) ne sont PAS pilotables ici
-// et restent verrouillés dans l'UI.
+// surcharge. TOUS les modules « métier » de la matrice sont désormais
+// surchargeables (objectif « comme Dolibarr » : chaque permission activable /
+// désactivable par le super-admin). Une surcharge prime sur la config de base et
+// est appliquée côté serveur :
+//   • Modules /api/admin/<x> → arbitrés par le middleware RBAC d'admin-routes.js.
+//   • contracts (/api/contracts) → arbitré par le gate du store partagé monté sur
+//     le routeur contrats (overridesStore.gate).
+//   • users (/api/admin/users) → middleware RBAC + garde par-route override-aware
+//     (requireUsersManage) qui remplace l'ancien requireSuperAdmin.
+//   • pos (/api/admin/pos) → administration du POS (caissiers/appareils) + nav.
+//     ⚠️ Le terminal de vente /api/pos reste piloté par PIN (table pos_staff) :
+//     la surcharge n'ouvre/ferme PAS la connexion caissier par PIN.
+// Seul `profile` (espace personnel : /me, /password, /2fa — toujours accessible
+// à son propriétaire) n'est volontairement pas surchargeable.
 export const MODULE_PATHS = {
   dashboard:      [/^\/api\/admin\/stats(\/.*)?$/],
   books:          [/^\/api\/admin\/books(\/.*)?$/],
@@ -305,6 +321,8 @@ export const MODULE_PATHS = {
   editorial:      [/^\/api\/admin\/editorial(\/.*)?$/],
   covers:         [/^\/api\/admin\/covers(\/.*)?$/],
   printing:       [/^\/api\/admin\/printing(\/.*)?$/],
+  contracts:      [/^\/api\/contracts(\/.*)?$/],
+  pos:            [/^\/api\/admin\/pos(\/.*)?$/],
   payments:       [/^\/api\/admin\/payments(\/.*)?$/],
   accounting:     [/^\/api\/admin\/accounting(\/.*)?$/],
   invoices:       [/^\/api\/admin\/invoices(\/.*)?$/],
@@ -312,13 +330,17 @@ export const MODULE_PATHS = {
   consignments:   [/^\/api\/admin\/consignments(\/.*)?$/],
   expenses:       [/^\/api\/admin\/expenses(\/.*)?$/],
   orders:         [/^\/api\/admin\/orders(\/.*)?$/],
+  special_orders: [/^\/api\/admin\/special-orders(\/.*)?$/],
   propals:        [/^\/api\/admin\/propals(\/.*)?$/],
   legal_deposits: [/^\/api\/admin\/legal-deposits(\/.*)?$/],
   config:         [/^\/api\/admin\/config(\/.*)?$/],
+  slides:         [/^\/api\/admin\/slides(\/.*)?$/],
   news:           [/^\/api\/admin\/news(\/.*)?$/],
+  faq:            [/^\/api\/admin\/faq(\/.*)?$/],
   contacts:       [/^\/api\/admin\/contact(\/.*)?$/],
   newsletter:     [/^\/api\/admin\/newsletter(\/.*)?$/],
   customers:      [/^\/api\/admin\/customers(\/.*)?$/],
+  users:          [/^\/api\/admin\/users(\/.*)?$/],
   activity:       [/^\/api\/admin\/activity-log(\/.*)?$/],
 };
 

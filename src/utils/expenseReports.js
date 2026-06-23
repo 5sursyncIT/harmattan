@@ -145,7 +145,7 @@ export function openCashPdf({ report, title, periodLabel }) {
   const html = `<!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8"><title>${escapeHtml(title)} — ${escapeHtml(periodLabel)}</title>
 <style>
-  @page { size: A4 landscape; margin: 12mm; }
+  @page { size: A4 portrait; margin: 12mm; }
   * { box-sizing: border-box; }
   body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #0f172a; font-size: 11px; margin: 0; padding: 16px; }
   h1 { font-size: 18px; margin: 0 0 4px; }
@@ -161,14 +161,14 @@ export function openCashPdf({ report, title, periodLabel }) {
   .kpi.net-neg { background: #fef2f2; border-color: #fecaca; }
   h2 { font-size: 13px; margin: 18px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 10px; }
-  th, td { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+  th, td { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
   th { background: #f1f5f9; font-weight: 700; text-transform: uppercase; font-size: 9px; }
   .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .mono { font-family: 'Courier New', monospace; }
   .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
   .block { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 16px; }
-  .chart { flex: 0 0 260px; text-align: center; }
-  .table-wrap { flex: 1 1 360px; min-width: 300px; }
+  .chart { flex: 0 0 220px; text-align: center; }
+  .table-wrap { flex: 1 1 300px; min-width: 280px; }
   .legend { margin-top: 8px; font-size: 10px; color: #475569; }
   .legend-item { display: inline-block; margin-right: 12px; }
   .empty { text-align: center; color: #94a3b8; padding: 16px; font-style: italic; }

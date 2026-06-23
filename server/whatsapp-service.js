@@ -111,3 +111,40 @@ export async function sendShippingUpdate({ phone, firstname, orderRef, statusLab
     }],
   });
 }
+
+// Libellés FR des événements de commande spéciale (passés au template).
+const SPECIAL_ORDER_EVENT_LABELS = {
+  order_confirmation: 'enregistrée',
+  validated: 'validée',
+  in_processing: "en cours d'acquisition",
+  available: 'disponible — à retirer en librairie',
+  balance_reminder: 'solde à régler',
+  pickup_confirmation: 'retirée — merci !',
+  cancelled: 'annulée',
+};
+
+/**
+ * Notifie le client d'une mise à jour de sa commande spéciale.
+ * Best-effort : renvoie { ok, skipped?, error? } (no-op tant que non configuré).
+ *
+ * @param {Object} params
+ * @param {string} params.phone
+ * @param {string} [params.firstname]
+ * @param {string} params.event
+ * @param {string} params.orderRef
+ */
+export async function sendSpecialOrderUpdate({ phone, firstname, event, orderRef }) {
+  const statusLabel = SPECIAL_ORDER_EVENT_LABELS[event] || 'mise à jour';
+  return sendTemplate({
+    to: phone,
+    templateName: 'special_order_update',
+    components: [{
+      type: 'body',
+      parameters: [
+        { type: 'text', text: firstname || 'cher client' },
+        { type: 'text', text: orderRef || '' },
+        { type: 'text', text: statusLabel },
+      ],
+    }],
+  });
+}

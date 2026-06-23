@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { FiSave, FiTrash2, FiX, FiCheck, FiAlertCircle, FiLoader, FiRefreshCw, FiPlus } from 'react-icons/fi';
+import { FiSave, FiTrash2, FiX, FiCheck, FiAlertCircle, FiLoader, FiRefreshCw, FiPlus, FiTrendingUp, FiBox } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { validateBook } from '../../../utils/bookValidation.js';
-import { createBook, updateBook, deleteBook, checkIsbn, createGenre } from '../../../api/admin';
+import { createBook, updateBook, deleteBook, checkIsbn, createGenre, getBookSales } from '../../../api/admin';
+import useAdminRole from '../../../hooks/useAdminRole.js';
 import { getCategories } from '../../../api/dolibarr';
 import { listTags, getBookTags, setBookTags } from '../../../api/tags';
 import { EXCLUDED_CATEGORIES_SET } from '../../../utils/excludedCategories.js';
@@ -28,6 +29,11 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
   // Tags de curation (Notre sélection, Livre du mois, Nouveauté, Promotion, …)
   const [availableTags, setAvailableTags] = useState([]);
   const [selectedTags, setSelectedTags] = useState([]); // [{ slug, discount_pct? }]
+
+  // Ventes & stock (réservé aux administrateurs)
+  const role = useAdminRole();
+  const isAdmin = role === 'super_admin' || role === 'admin';
+  const [sales, setSales] = useState(null);
 
   const isEdit = !!(book && book.id);
 
@@ -82,6 +88,20 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
       })
       .catch(() => setSelectedTags([]));
   }, [isEdit, book?.id]);
+
+  // Quantité écoulée + stock (admins uniquement). On attend de connaître le rôle
+  // pour ne pas déclencher un appel 403 inutile côté libraire/comptable/etc.
+  useEffect(() => {
+    if (!isEdit || !book?.id || !isAdmin) {
+      setSales(null);
+      return;
+    }
+    let cancelled = false;
+    getBookSales(book.id)
+      .then((res) => { if (!cancelled) setSales(res.data); })
+      .catch(() => { if (!cancelled) setSales(null); });
+    return () => { cancelled = true; };
+  }, [isEdit, book?.id, isAdmin]);
 
   const toggleTag = (slug) => {
     setSelectedTags((prev) => {
@@ -289,6 +309,29 @@ export default function BookForm({ book, onSaved, onDeleted, onCancel, onCoverUp
           </div>
         </div>
       </div>
+
+      {isEdit && isAdmin && sales && (
+        <div className="book-sales-card" role="group" aria-label="Ventes et stock">
+          <div className="book-sales-metric book-sales-metric--primary">
+            <span className="book-sales-icon"><FiTrendingUp aria-hidden="true" /></span>
+            <span className="book-sales-value">{sales.total_sold.toLocaleString('fr-FR')}</span>
+            <span className="book-sales-label">exemplaires écoulés<br /><em>toute facturation confondue</em></span>
+          </div>
+          <div className="book-sales-metric">
+            <span className="book-sales-icon"><FiBox aria-hidden="true" /></span>
+            <span className="book-sales-value">{sales.stock.toLocaleString('fr-FR')}</span>
+            <span className="book-sales-label">en stock</span>
+          </div>
+          <ul className="book-sales-breakdown">
+            <li><strong>{sales.paid_qty.toLocaleString('fr-FR')}</strong> sur factures payées</li>
+            <li><strong>{sales.validated_unpaid_qty.toLocaleString('fr-FR')}</strong> validées impayées</li>
+            {sales.returned_qty > 0 && (
+              <li className="book-sales-returns">−{sales.returned_qty.toLocaleString('fr-FR')} retournés (avoirs)</li>
+            )}
+            <li className="book-sales-muted">{sales.invoices_count.toLocaleString('fr-FR')} facture(s)</li>
+          </ul>
+        </div>
+      )}
 
       <Field label="Titre" required error={errors.title}>
         <input type="text" {...bind('title')} maxLength={200} placeholder="Titre de l'ouvrage" />

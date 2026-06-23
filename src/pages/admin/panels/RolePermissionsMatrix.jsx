@@ -275,7 +275,7 @@ export default function RolePermissionsMatrix() {
 
         <p style={{ marginTop: 12, fontSize: 12, color: '#6b7280' }}>
           {isSuperAdmin
-            ? <>Les surcharges sont <strong>immédiates</strong> et <strong>manuelles</strong> (aucune expiration auto) : restaurez chaque cellule ou utilisez « Tout restaurer ». La restriction effective est appliquée côté serveur. <FiLock size={10} /> = module non surchargeable ici (géré ailleurs).</>
+            ? <>Chaque permission est <strong>activable / désactivable</strong> par cellule (rôle × module), à la manière de Dolibarr. Les surcharges sont <strong>immédiates</strong> et <strong>manuelles</strong> (aucune expiration auto) : restaurez chaque cellule ou utilisez « Tout restaurer ». La restriction comme l'octroi sont appliqués côté serveur. <FiLock size={10} /> = « Mon profil » (espace personnel, toujours accessible). À noter : le module « Point de vente » pilote l'administration POS et l'affichage du menu ; la connexion caissier au terminal reste par code PIN.</>
             : <>Cette matrice est informative. La restriction effective est appliquée côté serveur par <code>roles-config.js</code> et les surcharges du super-administrateur.</>}
         </p>
       </div>

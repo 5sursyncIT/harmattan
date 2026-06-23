@@ -10,6 +10,7 @@ import cron from 'node-cron';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import Database from 'better-sqlite3';
+import { createOverridesStore } from './permission-overrides.js';
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
 // import bcrypt from 'bcryptjs'; // Extracted to auth-routes.js
@@ -62,6 +63,11 @@ const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
 // --- NEWSLETTER DB SETUP ---
 const db = new Database(join(__dirname, '..', 'newsletter.sqlite'));
 db.pragma('journal_mode = WAL');
+
+// Store partagé des surcharges de permissions (matrice super-admin). Créé tôt et
+// injecté à TOUS les routeurs concernés (admin, contrats…) pour que la même
+// surcharge soit arbitrée partout, y compris hors /api/admin.
+const overridesStore = createOverridesStore(db);
 db.exec(`CREATE TABLE IF NOT EXISTS newsletter (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT UNIQUE,
@@ -825,7 +831,7 @@ app.use('/api/auth', createAuthRouter({ db, csrfProtection, sanitizeBody, authLi
 
 // ─── CONTRACTS MODULE ───────────────────────────────────
 import { createContractRouter } from './contract-routes.js';
-app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtection, sanitizeBody, transporter }));
+app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtection, sanitizeBody, transporter, overridesStore }));
 
 // ─── CONTRACT QUOTES (devis de contribution auteur) ─────
 import { createContractQuoteRouter } from './contract-quote-routes.js';
@@ -994,7 +1000,7 @@ async function sendPreorderReleaseEmail(preorder, paymentMethods = getEnabledPay
 }
 import { setupAdminRoutes, adminAuth } from './admin-routes.js';
 try {
-  setupAdminRoutes(app, { db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure: COOKIE_SECURE, authLimiter, manuscriptSubmitLimiter, siteUrl: SITE_URL });
+  setupAdminRoutes(app, { db, csrfProtection, sanitizeBody, transporter, cache, dolibarrPool, cookieSecure: COOKIE_SECURE, authLimiter, manuscriptSubmitLimiter, siteUrl: SITE_URL, overridesStore });
   console.log('[ADMIN] Admin routes mounted');
 } catch (err) {
   console.error('[ADMIN] Failed to mount admin routes:', err);
@@ -1686,6 +1692,20 @@ try {
   console.log('[ORDERS] Web orders routes mounted');
 } catch (err) {
   console.error('[ORDERS] Failed to mount orders routes:', err);
+}
+
+// ─── COMMANDES SPÉCIALES MODULE (livres indisponibles en stock) ──
+import { createSpecialOrdersRouter } from './special-orders-routes.js';
+import * as smsService from './sms-service.js';
+try {
+  app.use('/api/admin/special-orders', createSpecialOrdersRouter({
+    db, dolibarrPool, auth: adminAuth(db), csrfProtection,
+    transporter, emailService, whatsapp: whatsappService, smsService,
+    siteUrl: SITE_URL,
+  }));
+  console.log('[SPECIAL-ORDERS] Special orders routes mounted');
+} catch (err) {
+  console.error('[SPECIAL-ORDERS] Failed to mount special orders routes:', err);
 }
 
 // ─── DEVIS MODULE (propositions commerciales) ───────────────

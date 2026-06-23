@@ -101,6 +101,7 @@ const DeliveriesPanel = lazy(() => import('./pages/admin/panels/DeliveriesPanel'
 const ConsignmentPanel = lazy(() => import('./pages/admin/panels/ConsignmentPanel'));
 const ExpensesPanel = lazy(() => import('./pages/admin/panels/ExpensesPanel'));
 const OrdersPanel = lazy(() => import('./pages/admin/panels/OrdersPanel'));
+const SpecialOrdersPanel = lazy(() => import('./pages/admin/panels/SpecialOrdersPanel'));
 const DevisPanel = lazy(() => import('./pages/admin/panels/DevisPanel'));
 const LegalDepositPanel = lazy(() => import('./pages/admin/panels/LegalDepositPanel'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
@@ -202,6 +203,7 @@ export default function App() {
             <Route path="consignments" element={<ConsignmentPanel />} />
             <Route path="expenses" element={<ExpensesPanel />} />
             <Route path="orders" element={<OrdersPanel />} />
+            <Route path="special-orders" element={<SpecialOrdersPanel />} />
             <Route path="devis" element={<DevisPanel />} />
             <Route path="legal-deposits" element={<LegalDepositPanel />} />
             <Route path="stock" element={<StockDashboardPanel />} />

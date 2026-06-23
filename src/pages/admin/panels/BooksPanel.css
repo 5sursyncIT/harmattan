@@ -1132,3 +1132,77 @@
 .book-form-actions .btn-icon.danger:hover {
   background: #fee2e2;
 }
+
+/* ── Carte « Ventes & stock » (fiche livre, admins uniquement) ── */
+.book-sales-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 1rem;
+  margin: 0 0 1.25rem;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(180deg, #f0fdf4 0%, #f9fafb 100%);
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-left: 4px solid var(--color-green, #059669);
+  border-radius: 10px;
+}
+
+.book-sales-metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 120px;
+  padding-right: 1rem;
+}
+
+.book-sales-metric--primary {
+  border-right: 1px solid var(--color-border, #e5e7eb);
+}
+
+.book-sales-icon {
+  display: inline-flex;
+  font-size: 1.1rem;
+  color: var(--color-green, #059669);
+}
+
+.book-sales-value {
+  font-size: 1.85rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #111827;
+}
+
+.book-sales-label {
+  font-size: 0.8rem;
+  color: var(--color-text-light, #6b7280);
+}
+
+.book-sales-label em {
+  font-style: italic;
+  color: var(--color-text-muted, #9ca3af);
+}
+
+.book-sales-breakdown {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.85rem;
+  color: var(--color-text-light, #6b7280);
+}
+
+.book-sales-breakdown strong {
+  color: #111827;
+}
+
+.book-sales-returns {
+  color: #b91c1c;
+}
+
+.book-sales-muted {
+  color: var(--color-text-muted, #9ca3af);
+  font-size: 0.78rem;
+}

@@ -91,6 +91,16 @@ function normalizeLabel(str) {
 export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db }) {
   const router = Router();
 
+  // Garde « administrateurs uniquement » : réservé aux profils super_admin / admin.
+  // Utilisé pour les données sensibles de pilotage (ex. quantités écoulées).
+  const adminOnly = (req, res, next) => {
+    const role = req.admin?.role;
+    if (role !== 'super_admin' && role !== 'admin') {
+      return res.status(403).json({ error: 'Réservé aux administrateurs' });
+    }
+    next();
+  };
+
   async function fetchAllowedGenreIds() {
     const [rows] = await dolibarrPool.query(
       `SELECT rowid FROM llx_categorie WHERE type = 0 AND label NOT IN ${excludedListSql}`,
@@ -636,6 +646,54 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
     } catch (err) {
       console.error('[BOOKS] GET detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement du livre' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════
+  // GET /:id/sales — Quantité écoulée (toute facturation confondue) + stock
+  // Réservé aux administrateurs. Net = ventes (factures standard/remplacement
+  // validées ou payées) − retours (avoirs validés/payés). Les brouillons et
+  // acomptes (type 3) n'entrent pas dans le calcul.
+  // ══════════════════════════════════════════════════════
+  router.get('/:id/sales', auth, adminOnly, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: 'ID invalide' });
+
+      const [[agg]] = await dolibarrPool.query(
+        `SELECT
+           SUM(CASE WHEN f.type IN (0,1) AND f.fk_statut IN (1,2) THEN fd.qty ELSE 0 END) AS gross_sold,
+           SUM(CASE WHEN f.type IN (0,1) AND f.fk_statut = 2 THEN fd.qty ELSE 0 END)       AS paid_qty,
+           SUM(CASE WHEN f.type IN (0,1) AND f.fk_statut = 1 THEN fd.qty ELSE 0 END)       AS validated_unpaid_qty,
+           SUM(CASE WHEN f.type = 2     AND f.fk_statut IN (1,2) THEN fd.qty ELSE 0 END)    AS returned_qty,
+           COUNT(DISTINCT CASE WHEN f.fk_statut IN (1,2) THEN f.rowid END)                  AS invoices_count
+         FROM llx_facturedet fd
+         JOIN llx_facture f ON f.rowid = fd.fk_facture
+         WHERE fd.fk_product = ?`,
+        [id]
+      );
+
+      const [[stockRow]] = await dolibarrPool.query(
+        'SELECT COALESCE(SUM(reel), 0) AS stock FROM llx_product_stock WHERE fk_product = ?',
+        [id]
+      );
+
+      const grossSold = Number(agg?.gross_sold) || 0;
+      const returned = Number(agg?.returned_qty) || 0;
+
+      res.json({
+        product_id: id,
+        stock: Number(stockRow?.stock) || 0,
+        total_sold: grossSold - returned,         // net écoulé, toute facturation confondue
+        gross_sold: grossSold,
+        paid_qty: Number(agg?.paid_qty) || 0,
+        validated_unpaid_qty: Number(agg?.validated_unpaid_qty) || 0,
+        returned_qty: returned,
+        invoices_count: Number(agg?.invoices_count) || 0,
+      });
+    } catch (err) {
+      console.error('[BOOKS] GET sales error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement des ventes' });
     }
   });
 
