@@ -77,3 +77,56 @@ export async function resolvePaymentId(pool, code) {
   if (id) paymentIdCache.set(key, id);
   return id;
 }
+
+/**
+ * Mapping méthode d'encaissement e-commerce → { code mode Dolibarr, compte bancaire }.
+ *
+ * Les `accountId` (rowid llx_bank_account) sont propres à cette instance ; les
+ * `code` (llx_c_paiement.code) sont stables et résolus dynamiquement en id via
+ * resolvePaymentId. PayTech (agrégateur CB/Wave/OM) atterrit sur son propre
+ * compte de trésorerie (CPTEPAYTECH, créé par scripts/setup-paytech-account.mjs)
+ * pour isoler les reversements en ligne avant rapprochement bancaire.
+ */
+export const ECOMMERCE_PAYMENT_MAP = {
+  PAYTECH: { code: 'PTECH', accountId: 10 }, // compte CPTEPAYTECH (en ligne)
+  WAVE:    { code: 'WAVE',  accountId: 6 },  // WAVE LIBRAIRIE QR (courant=1 ; cf. POS) —
+                                             // le compte CPTEWAVE (5) est de type caisse
+                                             // (courant=2) et refuse tout mode ≠ LIQ.
+  OM:      { code: 'OM',    accountId: 4 },  // Code marchand OM
+  CB:      { code: 'CB',    accountId: 1 },  // COMPTE CBAO HARMATTAN
+  CARD:    { code: 'CB',    accountId: 1 },
+  LIQ:     { code: 'LIQ',   accountId: 3 },  // COMPTE LIQUIDE
+  CASH:    { code: 'LIQ',   accountId: 3 },
+  ESPECES: { code: 'LIQ',   accountId: 3 },
+};
+
+/** Résout une méthode (paytech/wave/om/cb/cash…) en { code, accountId }. Repli PayTech. */
+export function resolveEcommercePayment(method) {
+  const key = String(method || '').toUpperCase();
+  return ECOMMERCE_PAYMENT_MAP[key] || ECOMMERCE_PAYMENT_MAP.PAYTECH;
+}
+
+/**
+ * Enregistre dans Dolibarr le règlement d'une facture e-commerce (canal en ligne
+ * ou confirmation admin) : sans ça la facture reste `paye=0` → « Impayée » alors
+ * que le client a payé. Solde la facture (closepaidinvoices) car un encaissement
+ * web vaut paiement intégral.
+ *
+ * @returns {Promise<number>} id du paiement Dolibarr créé
+ */
+export async function recordEcommerceInvoicePayment(adminApi, pool, {
+  invoiceId, amount, method, datepaye, comment,
+}) {
+  const { code, accountId } = resolveEcommercePayment(method);
+  const paymentId = await resolvePaymentId(pool, code);
+  if (!paymentId) throw new Error(`Mode de paiement Dolibarr introuvable pour code=${code}`);
+  return recordInvoicePayment(adminApi, {
+    invoiceId,
+    amount,
+    paymentId,
+    accountId,
+    datepaye,
+    isLast: true,
+    comment,
+  });
+}

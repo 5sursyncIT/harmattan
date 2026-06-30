@@ -17,6 +17,8 @@ import axios from 'axios';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import 'dotenv/config';
+import { recordEcommerceInvoicePayment } from './dolibarr-payments.js';
+import { adminApi } from './dolibarr-admin-client.js';
 
 const PAYTECH_API_KEY = process.env.PAYTECH_API_KEY || '';
 const PAYTECH_API_SECRET = process.env.PAYTECH_API_SECRET || '';
@@ -294,12 +296,21 @@ export function createPaytechRouter({
         }
 
         let invoiceRef = op.invoice_ref || null;
+        let invoiceId = null;
 
         // ── Idempotence basée sur la commande (pas sur le token) ──
         // Si une facture est déjà liée à cette commande, on ne la recrée pas
         // (rejeu d'un sale_complete avec un token différent).
         if (op.invoice_ref) {
           console.info(`[PAYTECH-IPN] facture déjà liée (${op.invoice_ref}), pas de nouvelle création, order=${op.dolibarr_order_id}`);
+          // Re-résout l'id pour pouvoir solder le règlement si un IPN antérieur
+          // avait créé/validé la facture sans enregistrer le paiement.
+          if (dolibarrPool) {
+            try {
+              const [rows] = await dolibarrPool.query('SELECT rowid FROM llx_facture WHERE ref = ? LIMIT 1', [op.invoice_ref]);
+              invoiceId = rows[0]?.rowid || null;
+            } catch { /* ignore */ }
+          }
         } else {
           // ── Revalidation stock avant facturation ──
           // Entre la commande et l'IPN, le POS peut avoir vendu les mêmes unités.
@@ -350,7 +361,7 @@ export function createPaytechRouter({
           // Création de la facture Dolibarr depuis la commande
           try {
             const invoiceRes = await dolibarrApi.post('/invoices/createfromorder/' + op.dolibarr_order_id);
-            const invoiceId = invoiceRes.data;
+            invoiceId = invoiceRes.data;
             // Validate the invoice — idwarehouse:4 (Rayon) = même dépôt que POS,
             // déclenche le décrément stock sur la source de vérité physique.
             try {
@@ -375,6 +386,28 @@ export function createPaytechRouter({
             // On marque malgré tout le paiement comme confirmé pour ne pas relancer le client.
             // Un admin pourra créer la facture manuellement depuis /admin/payments
             // (visible via GET /api/admin/payments/orphans).
+          }
+        }
+
+        // ── Enregistrement du règlement dans Dolibarr ──
+        // Sans ce paiement, la facture reste paye=0 → « Impayée » alors que le
+        // client a réglé en ligne, et l'encaissement n'apparaît dans aucune
+        // trésorerie. On l'impute sur le compte PayTech dédié. Best-effort :
+        // un échec ici n'empêche pas la confirmation (l'admin peut régulariser),
+        // mais on le journalise.
+        if (invoiceId && dolibarrPool && amountPaid > 0) {
+          try {
+            // adminApi (clé admin) : l'enregistrement de paiement requiert des
+            // droits que la clé régulière dolibarrApi n'a pas.
+            await recordEcommerceInvoicePayment(adminApi, dolibarrPool, {
+              invoiceId,
+              amount: amountPaid,
+              method: 'paytech',
+              datepaye: Math.floor(Date.now() / 1000),
+              comment: `Encaissement PayTech — commande ${op.order_ref} (token ${token})`,
+            });
+          } catch (payErr) {
+            console.error(`[PAYTECH-IPN] enregistrement paiement échoué (facture ${invoiceRef || invoiceId}):`, payErr.response?.data || payErr.message);
           }
         }
 

@@ -20,6 +20,7 @@ import sharp from 'sharp';
 import axios from 'axios';
 import { dolibarrApi } from './dolibarr-client.js';
 import { adminApi } from './dolibarr-admin-client.js';
+import { recordEcommerceInvoicePayment } from './dolibarr-payments.js';
 import { fetchOrderDetail } from './order-detail.js';
 import { findExistingTier } from './tier-dedup.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
@@ -1419,6 +1420,26 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
     // Mettre à jour le suivi de paiement local. La confirmation manuelle vaut
     // encaissement du montant attendu (paiement intégral) → amount_received = total.
     const amountReceived = parseFloat(invoice.data.total_ttc) || parseFloat(order.total_ttc) || 0;
+
+    // ── Enregistrement du règlement dans Dolibarr ──
+    // Sans ce paiement, la facture reste paye=0 → « Impayée » et l'encaissement
+    // n'atterrit dans aucune trésorerie. On l'impute sur le compte du moyen
+    // de paiement déclaré pour la commande (paytech/wave/om/…). Best-effort.
+    const opRow = db.prepare('SELECT payment_method FROM order_payments WHERE dolibarr_order_id = ?').get(String(orderId));
+    if (amountReceived > 0) {
+      try {
+        await recordEcommerceInvoicePayment(adminApi, dolibarrPool, {
+          invoiceId,
+          amount: amountReceived,
+          method: opRow?.payment_method || 'paytech',
+          datepaye: Math.floor(Date.now() / 1000),
+          comment: `Encaissement web confirmé par ${req.admin.username} — commande ${order.ref}`,
+        });
+      } catch (payErr) {
+        console.error(`[CONFIRM-PAYMENT] enregistrement paiement Dolibarr échoué (facture ${invoice.data.ref}):`, payErr.response?.data || payErr.message);
+      }
+    }
+
     db.prepare(
       'UPDATE order_payments SET payment_status = ?, invoice_ref = ?, amount_received = ?, confirmed_by = ?, confirmed_at = datetime(?) WHERE dolibarr_order_id = ?'
     ).run('confirmed', invoice.data.ref, amountReceived, req.admin.username, new Date().toISOString(), String(orderId));
