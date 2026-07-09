@@ -1,4 +1,4 @@
-import { FiPrinter, FiX, FiDownload } from 'react-icons/fi';
+import { FiPrinter, FiX, FiDownload, FiCheckCircle, FiXCircle } from 'react-icons/fi';
 import api from '../../api/dolibarr';
 import './POSQuoteReceipt.css';
 
@@ -9,7 +9,7 @@ const BANK_INFO = {
   mobile: 'Code marchand OM 413513 ou WAVE 77 242 25 08',
 };
 
-export default function POSQuoteReceipt({ quote, onClose, hideOdt = false }) {
+export default function POSQuoteReceipt({ quote, onClose, hideOdt = false, onInvoice, onRefuse }) {
   const handlePrint = () => {
     const printContent = document.getElementById('pos-receipt-printable');
     if (!printContent) return;
@@ -100,6 +100,17 @@ export default function POSQuoteReceipt({ quote, onClose, hideOdt = false }) {
         {!hideOdt && (
           <button className="quote-btn-download" onClick={handleDownloadODT}>
             <FiDownload /> Telecharger ODT
+          </button>
+        )}
+        {/* Actions admin (contexte /admin/devis uniquement — jamais au POS). */}
+        {onInvoice && (
+          <button className="quote-btn-print" onClick={onInvoice} style={{ background: '#166534' }}>
+            <FiCheckCircle /> Valider et facturer
+          </button>
+        )}
+        {onRefuse && (
+          <button className="quote-btn-close" onClick={onRefuse} style={{ background: '#b91c1c', color: '#fff', borderColor: '#b91c1c' }}>
+            <FiXCircle /> Refuser
           </button>
         )}
         <button className="quote-btn-close" onClick={onClose}>

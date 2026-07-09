@@ -17,6 +17,7 @@ const ACTION_OPTIONS = [
   { value: 'edit_lines', label: 'Édition lignes' },
   { value: 'reassign_customer', label: 'Réassignation client' },
   { value: 'delete', label: 'Suppression brouillon' },
+  { value: 'correct_payment_method', label: 'Moyen de paiement corrigé' },
 ];
 
 const ACTION_LABELS = Object.fromEntries(ACTION_OPTIONS.filter(o => o.value).map(o => [o.value, o.label]));
@@ -28,6 +29,7 @@ const ACTION_COLOR = {
   edit_lines: '#0284c7',
   reassign_customer: '#f59e0b',
   delete: '#dc2626',
+  correct_payment_method: '#7c3aed',
 };
 
 export default function InvoicesAuditPanel() {

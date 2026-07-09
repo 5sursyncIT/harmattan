@@ -3,6 +3,7 @@ import {
   FiFileText, FiSearch, FiX, FiMail, FiPhone, FiMapPin, FiDownload,
   FiClock, FiAlertCircle, FiChevronLeft, FiChevronRight,
   FiPlus, FiTrash2, FiUser, FiUserPlus, FiSave,
+  FiCheckCircle, FiXCircle,
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import Loader from '../../../components/common/Loader';
@@ -11,14 +12,25 @@ import {
   listPropals, getPropal, openPropalPdf,
   createPropal, searchPropalClients, searchPropalProducts,
   listPosQuotes, deletePosQuote,
+  invoicePropal, refusePropal,
+  invoicePosQuote, refusePosQuote,
 } from '../../../api/propals';
 import { createAdminSociete } from '../../../api/admin';
 import POSQuoteReceipt from '../../../components/pos/POSQuoteReceipt';
+import ConfirmModal from '../../../components/common/ConfirmModal';
 import useAdminRole from '../../../hooks/useAdminRole';
 import './Contracts.css';
 
 // Suppression d'une proforma POS réservée aux administrateurs.
 const POS_QUOTE_DELETE_ROLES = ['super_admin', 'admin'];
+// Facturer / refuser une proforma POS : admins + comptable.
+const POS_QUOTE_INVOICE_ROLES = ['super_admin', 'admin', 'comptable'];
+// Badge couleur selon l'état d'une proforma POS.
+const POS_STATUS_STYLE = {
+  valid: { bg: '#fff7ed', color: '#c2410c' },
+  invoiced: { bg: '#faf5ff', color: '#7c3aed' },
+  refused: { bg: '#fef2f2', color: '#991b1b' },
+};
 
 const STATUS_BADGE = {
   0: { label: 'Brouillon', bg: '#f1f5f9', color: '#475569' },
@@ -29,9 +41,13 @@ const STATUS_BADGE = {
 };
 const fmtDate = (s) => (s ? new Date(String(s).replace(' ', 'T')).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
 
-function PropalDetailModal({ id, onClose }) {
+function PropalDetailModal({ id, onClose, onChanged }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Action en cours de confirmation : null | 'invoice' | 'refuse'.
+  const [action, setAction] = useState(null);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +58,30 @@ function PropalDetailModal({ id, onClose }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [id]);
+
+  const doInvoice = async () => {
+    setBusy(true);
+    try {
+      const r = await invoicePropal(id);
+      toast.success(`Facture ${r.data.invoice_ref || ''} créée depuis le devis`.trim());
+      onChanged?.();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de la facturation');
+      setBusy(false);
+    }
+  };
+
+  const doRefuse = async () => {
+    setBusy(true);
+    try {
+      await refusePropal(id, reason.trim());
+      toast.success('Devis marqué comme refusé');
+      onChanged?.();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors du refus');
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -109,8 +149,62 @@ function PropalDetailModal({ id, onClose }) {
               <div style={{ marginBottom: 10, fontSize: '0.85rem', color: '#475569' }}><strong>Note :</strong> {data.propal.note_public}</div>
             )}
 
+            {/* Statut terminal — rappel visuel */}
+            {data.propal.status === 4 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#faf5ff', border: '1px solid #e9d5ff', color: '#6b21a8', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: '0.85rem', fontWeight: 600 }}>
+                <FiCheckCircle size={16} /> Devis facturé{data.propal.linked_invoice?.ref ? ` — facture ${data.propal.linked_invoice.ref}` : ''}
+              </div>
+            )}
+            {data.propal.status === 3 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: '0.85rem', fontWeight: 600 }}>
+                <FiXCircle size={16} /> Devis refusé
+              </div>
+            )}
+
+            {/* Confirmation : transformation en facture */}
+            {action === 'invoice' && (
+              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, color: '#166534', marginBottom: 4 }}>Transformer ce devis en facture ?</div>
+                <p style={{ fontSize: '0.82rem', color: '#15803d', margin: 0 }}>
+                  Une facture <strong>validée (impayée)</strong> sera créée pour {data.propal.customer.name || 'ce client'} et le stock des articles sera décrémenté. Le devis passera au statut « Facturé ».
+                </p>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
+                  <button className="ct-btn ct-btn-outline" onClick={() => setAction(null)} disabled={busy}>Annuler</button>
+                  <button className="ct-btn ct-btn-primary" onClick={doInvoice} disabled={busy}>
+                    <FiCheckCircle size={14} /> {busy ? 'Facturation...' : 'Confirmer la facturation'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Confirmation : refus */}
+            {action === 'refuse' && (
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, color: '#991b1b', marginBottom: 6 }}>Marquer ce devis comme refusé ?</div>
+                <textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={500} rows={2}
+                  placeholder="Motif (optionnel) — ex. client a décliné, hors budget…"
+                  style={{ width: '100%', padding: '8px 10px', border: '1px solid #fecaca', borderRadius: 8, fontSize: '0.85rem', resize: 'vertical', boxSizing: 'border-box' }} />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
+                  <button className="ct-btn ct-btn-outline" onClick={() => { setAction(null); setReason(''); }} disabled={busy}>Annuler</button>
+                  <button className="ct-btn ct-btn-primary" style={{ background: '#dc2626', borderColor: '#dc2626' }} onClick={doRefuse} disabled={busy}>
+                    <FiXCircle size={14} /> {busy ? 'En cours...' : 'Confirmer le refus'}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="ct-modal-actions">
               <button className="ct-btn ct-btn-outline" onClick={() => openPropalPdf(data.propal.id)}><FiDownload size={14} /> PDF</button>
+              {[0, 1, 2].includes(data.propal.status) && action === null && (
+                <>
+                  <button className="ct-btn ct-btn-outline" style={{ color: '#b91c1c', borderColor: '#fecaca' }} onClick={() => setAction('refuse')}>
+                    <FiXCircle size={14} /> Refuser
+                  </button>
+                  <button className="ct-btn ct-btn-primary" onClick={() => setAction('invoice')}>
+                    <FiCheckCircle size={14} /> Valider et facturer
+                  </button>
+                </>
+              )}
             </div>
           </>
         )}
@@ -390,8 +484,12 @@ export default function DevisPanel() {
   const [creating, setCreating] = useState(false);
   const [posQuotes, setPosQuotes] = useState([]);
   const [posQuote, setPosQuote] = useState(null);
+  // Confirmation facturer / refuser d'une proforma POS : { type, quote }.
+  const [posAction, setPosAction] = useState(null);
+  const [posBusy, setPosBusy] = useState(false);
   const role = useAdminRole();
   const canDeletePos = POS_QUOTE_DELETE_ROLES.includes(role);
+  const canInvoicePos = POS_QUOTE_INVOICE_ROLES.includes(role);
 
   const handleDeletePosQuote = async (q) => {
     if (!window.confirm(`Supprimer définitivement la proforma ${q.ref} ?`)) return;
@@ -402,6 +500,30 @@ export default function DevisPanel() {
       toast.success(`Proforma ${q.ref} supprimée`);
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur lors de la suppression');
+    }
+  };
+
+  // Ouvre la confirmation (ferme la vue proforma si ouverte pour éviter la superposition).
+  const askPosAction = (type, q) => { setPosQuote(null); setPosAction({ type, quote: q }); };
+
+  const confirmPosAction = async () => {
+    if (!posAction) return;
+    const { type, quote } = posAction;
+    setPosBusy(true);
+    try {
+      if (type === 'invoice') {
+        const r = await invoicePosQuote(quote.ref);
+        toast.success(`Facture ${r.data.invoice_ref || ''} créée depuis la proforma`.trim());
+      } else {
+        await refusePosQuote(quote.ref);
+        toast.success(`Proforma ${quote.ref} refusée`);
+      }
+      setPosAction(null);
+      reload();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Une erreur est survenue');
+    } finally {
+      setPosBusy(false);
     }
   };
 
@@ -475,22 +597,35 @@ export default function DevisPanel() {
             <table className="admin-table">
               <thead><tr><th>N°</th><th>Client</th><th style={{ textAlign: 'right' }}>Montant</th><th>Statut</th><th>Date</th><th>Validité</th><th></th></tr></thead>
               <tbody>
-                {posQuotes.map(q => (
-                  <tr key={q.id} style={{ cursor: 'pointer' }} onClick={() => setPosQuote(q)}>
-                    <td><strong style={{ color: '#c2410c', textDecoration: 'underline', textUnderlineOffset: 3 }}>{q.ref}</strong></td>
-                    <td>{q.customer_name}</td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatPrice(q.total_ttc)}</td>
-                    <td><span style={{ padding: '2px 8px', borderRadius: 6, fontSize: '0.75rem', fontWeight: 700, background: '#fff7ed', color: '#c2410c' }}>{q.statusLabel}</span></td>
-                    <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{fmtDate(q.date)}</td>
-                    <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{q.expiry ? <><FiClock size={11} style={{ verticalAlign: -1, marginRight: 3 }} />{fmtDate(q.expiry)}</> : '—'}</td>
-                    <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
-                      <button className="ct-btn-ghost" onClick={() => setPosQuote(q)} title="Voir / imprimer"><FiFileText size={16} /></button>
-                      {canDeletePos && (
-                        <button className="ct-btn-ghost" onClick={() => handleDeletePosQuote(q)} title="Supprimer" style={{ color: '#dc2626' }}><FiTrash2 size={16} /></button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {posQuotes.map(q => {
+                  const st = POS_STATUS_STYLE[q.status_code] || POS_STATUS_STYLE.valid;
+                  const isValid = (q.status_code || 'valid') === 'valid';
+                  return (
+                    <tr key={q.id} style={{ cursor: 'pointer' }} onClick={() => setPosQuote(q)}>
+                      <td><strong style={{ color: '#c2410c', textDecoration: 'underline', textUnderlineOffset: 3 }}>{q.ref}</strong></td>
+                      <td>{q.customer_name}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatPrice(q.total_ttc)}</td>
+                      <td>
+                        <span style={{ padding: '2px 8px', borderRadius: 6, fontSize: '0.75rem', fontWeight: 700, background: st.bg, color: st.color }}>{q.statusLabel}</span>
+                        {q.invoice_ref && <span style={{ marginLeft: 6, fontSize: '0.72rem', color: '#7c3aed' }}>{q.invoice_ref}</span>}
+                      </td>
+                      <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{fmtDate(q.date)}</td>
+                      <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{q.expiry ? <><FiClock size={11} style={{ verticalAlign: -1, marginRight: 3 }} />{fmtDate(q.expiry)}</> : '—'}</td>
+                      <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                        <button className="ct-btn-ghost" onClick={() => setPosQuote(q)} title="Voir / imprimer"><FiFileText size={16} /></button>
+                        {canInvoicePos && isValid && (
+                          <>
+                            <button className="ct-btn-ghost" onClick={() => askPosAction('invoice', q)} title="Valider et facturer" style={{ color: '#166534' }}><FiCheckCircle size={16} /></button>
+                            <button className="ct-btn-ghost" onClick={() => askPosAction('refuse', q)} title="Refuser" style={{ color: '#b91c1c' }}><FiXCircle size={16} /></button>
+                          </>
+                        )}
+                        {canDeletePos && (
+                          <button className="ct-btn-ghost" onClick={() => handleDeletePosQuote(q)} title="Supprimer" style={{ color: '#dc2626' }}><FiTrash2 size={16} /></button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -544,8 +679,37 @@ export default function DevisPanel() {
         </>
       )}
 
-      {detailId && <PropalDetailModal id={detailId} onClose={() => setDetailId(null)} />}
-      {posQuote && <POSQuoteReceipt quote={posQuote} hideOdt onClose={() => setPosQuote(null)} />}
+      {detailId && (
+        <PropalDetailModal
+          id={detailId}
+          onClose={() => setDetailId(null)}
+          onChanged={() => { setDetailId(null); reload(); }}
+        />
+      )}
+      {posQuote && (
+        <POSQuoteReceipt
+          quote={posQuote}
+          hideOdt
+          onClose={() => setPosQuote(null)}
+          {...(canInvoicePos && (posQuote.status_code || 'valid') === 'valid' ? {
+            onInvoice: () => askPosAction('invoice', posQuote),
+            onRefuse: () => askPosAction('refuse', posQuote),
+          } : {})}
+        />
+      )}
+      {posAction && (
+        <ConfirmModal
+          title={posAction.type === 'invoice' ? 'Transformer la proforma en facture ?' : 'Refuser la proforma ?'}
+          message={posAction.type === 'invoice'
+            ? `Une facture validée (impayée) sera créée pour « ${posAction.quote.customer_name} » et le stock des articles sera décrémenté. La proforma ${posAction.quote.ref} passera au statut « Facturée ».`
+            : `La proforma ${posAction.quote.ref} sera marquée « Refusée ». Cette action est réversible via une nouvelle proforma.`}
+          confirmLabel={posAction.type === 'invoice' ? 'Confirmer la facturation' : 'Confirmer le refus'}
+          danger={posAction.type === 'refuse'}
+          loading={posBusy}
+          onConfirm={confirmPosAction}
+          onCancel={() => { if (!posBusy) setPosAction(null); }}
+        />
+      )}
       {creating && (
         <CreatePropalModal
           onClose={() => setCreating(false)}

@@ -27,6 +27,12 @@ export const getCustomerCredits = (socid) => api.get(`/admin/invoices/customers/
 // (rétro-compat { reason, method, amount, bank_account, num_payment }).
 export const payInvoice = (id, payload) => api.post(`/admin/invoices/${id}/pay`, payload);
 
+// Corriger le moyen de paiement d'un règlement déjà enregistré (ex. saisi « Wave »
+// au lieu d'« espèces »). Déplace aussi la ligne de trésorerie vers le bon compte.
+// payload : { reason, method, bank_account, num_payment? } — admins seuls.
+export const correctPaymentMethod = (invoiceId, paymentId, payload) =>
+  api.post(`/admin/invoices/${invoiceId}/payments/${paymentId}/correct-method`, payload);
+
 // Acompte : créer (+ encaisser) une facture d'acompte type=3 convertie en avoir disponible
 export const createDeposit = (payload) => api.post('/admin/invoices/deposit', payload);
 

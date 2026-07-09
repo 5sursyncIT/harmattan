@@ -477,10 +477,13 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
       const [payments] = await dolibarrPool.query(
         `SELECT pf.fk_paiement, pf.amount,
+                p.rowid AS payment_id,
                 DATE_FORMAT(p.datep, '%Y-%m-%d') AS datep,
                 p.num_paiement,
                 cp.code AS method_code, cp.libelle AS method_label,
-                ba.label AS bank_label
+                ba.label AS bank_label,
+                b.fk_account AS bank_account_id,
+                b.rappro AS reconciled
          FROM llx_paiement_facture pf
          JOIN llx_paiement p ON p.rowid = pf.fk_paiement
          LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
@@ -534,6 +537,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
           kind: 'payment', date: p.datep, amount: p.amount,
           label: p.method_label, method_code: p.method_code,
           bank_label: p.bank_label || null, num: p.num_paiement || null,
+          // Contexte pour la correction du moyen de paiement (bouton admin).
+          payment_id: p.payment_id, bank_account_id: p.bank_account_id,
+          reconciled: !!p.reconciled,
         })),
         ...creditsOut.map(c => ({
           kind: c.kind, date: c.date, amount: c.amount,
@@ -692,6 +698,121 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] pay error:', msg);
       res.status(500).json({ error: 'Erreur enregistrement paiement', detail: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // CORRECT PAYMENT METHOD — corrige un moyen de paiement saisi par erreur
+  // (ex. encaissé « Wave » alors que le client a payé en espèces).
+  //
+  // ⚠️ Le moyen de paiement n'est PAS qu'un libellé : il détermine le compte
+  // de trésorerie où tombe l'argent. On corrige donc DEUX choses à la fois :
+  //   1. le mode sur le paiement       → llx_paiement.fk_paiement
+  //   2. la ligne de trésorerie        → llx_bank.fk_account (+ fk_type)
+  // Sinon le solde par source resterait faux (Wave surévalué, caisse
+  // sous-évaluée). La compta se régénère seule au prochain transfert
+  // (purge AUTOGEN non-validé + rebuild depuis llx_bank) → accounting_regen_needed.
+  //
+  // Réservé aux administrateurs. Refusé si la ligne bancaire est déjà
+  // rapprochée (rappro≠0). Avant/après tracés dans invoice_audit_log (réversible).
+  // Body : { reason, method, bank_account, num_payment? }
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/payments/:pid/correct-method', auth, noCsrf, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const pid = parseInt(req.params.pid);
+    const reason = nonEmptyReason(req.body?.reason);
+    const method = String(req.body?.method || '').toUpperCase();
+    const bankAccount = parseInt(req.body?.bank_account);
+    const numPayment = req.body?.num_payment != null ? String(req.body.num_payment).slice(0, 64) : null;
+
+    // Correction d'un encaissement déjà comptabilisé : opération sensible → admins seuls.
+    if (!['super_admin', 'admin'].includes(req.admin?.role)) {
+      return res.status(403).json({ error: 'Réservé aux administrateurs' });
+    }
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+    if (!PAYMENT_METHODS_ALLOWED.has(method)) return res.status(400).json({ error: 'Méthode de paiement invalide', received: method });
+    if (!bankAccount) return res.status(400).json({ error: 'Compte de trésorerie requis' });
+
+    try {
+      const inv = await loadInvoiceRow(dolibarrPool, id);
+      if (!inv) return res.status(404).json({ error: 'Facture introuvable' });
+
+      // 1. Le paiement doit exister ET être imputé sur CETTE facture.
+      const [[pay]] = await dolibarrPool.query(
+        `SELECT p.rowid, p.fk_paiement, p.fk_bank, p.amount, p.num_paiement,
+                cp.code AS cur_code, cp.libelle AS cur_label
+         FROM llx_paiement p
+         JOIN llx_paiement_facture pf ON pf.fk_paiement = p.rowid AND pf.fk_facture = ?
+         LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+         WHERE p.rowid = ? LIMIT 1`, [id, pid]
+      );
+      if (!pay) return res.status(404).json({ error: 'Paiement introuvable sur cette facture' });
+
+      // 2. Nouveau mode → id Dolibarr (v21 exige l'id, pas le code).
+      const newPayId = await resolvePaymentId(dolibarrPool, method);
+      if (!newPayId) return res.status(400).json({ error: `Mode « ${method} » absent de Dolibarr` });
+
+      // 3. Compte de trésorerie cible : existe et ouvert.
+      const [[acc]] = await dolibarrPool.query(
+        `SELECT rowid, ref, label FROM llx_bank_account WHERE rowid = ? AND clos = 0 LIMIT 1`, [bankAccount]
+      );
+      if (!acc) return res.status(400).json({ error: 'Compte de trésorerie introuvable ou clôturé' });
+
+      // 4. Ligne bancaire du paiement (porte le solde par compte). Refus si rapprochée.
+      const [[bank]] = pay.fk_bank
+        ? await dolibarrPool.query('SELECT rowid, fk_account, fk_type, rappro FROM llx_bank WHERE rowid = ? LIMIT 1', [pay.fk_bank])
+        : [[null]];
+      if (!bank) return res.status(409).json({ error: 'Aucune ligne de trésorerie liée à ce paiement — correction impossible' });
+      if (Number(bank.rappro) !== 0) return res.status(409).json({ error: 'Paiement déjà rapproché en banque — correction impossible (annulez le rapprochement d\'abord)' });
+
+      // 5. No-op ? (mode, compte et référence inchangés)
+      const sameMethod = Number(pay.fk_paiement) === newPayId;
+      const sameAccount = Number(bank.fk_account) === bankAccount;
+      const sameNum = numPayment == null || numPayment === (pay.num_paiement || '');
+      if (sameMethod && sameAccount && sameNum) {
+        return res.status(400).json({ error: 'Aucun changement : mode, compte et référence déjà identiques' });
+      }
+
+      // 6. Application en transaction : mode (paiement) + trésorerie (ligne banque).
+      const conn = await dolibarrPool.getConnection();
+      try {
+        await conn.beginTransaction();
+        if (numPayment != null) {
+          await conn.query('UPDATE llx_paiement SET fk_paiement = ?, num_paiement = ? WHERE rowid = ?', [newPayId, numPayment, pid]);
+        } else {
+          await conn.query('UPDATE llx_paiement SET fk_paiement = ? WHERE rowid = ?', [newPayId, pid]);
+        }
+        await conn.query('UPDATE llx_bank SET fk_account = ?, fk_type = ? WHERE rowid = ?', [bankAccount, method, bank.rowid]);
+        await conn.commit();
+      } catch (e) {
+        try { await conn.rollback(); } catch { /* ignore */ }
+        throw e;
+      } finally {
+        conn.release();
+      }
+
+      // 7. Audit — before/after complets (réversible manuellement depuis ce journal).
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: inv.ref,
+        action: 'correct_payment_method', reason,
+        before: { payment_id: pid, method: pay.cur_code, method_label: pay.cur_label,
+                  bank_account_id: Number(bank.fk_account), num_payment: pay.num_paiement, amount: Number(pay.amount) },
+        after:  { payment_id: pid, method, bank_account_id: bankAccount, bank_account_label: acc.label,
+                  num_payment: numPayment != null ? numPayment : pay.num_paiement },
+      });
+
+      res.json({
+        success: true,
+        payment_id: pid,
+        method,
+        bank_account: bankAccount,
+        // Le prochain transfert comptable régénère l'écriture 521/571 correcte.
+        accounting_regen_needed: true,
+      });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('[INVOICES] correct-method error:', msg);
+      res.status(500).json({ error: 'Erreur correction du moyen de paiement', detail: msg });
     }
   });
 

@@ -18,6 +18,9 @@ const ACTOR_FILE_KINDS = {
   in_evaluation: ['original'],
   in_correction: ['correction', 'original'],
   cover_design: ['author_final', 'correction', 'original'],
+  // L'imprimeur est prévenu dès le BAT validé (print_preparation) : mêmes
+  // fichiers que printing — s'ils existent déjà, il les reçoit en avance.
+  print_preparation: ['print_ready', 'bat_cover', 'author_final'],
   printing: ['print_ready', 'bat_cover', 'author_final'],
 };
 
@@ -69,6 +72,37 @@ export function createFileToken(db, { manuscriptId, fileId, intervenantId = null
      VALUES (?, ?, ?, ?, datetime('now', ?), ?)`
   ).run(hashToken(token), manuscriptId, fileId, intervenantId, `+${ttlHours} hours`, maxUses);
   return token;
+}
+
+/**
+ * Révoque immédiatement les liens actifs d'un intervenant sur un manuscrit
+ * (expiration forcée à maintenant — le hash reste en base pour l'audit).
+ * Why: sans révocation, un intervenant DÉSAFFECTÉ conservait l'accès au fichier
+ * jusqu'à expiration naturelle (7 jours / 5 usages) — trou relevé à l'audit
+ * du 09/07/2026. Appelée à la désaffectation (manuscript-routes.js).
+ * @returns {number} nombre de liens révoqués
+ */
+export function revokeFileTokens(db, { manuscriptId, intervenantId }) {
+  if (!manuscriptId || !intervenantId) return 0;
+  const r = db.prepare(
+    `UPDATE manuscript_file_tokens
+     SET expires_at = datetime('now')
+     WHERE manuscript_id = ? AND intervenant_id = ? AND expires_at > datetime('now')`
+  ).run(manuscriptId, intervenantId);
+  return r.changes;
+}
+
+/**
+ * Purge les tokens expirés depuis plus de `graceDays` jours (la fenêtre de
+ * grâce conserve les hashs récents pour investigation). Sans purge, la table
+ * croissait indéfiniment. Appelée au démarrage du serveur.
+ * @returns {number} lignes supprimées
+ */
+export function purgeExpiredFileTokens(db, graceDays = 30) {
+  const r = db.prepare(
+    `DELETE FROM manuscript_file_tokens WHERE expires_at < datetime('now', ?)`
+  ).run(`-${Math.max(1, parseInt(graceDays, 10) || 30)} days`);
+  return r.changes;
 }
 
 /**

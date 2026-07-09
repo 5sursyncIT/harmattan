@@ -8,7 +8,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync, createReadStream, readFileSync, statSync, rmSync, unlinkSync } from 'fs';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
-import { createAuthorNotification, sendTransitionEmail } from './manuscript-emails.js';
+import { createAuthorNotification, createAuthorEventNotification, sendTransitionEmail } from './manuscript-emails.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { makeAdminAuth } from './admin-auth.js';
 
@@ -1077,11 +1077,23 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
         return res.status(409).json({ error: 'Ce contrat est un brouillon : modifiez l\'ISBN via l\'édition du contrat' });
       }
 
-      // Pose l'ISBN dans l'extrafield (UPSERT défensif si la ligne n'existe pas).
-      await dolibarrPool.query(
-        `INSERT INTO llx_contrat_extrafields (fk_object, book_isbn) VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE book_isbn = VALUES(book_isbn)`, [id, isbn]
+      // Pose l'ISBN dans l'extrafield. UPSERT défensif : UPDATE simple si la
+      // ligne existe (cas normal), INSERT complet sinon. Un « INSERT … ON
+      // DUPLICATE KEY » échouerait en mode SQL strict car book_title (NOT NULL,
+      // sans défaut) n'est pas fourni dans la liste de colonnes.
+      const [hasExtrafields] = await dolibarrPool.query(
+        'SELECT 1 FROM llx_contrat_extrafields WHERE fk_object = ? LIMIT 1', [id]
       );
+      if (hasExtrafields.length) {
+        await dolibarrPool.query(
+          'UPDATE llx_contrat_extrafields SET book_isbn = ? WHERE fk_object = ?', [isbn, id]
+        );
+      } else {
+        await dolibarrPool.query(
+          'INSERT INTO llx_contrat_extrafields (fk_object, book_title, book_isbn) VALUES (?, ?, ?)',
+          [id, contract.ref || '—', isbn]
+        );
+      }
 
       // Le produit catalogue correspondant existe-t-il ? (barcode = ISBN normalisé)
       const [[prod]] = await dolibarrPool.query(
@@ -1260,11 +1272,22 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       // au téléchargement (GET /document), c'est un vrai envoi : on le journalise à
       // chaque émission (un renvoi est une action volontaire et utile à tracer).
       try {
-        const ms = db.prepare('SELECT id FROM manuscripts WHERE contract_id = ?').get(id);
+        const ms = db.prepare('SELECT * FROM manuscripts WHERE contract_id = ?').get(id);
         if (ms) {
           logManuscriptEvent(db, ms.id, 'contract_sent',
             { role: req.admin?.role || 'admin', id: req.admin?.id, label: req.admin?.username },
             `Lien de signature envoyé à ${email}`);
+          // Cloche auteur : l'envoi du lien de signature est un moment clé qui
+          // n'apparaissait QUE par email — l'espace auteur restait muet.
+          createAuthorEventNotification(db, {
+            authorId: ms.author_id,
+            manuscript: ms,
+            key: 'contract_sent',
+            title: 'Contrat à signer en ligne',
+            message: `Le lien de signature de votre contrat ${ref} vous a été envoyé par email (${email}).`,
+            actionUrl: `/auteur/manuscrits/${ms.id}`,
+            actionRequired: true,
+          });
         }
       } catch (e) { console.warn('Manuscript event (contract_sent) warning:', e.message); }
 
@@ -1414,13 +1437,30 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       // SQLite échoue après MySQL, le contrat est signé côté Dolibarr et un
       // re-dépôt suffit à compléter l'attestation. L'ordre inverse laissait un
       // contrat « attesté signé » localement mais non signé dans Dolibarr.
-      await dolibarrPool.query(
-        `INSERT INTO llx_contrat_extrafields (fk_object, signature_auteur_nom, signature_auteur_date)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE signature_auteur_nom = VALUES(signature_auteur_nom),
-                                 signature_auteur_date = VALUES(signature_auteur_date)`,
-        [id, signerName, signedDate]
+      // En mode SQL strict, MySQL valide la partie INSERT d'un « INSERT … ON
+      // DUPLICATE KEY UPDATE » AVANT de tenter la branche UPDATE : comme
+      // book_title est NOT NULL sans défaut et absent de la liste de colonnes,
+      // l'instruction échoue même quand la ligne d'extrafields existe déjà (le
+      // cas normal pour un contrat validé) → 500 « Field 'book_title' doesn't
+      // have a default value ». On fait donc un UPDATE simple, avec un INSERT
+      // complet en repli si la ligne n'existe pas encore.
+      const [hasExtrafields] = await dolibarrPool.query(
+        'SELECT 1 FROM llx_contrat_extrafields WHERE fk_object = ? LIMIT 1', [id]
       );
+      if (hasExtrafields.length) {
+        await dolibarrPool.query(
+          `UPDATE llx_contrat_extrafields
+              SET signature_auteur_nom = ?, signature_auteur_date = ?
+            WHERE fk_object = ?`,
+          [signerName, signedDate, id]
+        );
+      } else {
+        await dolibarrPool.query(
+          `INSERT INTO llx_contrat_extrafields (fk_object, book_title, signature_auteur_nom, signature_auteur_date)
+           VALUES (?, ?, ?, ?)`,
+          [id, contract.soc_nom || contract.ref || '—', signerName, signedDate]
+        );
+      }
       await dolibarrPool.query('UPDATE llx_contrat SET signed_status = 2 WHERE rowid = ?', [id]);
 
       // Enregistre l'attestation (une par contrat — REPLACE en cas de re-dépôt).

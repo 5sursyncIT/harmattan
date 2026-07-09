@@ -114,7 +114,7 @@ export default function AuthorManuscriptDetail() {
             <ul className="author-eval-list">
               {evaluations.map((ev, idx) => (
                 <li key={idx} className={`author-eval author-eval-${ev.verdict}`}>
-                  <strong>{ev.verdict === 'positive' ? 'Avis favorable' : 'Avis défavorable'}</strong>
+                  <strong>{ev.verdict === 'positive' ? 'Avis favorable' : ev.verdict === 'rework' ? 'À retravailler' : 'Avis défavorable'}</strong>
                   {ev.recommendation && <span> — {ev.recommendation}</span>}
                   <em>{new Date(ev.created_at).toLocaleDateString('fr-FR')}</em>
                 </li>

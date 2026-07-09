@@ -530,9 +530,17 @@ function ManuscriptForm() {
       setActiveStep(0);
       setStatusMessage('Votre manuscrit a été soumis avec succès.');
       toast.success(hasExtraTomes ? 'Tomes soumis avec succès !' : 'Manuscrit soumis avec succès !');
-    } catch {
-      setStatusMessage('Une erreur est survenue pendant l’envoi du formulaire.');
-      toast.error('Erreur lors de l’envoi');
+    } catch (err) {
+      // Affiche la VRAIE cause du refus (message serveur : champ manquant,
+      // fichier trop lourd, trop de soumissions…) au lieu d'un message générique
+      // qui laissait l'auteur sans piste. Sans réponse serveur = problème réseau.
+      const serverMsg = err?.response?.data?.error;
+      const msg = serverMsg
+        || (err?.response
+          ? 'Erreur lors de l’envoi — réessayez dans un instant.'
+          : 'Connexion interrompue pendant l’envoi — vérifiez votre réseau et réessayez.');
+      setStatusMessage(msg);
+      toast.error(msg, { duration: 8000 });
     } finally {
       setSending(false);
     }

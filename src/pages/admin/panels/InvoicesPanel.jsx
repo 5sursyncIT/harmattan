@@ -3,14 +3,15 @@ import { Link } from 'react-router-dom';
 import {
   FiFileText, FiDollarSign, FiRefreshCw, FiEdit, FiTrash2, FiUser,
   FiCornerUpLeft, FiX, FiAlertTriangle, FiList, FiCalendar, FiPrinter,
-  FiDownload, FiSearch, FiPlusCircle, FiPlus, FiGift,
+  FiDownload, FiSearch, FiPlusCircle, FiPlus, FiGift, FiLock,
 } from 'react-icons/fi';
 import {
   listInvoices, getInvoice, getInvoicePdf, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
   payInvoice, createCreditNote, setInvoiceToDraft,
   reassignInvoiceCustomer, deleteInvoiceDraft,
-  getCustomerCredits, createDeposit, applyCredit,
+  getCustomerCredits, createDeposit, applyCredit, correctPaymentMethod,
 } from '../../../api/invoices';
+import useAdminRole from '../../../hooks/useAdminRole.js';
 import { formatPrice } from '../../../utils/formatters';
 import {
   computeReportKpis, downloadInvoicesCsv, openInvoicesPdf,
@@ -244,6 +245,7 @@ export default function InvoicesPanel() {
           data={selected}
           onClose={() => setSelected(null)}
           onAction={(type, invoice) => setActionModal({ type, invoice })}
+          onRefresh={() => { reload(); if (selected?.invoice?.id) openDetail(selected.invoice.id); }}
         />
       )}
 
@@ -394,8 +396,11 @@ function InvoiceActions({ invoice, onAction }) {
 }
 
 // ─── Modal détail facture ───────────────────────────────────
-function InvoiceDetailModal({ data, onClose, onAction }) {
+function InvoiceDetailModal({ data, onClose, onAction, onRefresh }) {
   const [downloading, setDownloading] = useState(false);
+  const role = useAdminRole();
+  const isAdmin = role === 'super_admin' || role === 'admin';
+  const [correctTarget, setCorrectTarget] = useState(null); // paiement dont on corrige le moyen
 
   const downloadPdf = async (invoice) => {
     if (downloading) return;
@@ -437,6 +442,7 @@ function InvoiceDetailModal({ data, onClose, onAction }) {
   const pct = totalTtc > 0 ? Math.min(100, Math.round((paidAmount / totalTtc) * 100)) : 0;
   const isCreditNote = invoice.type === 2;
   return (
+   <>
     <ModalShell onClose={onClose} title={`Facture ${invoice.ref || `#${invoice.id}`}`} wide>
       <div className="ac-detail-grid">
         <div><strong>Client :</strong> {invoice.customer_name || '—'}</div>
@@ -501,6 +507,12 @@ function InvoiceDetailModal({ data, onClose, onAction }) {
                     ? <span className={`ac-method-pill ac-method-${e.method_code || 'default'}`}>{e.label}</span>
                     : <span className="ac-credit-pill">{e.label}{e.source_ref ? ` · ${e.source_ref}` : ''}</span>}
                   <span className="ac-timeline-date">{fmtDate(e.date)}</span>
+                  {isAdmin && e.kind === 'payment' && e.payment_id && (
+                    e.reconciled
+                      ? <span className="ac-timeline-lock" title="Paiement rapproché en banque — moyen non corrigeable"><FiLock size={12} /></span>
+                      : <button type="button" className="ac-timeline-correct" title="Corriger le moyen de paiement (ex. saisi Wave au lieu d'espèces)"
+                          onClick={() => setCorrectTarget(e)}><FiEdit size={12} /> Corriger</button>
+                  )}
                 </div>
                 <div className="ac-timeline-row2">
                   {e.kind === 'payment' && e.bank_label && <span>{e.bank_label}</span>}
@@ -545,6 +557,16 @@ function InvoiceDetailModal({ data, onClose, onAction }) {
           onAction={(type) => onAction(type, { ...invoice, id: invoice.id, status: invoice.fk_statut, paid: !!invoice.paye, type: invoice.type, ref: invoice.ref })} />
       </div>
     </ModalShell>
+
+    {correctTarget && (
+      <CorrectMethodModal
+        invoice={invoice}
+        payment={correctTarget}
+        onClose={() => setCorrectTarget(null)}
+        onDone={() => { setCorrectTarget(null); onRefresh?.(); }}
+      />
+    )}
+   </>
   );
 }
 
@@ -614,6 +636,116 @@ const PAY_METHODS = [
   { code: 'OM', label: 'Orange Money' },
   { code: 'VIR', label: 'Virement' },
 ];
+
+// Compte de trésorerie naturel de chaque moyen (rowid llx_bank_account, propres à
+// cette instance — miroir de ECOMMERCE_PAYMENT_MAP côté serveur). Simple SUGGESTION
+// pré-remplie dans la correction : l'opérateur reste libre de choisir un autre compte.
+const SUGGESTED_ACCOUNT_BY_METHOD = {
+  LIQ: 3,   // COMPTE LIQUIDE (caisse espèces)
+  CB: 1,    // COMPTE CBAO HARMATTAN
+  CHQ: 1,   // chèques encaissés sur le compte bancaire
+  WAVE: 6,  // WAVE LIBRAIRIE QR
+  OM: 4,    // Code marchand OM
+  VIR: 1,   // virements sur le compte bancaire
+};
+
+// ─── Correction du moyen de paiement d'un règlement déjà enregistré ─────────
+// Corrige à la fois le mode ET le compte de trésorerie (sinon le solde par
+// source reste faux). Admin/super_admin uniquement (le backend le vérifie aussi).
+function CorrectMethodModal({ invoice, payment, onClose, onDone }) {
+  const [banks, setBanks] = useState([]);
+  const [method, setMethod] = useState(payment.method_code || '');
+  const [bankAccount, setBankAccount] = useState(payment.bank_account_id || '');
+  const [numPayment, setNumPayment] = useState(payment.num || '');
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => { getInvoiceBanks().then(r => setBanks(r.data.accounts || [])); }, []);
+
+  // Changer de moyen propose son compte naturel (surchargeable par l'opérateur).
+  const onMethodChange = (code) => {
+    setMethod(code);
+    const suggested = SUGGESTED_ACCOUNT_BY_METHOD[code];
+    if (suggested) setBankAccount(suggested);
+  };
+
+  const curLabel = PAY_METHODS.find(m => m.code === payment.method_code)?.label || payment.label || payment.method_code;
+  const changed = method !== payment.method_code
+    || Number(bankAccount) !== Number(payment.bank_account_id)
+    || (numPayment || '') !== (payment.num || '');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (reason.trim().length < 4) { toast.error('Motif requis (min 4 caractères)'); return; }
+    if (!method) { toast.error('Choisissez le bon moyen de paiement'); return; }
+    if (!bankAccount) { toast.error('Compte de trésorerie requis'); return; }
+    if (!changed) { toast.error('Aucun changement à enregistrer'); return; }
+    setSubmitting(true);
+    try {
+      await correctPaymentMethod(invoice.id, payment.payment_id, {
+        reason: reason.trim(), method, bank_account: Number(bankAccount),
+        num_payment: numPayment || undefined,
+      });
+      toast.success('Moyen de paiement corrigé — la trésorerie sera réalignée au prochain transfert comptable');
+      onDone();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de la correction');
+    } finally { setSubmitting(false); }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Corriger le moyen de paiement">
+      <form onSubmit={handleSubmit}>
+        <div className="ac-modal-warning">
+          <FiAlertTriangle /> Corrige un moyen saisi par erreur (ex. « Wave » au lieu d'espèces).
+          L'argent est aussi <strong>déplacé vers le bon compte de trésorerie</strong> pour que les
+          soldes par source (caisse, Wave, OM…) redeviennent justes.
+        </div>
+
+        <div className="ac-detail-grid" style={{ marginBottom: 12 }}>
+          <div><strong>Paiement :</strong> {formatPrice(payment.amount)}</div>
+          <div><strong>Actuel :</strong> {curLabel}{payment.bank_label ? ` · ${payment.bank_label}` : ''}</div>
+        </div>
+
+        <div className="ac-form-grid" style={{ marginBottom: 10 }}>
+          <div>
+            <label className="ac-form-label">Bon moyen de paiement *</label>
+            <select className="ac-form-select" required value={method}
+              onChange={e => onMethodChange(e.target.value)}>
+              <option value="">Méthode…</option>
+              {PAY_METHODS.map(m => <option key={m.code} value={m.code}>{m.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="ac-form-label">Compte de trésorerie *</label>
+            <select className="ac-form-select" required value={bankAccount || ''}
+              onChange={e => setBankAccount(Number(e.target.value))}>
+              <option value="">—</option>
+              {banks.map(b => <option key={b.id} value={b.id}>{b.label || b.ref}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <label className="ac-form-label">N° de pièce / transaction (optionnel)</label>
+        <input type="text" className="ac-form-input" maxLength={64} placeholder="Réf. du paiement réel"
+          value={numPayment} onChange={e => setNumPayment(e.target.value)} />
+
+        <label className="ac-form-label" style={{ marginTop: 10 }}>Motif de la correction <span style={{ color: '#dc2626' }}>*</span></label>
+        <textarea className="ac-form-textarea" rows={3} minLength={4} maxLength={500} required
+          placeholder="Ex : encaissé en espèces au comptoir, saisi Wave par erreur"
+          value={reason} onChange={e => setReason(e.target.value)} />
+        <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: 4 }}>{reason.length} / 500 — tracé dans le journal d'audit</div>
+
+        <div className="ac-modal-actions">
+          <button type="button" className="btn btn-outline" onClick={onClose} disabled={submitting}>Annuler</button>
+          <button type="submit" className="btn btn-primary" disabled={submitting || !changed}>
+            {submitting ? '...' : 'Corriger le moyen'}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
 
 // Saisie d'un encaissement fractionné multi-méthode (réutilisée pour la facture
 // et l'acompte). Gère la liste `splits` [{method, amount, num_payment}] dans extra.
@@ -975,6 +1107,7 @@ function actionLabel(action) {
     delete: 'Brouillon supprimé',
     deposit_create: 'Acompte créé',
     apply_credit: 'Acompte / avoir imputé',
+    correct_payment_method: 'Moyen de paiement corrigé',
   }[action] || action;
 }
 

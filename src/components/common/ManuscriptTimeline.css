@@ -95,3 +95,19 @@
 }
 
 .mt-empty { color: #6b7280; font-style: italic; }
+
+/* Bouton « journal complet » : révèle les évènements techniques masqués par
+   défaut (réservé à l'admin via la prop showFullJournalToggle). */
+.mt-toggle {
+  margin-top: 10px;
+  margin-left: 4px;
+  background: none;
+  border: none;
+  padding: 4px 2px;
+  font-size: 0.8rem;
+  color: #6b7280;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.mt-toggle:hover { color: #10531a; }

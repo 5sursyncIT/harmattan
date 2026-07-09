@@ -14,7 +14,7 @@ import {
 import Loader from '../../../components/common/Loader';
 import ConfirmModal from '../../../components/common/ConfirmModal';
 import toast from 'react-hot-toast';
-import { listContractQuotes, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
+import { listContractQuotes, getQuote, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
 import QuotePaymentModal from '../../../components/admin/QuotePaymentModal';
 import { formatPrice } from '../../../utils/formatters';
@@ -82,6 +82,8 @@ export default function ContractDetail() {
   // canPay : encaisser un devis (acte comptable) — profils financiers.
   const canPay = ['super_admin', 'admin', 'comptable'].includes(role);
   const [payQuoteTarget, setPayQuoteTarget] = useState(null);
+  // Devis en cours de révision (négociation) — ouvre le modal préchargé.
+  const [editQuoteTarget, setEditQuoteTarget] = useState(null);
 
   const loadQuotes = () => {
     if (!id) return;
@@ -96,6 +98,17 @@ export default function ContractDetail() {
   const [confirmQuote, setConfirmQuote] = useState(null); // { action: 'delete'|'send', quote }
   const [quoteActionLoading, setQuoteActionLoading] = useState(false);
 
+  // Ouvre le modal de révision : la liste ne porte pas les lignes du devis,
+  // on recharge donc le devis complet (items + caractéristiques) avant d'éditer.
+  const openReviseQuote = async (q) => {
+    try {
+      const res = await getQuote(q.id);
+      setEditQuoteTarget(res.data);
+    } catch {
+      toast.error('Impossible de charger le devis pour révision');
+    }
+  };
+
   const runQuoteAction = async () => {
     if (!confirmQuote || quoteActionLoading) return;
     setQuoteActionLoading(true);
@@ -104,8 +117,10 @@ export default function ContractDetail() {
         await deleteQuote(confirmQuote.quote.id);
         toast.success('Devis supprimé');
       } else {
-        await markQuoteSent(confirmQuote.quote.id);
-        toast.success('Devis marqué comme envoyé');
+        const res = await markQuoteSent(confirmQuote.quote.id);
+        toast.success(res?.data?.emailed
+          ? `Devis envoyé par email à ${res.data.email}`
+          : 'Devis publié dans l\'espace auteur (auteur sans email : aucun envoi)');
       }
       setConfirmQuote(null);
       loadQuotes();
@@ -478,9 +493,14 @@ export default function ContractDetail() {
                           <FiDollarSign size={12} /> Encaisser
                         </button>
                       )}
-                      {canManage && q.status === 'draft' && (
-                        <button onClick={() => setConfirmQuote({ action: 'send', quote: q })} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Marquer comme envoyé à l'auteur">
-                          <FiSend size={12} /> Envoyé
+                      {canModify && !isInvoiced && (q.status === 'draft' || q.status === 'sent') && (
+                        <button onClick={() => openReviseQuote(q)} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Réviser le devis après négociation (remplace le devis, même référence)">
+                          <FiEdit3 size={12} /> Réviser
+                        </button>
+                      )}
+                      {canManage && (q.status === 'draft' || q.status === 'sent') && (
+                        <button onClick={() => setConfirmQuote({ action: 'send', quote: q })} className="ct-btn ct-btn-outline" style={{ padding: '5px 10px', fontSize: '0.78rem' }} title="Envoyer le devis (PDF) par email à l'auteur">
+                          <FiSend size={12} /> {q.status === 'sent' ? 'Renvoyer' : 'Envoyer à l\'auteur'}
                         </button>
                       )}
                       {canManage && q.status === 'draft' && (
@@ -716,11 +736,11 @@ export default function ContractDetail() {
       )}
       {confirmQuote && (
         <ConfirmModal
-          title={confirmQuote.action === 'delete' ? `Supprimer le devis ${confirmQuote.quote.ref} ?` : `Marquer le devis ${confirmQuote.quote.ref} comme envoyé ?`}
+          title={confirmQuote.action === 'delete' ? `Supprimer le devis ${confirmQuote.quote.ref} ?` : `Envoyer le devis ${confirmQuote.quote.ref} à l'auteur ?`}
           message={confirmQuote.action === 'delete'
             ? 'Le devis sera définitivement supprimé.'
-            : 'Le devis sera marqué comme transmis à l\'auteur. Pensez à lui envoyer le PDF par email.'}
-          confirmLabel={confirmQuote.action === 'delete' ? 'Supprimer' : 'Marquer envoyé'}
+            : 'Le devis (PDF) sera envoyé par email à l\'auteur et rendu visible dans son espace. Aucun envoi n\'a lieu tant que vous ne confirmez pas.'}
+          confirmLabel={confirmQuote.action === 'delete' ? 'Supprimer' : 'Envoyer à l\'auteur'}
           danger={confirmQuote.action === 'delete'}
           loading={quoteActionLoading}
           onConfirm={runQuoteAction}
@@ -732,6 +752,15 @@ export default function ContractDetail() {
           contract={contract}
           onClose={() => setShowQuoteModal(false)}
           onCreated={() => { loadQuotes(); load(); }}
+        />
+      )}
+
+      {editQuoteTarget && (
+        <ContractQuoteModal
+          contract={contract}
+          quote={editQuoteTarget}
+          onClose={() => setEditQuoteTarget(null)}
+          onCreated={() => { setEditQuoteTarget(null); loadQuotes(); load(); }}
         />
       )}
 

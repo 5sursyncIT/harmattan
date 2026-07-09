@@ -8,9 +8,18 @@ export const manuscriptsApi = {
   assignedToMe: () => api.get('/admin/manuscripts/assigned'),
   assign: (id, role, userId, applyToSeries = false) =>
     api.post(`/admin/manuscripts/v2/${id}/assign`, { role, user_id: userId, apply_to_series: applyToSeries }),
-  transition: (id, toStage, note, force = false) =>
-    api.post(`/admin/manuscripts/v2/${id}/transition`, { to_stage: toStage, note, force }),
+  // Transition normale (machine à états respectée). Pour corriger une erreur
+  // matérielle d'état, utiliser overrideStage (admin + motif) — le serveur
+  // n'honore plus de flag `force` sur cette route.
+  transition: (id, toStage, note) =>
+    api.post(`/admin/manuscripts/v2/${id}/transition`, { to_stage: toStage, note }),
+  // Correction manuelle de l'état (erreur matérielle) — admin only, motif obligatoire,
+  // aucun email envoyé, tracée dans la frise.
+  overrideStage: (id, toStage, reason) =>
+    api.post(`/admin/manuscripts/v2/${id}/override-stage`, { to_stage: toStage, reason }),
   markPaid: (id, note) => api.post(`/admin/manuscripts/v2/${id}/mark-paid`, { note }),
+  // Démarrer la correction sans attendre le paiement du devis (équipe éditoriale).
+  startCorrection: (id, note) => api.post(`/admin/manuscripts/v2/${id}/start-correction`, { note }),
   createContract: (id) => api.post(`/admin/manuscripts/v2/${id}/create-contract`),
   linkContract: (id, contractId) => api.post(`/admin/manuscripts/v2/${id}/link-contract`, { contract_id: contractId }),
   downloadUrl: (manuscriptId, fileId) =>
@@ -33,8 +42,16 @@ export const manuscriptsApi = {
     }),
   submitCorrectionToAuthor: (manuscriptId) =>
     api.post(`/admin/corrections/${manuscriptId}/submit-to-author`),
+  // Validation de la correction par l'administration, à la place de l'auteur.
+  // decision : 'approved' (→ Production éditoriale) | 'changes_requested' (→ correction)
+  validateCorrection: (manuscriptId, decision, comment = '') =>
+    api.post(`/admin/corrections/${manuscriptId}/validate`, { decision, comment }),
   sendCorrectionToEditorial: (manuscriptId, editorId = null) =>
     api.post(`/admin/corrections/${manuscriptId}/to-editorial`, { editor_id: editorId }),
+  // Notifie l'auteur que ses corrections sont validées — UNIQUEMENT sur sa demande
+  // (l'envoi n'est plus automatique à la validation, choix Direction).
+  notifyAuthorCorrectionValidated: (manuscriptId) =>
+    api.post(`/admin/corrections/${manuscriptId}/notify-author`),
 
   // Éditorial
   listEditorial: () => api.get('/admin/editorial'),

@@ -1252,14 +1252,37 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       res.status(500).json({ error: 'Erreur soumission manuscrit' });
     }
   };
+  // Trace TOUT rejet de soumission (403 CSRF, 429 rate-limit, 400 validation,
+  // 500). Why: sans ça, un envoi refusé ne laissait AUCUNE trace dans le
+  // journal → les remontées d'échec des auteurs étaient indiagnosticables
+  // (incident du 09/07/2026 : échec silencieux post-restart + rate-limit).
+  const logSubmitRejections = (req, res, next) => {
+    res.on('finish', () => {
+      if (res.statusCode >= 400) {
+        console.warn(`[MANUSCRIPT] Soumission rejetée HTTP ${res.statusCode} — ip=${req.ip} ua="${(req.headers['user-agent'] || '').slice(0, 80)}"`);
+      }
+    });
+    next();
+  };
+  // Convertit les erreurs multer (taille, flux interrompu…) en 400 JSON clair
+  // au lieu de laisser filer vers le handler d'erreur générique (500 opaque).
+  const submitUpload = manuscriptUpload.fields([{ name: 'files', maxCount: 5 }, { name: 'file', maxCount: 1 }]);
+  const submitUploadSafe = (req, res, next) => submitUpload(req, res, (err) => {
+    if (!err) return next();
+    console.warn('[MANUSCRIPT] Upload rejeté par multer:', err.code || err.message);
+    const msg = err.code === 'LIMIT_FILE_SIZE'
+      ? 'Fichier trop volumineux (20 Mo maximum) — utilisez l\'option « lien de téléchargement ».'
+      : 'Le fichier n\'a pas pu être reçu — vérifiez votre connexion et réessayez.';
+    return res.status(400).json({ error: msg, errors: { file: msg } });
+  });
   // Le limiter est optionnel pour rester rétrocompatible si setupAdminRoutes
   // est appelé sans ce paramètre (tests, anciens montages).
-  const submitMiddlewares = [csrfProtection];
+  const submitMiddlewares = [logSubmitRejections, csrfProtection];
   if (manuscriptSubmitLimiter) submitMiddlewares.push(manuscriptSubmitLimiter);
   // .fields : `files` = soumission multi-tomes (jusqu'à 5), `file` = ancien champ
   // unique (rétrocompatibilité formulaire/alias legacy). Une soumission = 1 requête,
   // donc le rate-limiter compte toujours 1 même pour plusieurs tomes.
-  submitMiddlewares.push(manuscriptUpload.fields([{ name: 'files', maxCount: 5 }, { name: 'file', maxCount: 1 }]));
+  submitMiddlewares.push(submitUploadSafe);
   app.post('/api/manuscripts/submit', ...submitMiddlewares, submitManuscriptHandler);
   // Alias legacy — déconseillé pour les nouvelles intégrations.
   app.post('/api/admin/manuscripts', ...submitMiddlewares, submitManuscriptHandler);

@@ -14,7 +14,7 @@ import { createOverridesStore } from './permission-overrides.js';
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
 // import bcrypt from 'bcryptjs'; // Extracted to auth-routes.js
-import { readdirSync, readFileSync, statSync } from 'fs';
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import mysql from 'mysql2/promise';
 import sharp from 'sharp';
 import axios from 'axios';
@@ -379,14 +379,19 @@ const syncLimiter = rateLimit({
   message: { error: 'Sync déjà déclenché récemment' },
 });
 
-// Soumission publique de manuscrits (upload PDF/DOCX) : 5 par heure par IP.
+// Soumission publique de manuscrits (upload PDF/DOCX) : 8 réussites/heure/IP.
 // L'upload est coûteux et la route est publique → cible privilégiée de spam.
+// skipFailedRequests : un échec (403 CSRF, 400 validation…) ne consomme PAS le
+// quota — sinon un auteur dont l'envoi échoue épuise ses 5 essais en retries et
+// se retrouve verrouillé 1h (cercle vicieux constaté le 09/07/2026). Les IP
+// mobiles sénégalaises sont partagées (CGNAT) : le quota est collectif.
 const manuscriptSubmitLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 5,
+  max: 8,
+  skipFailedRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Trop de soumissions, réessayez dans une heure' },
+  message: { error: 'Trop de soumissions depuis votre connexion, réessayez dans une heure' },
 });
 
 // Téléchargement par lien tokenisé (intervenants externes) : 60 par 15 min / IP.
@@ -410,8 +415,25 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-// Generate CSRF secret per session (stored in cookie)
-const CSRF_SECRET = crypto.randomBytes(32).toString('hex');
+// Secret CSRF PERSISTANT entre redémarrages (fichier .csrf-secret, généré une
+// seule fois). Why: régénéré à chaque boot, il invalidait le token préchargé de
+// toute page ouverte AVANT un restart → 403 « Token CSRF invalide » en pleine
+// soumission (formulaire long type /se-faire-editer + 3 deploys/jour = échecs
+// d'envoi de manuscrits remontés par les auteurs le 09/07/2026).
+const CSRF_SECRET_PATH = join(__dirname, '.csrf-secret');
+const CSRF_SECRET = (() => {
+  try {
+    const stored = readFileSync(CSRF_SECRET_PATH, 'utf-8').trim();
+    if (/^[0-9a-f]{64}$/.test(stored)) return stored;
+  } catch { /* première exécution : fichier absent */ }
+  const fresh = crypto.randomBytes(32).toString('hex');
+  try {
+    writeFileSync(CSRF_SECRET_PATH, fresh, { mode: 0o600 });
+  } catch (err) {
+    console.warn('[CSRF] Impossible de persister .csrf-secret (secret volatile ce boot):', err.message);
+  }
+  return fresh;
+})();
 
 function generateCsrfToken(req) {
   const sessionId = req.cookies?.csrf_session || crypto.randomBytes(16).toString('hex');
@@ -836,7 +858,7 @@ app.use('/api/contracts', createContractRouter({ db, dolibarrPool, csrfProtectio
 
 // ─── CONTRACT QUOTES (devis de contribution auteur) ─────
 import { createContractQuoteRouter } from './contract-quote-routes.js';
-app.use('/api', createContractQuoteRouter({ db, dolibarrPool, csrfProtection }));
+app.use('/api', createContractQuoteRouter({ db, dolibarrPool, csrfProtection, transporter, siteUrl: SITE_URL }));
 
 // ─── AUTHOR PORTAL (workflow éditorial) ────────────────────
 import { createAuthorRouter } from './author-routes.js';
@@ -1021,8 +1043,8 @@ try {
 // pour bénéficier du middleware RBAC global sur /api/admin
 import { createManuscriptRouter } from './manuscript-routes.js';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
-import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences } from './manuscript-emails.js';
-import { ensureFileTokensSchema, createPublicFileRouter } from './manuscript-file-tokens.js';
+import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences, notifyTransition as wfNotifyTransition } from './manuscript-emails.js';
+import { ensureFileTokensSchema, createPublicFileRouter, purgeExpiredFileTokens } from './manuscript-file-tokens.js';
 
 // Initialise la table author_notifications (cloche in-app auteur)
 try { ensureNotificationsSchema(db); console.log('[NOTIF] Schéma author_notifications OK'); }
@@ -1030,7 +1052,13 @@ catch (err) { console.error('[NOTIF] Init schéma:', err.message); }
 
 // Liens de téléchargement tokenisés pour les intervenants externes (sans compte).
 // Route PUBLIQUE montée hors /api/admin (pas de RBAC), rate-limitée.
-try { ensureFileTokensSchema(db); console.log('[FILES] Schéma manuscript_file_tokens OK'); }
+try {
+  ensureFileTokensSchema(db);
+  // Ménage : les tokens expirés depuis > 30 j ne servent plus (fenêtre de grâce
+  // conservée pour l'audit) — sans purge la table croissait indéfiniment.
+  const purged = purgeExpiredFileTokens(db, 30);
+  console.log(`[FILES] Schéma manuscript_file_tokens OK${purged ? ` (${purged} token(s) expirés purgés)` : ''}`);
+}
 catch (err) { console.error('[FILES] Init schéma:', err.message); }
 app.use('/api/files', createPublicFileRouter({ db, limiter: fileDownloadLimiter }));
 
@@ -1087,6 +1115,12 @@ async function createContractDraft(manuscript) {
     const contractRes = await adminApi.post('/contracts', {
       socid: parseInt(thirdpartyId, 10),
       date_contrat: Math.floor(Date.now() / 1000),
+      // v21 : commercial_signature_id est OBLIGATOIRE (400 « field missing » sinon).
+      // Sans ces champs, l'auto-création échouait à 100 % depuis la migration
+      // v13→v21 (constaté le 09/07/2026 : 11 manuscrits « évaluation favorable »
+      // sans contrat). Alignés sur la création manuelle (contract-routes.js).
+      commercial_signature_id: parseInt(process.env.CONTRACT_COMMERCIAL_SIGNATURE_ID, 10) || 1,
+      commercial_suivi_id: parseInt(process.env.CONTRACT_COMMERCIAL_SUIVI_ID, 10) || 1,
       model_pdf: modelPdf,
       array_options: {
         // Defaults alignés avec DEFAULTS_BY_TYPE[harmattan_2024] dans contract-routes.js
@@ -1114,10 +1148,19 @@ async function createContractDraft(manuscript) {
       .run(contractId, manuscript.id);
 
     // Transition → contract_pending + stockage du contract_id
-    wfTransition(db, manuscript.id, 'contract_pending',
+    const updatedMs = wfTransition(db, manuscript.id, 'contract_pending',
       { role: 'system', label: 'workflow' },
       { note: `Contrat Dolibarr #${contractId} créé (${CONTRACT_TYPE})`, updates: { contract_id: contractId } }
     );
+
+    // Notifier l'auteur (« Contrat à signer ») — in-app + email selon préférences.
+    // Why: les templates contract_pending existaient mais n'étaient JAMAIS appelés
+    // (code mort relevé à l'audit du 09/07/2026) : l'auteur passait d'« évaluation
+    // favorable » directement à l'email de signature sans étape intermédiaire.
+    try {
+      wfNotifyTransition(db, transporter, updatedMs, 'contract_pending',
+        { role: 'system', label: 'workflow' }, SITE_URL);
+    } catch (err) { console.warn('[WORKFLOW] notify contract_pending warning:', err.message); }
 
     // Note : à ce stade le contrat est en brouillon — sa référence est provisoire
     // (« (PROV…) ») et le PDF définitif n'est pas généré. Le lien de signature
@@ -1183,8 +1226,12 @@ async function linkContractToManuscript(manuscript, contractId, actor) {
   // Favorable → on avance à contract_pending (stocke le contract_id). Sinon, on se
   // contente d'écrire le contract_id sans changer l'étape.
   if (manuscript.current_stage === 'evaluation_positive') {
-    wfTransition(db, manuscript.id, 'contract_pending', actor,
+    const updatedMs = wfTransition(db, manuscript.id, 'contract_pending', actor,
       { note: `Contrat ${c.ref} rattaché`, updates: { contract_id: cid } });
+    // Même notification « Contrat à signer » que l'auto-création (in-app + email).
+    try {
+      wfNotifyTransition(db, transporter, updatedMs, 'contract_pending', actor, SITE_URL);
+    } catch (err) { console.warn('[WORKFLOW] notify contract_pending warning:', err.message); }
   } else {
     db.prepare("UPDATE manuscripts SET contract_id = ?, updated_at = datetime('now') WHERE id = ?").run(cid, manuscript.id);
   }
@@ -1255,6 +1302,14 @@ try {
           await createContractDraft(manuscript);
         } catch (err) {
           console.error('[WORKFLOW] Contract auto-create failed (non-blocking):', err.message);
+          // Rendre l'échec VISIBLE : sans cette trace, le bug v21 (contrat jamais
+          // créé) est resté invisible pendant des semaines — le manuscrit restait
+          // en « évaluation favorable » sans que personne ne le sache.
+          try {
+            db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+              .run('system', 'contract_autocreate_failed',
+                `ÉCHEC auto-création contrat pour ${manuscript.ref} « ${(manuscript.title || '').slice(0, 80)} » : ${err.message} — créer/rattacher le contrat manuellement depuis la fiche manuscrit`);
+          } catch (logErr) { console.warn('[WORKFLOW] activity log failed:', logErr.message); }
         }
       },
       onPrintPrepare: createPrintMO,

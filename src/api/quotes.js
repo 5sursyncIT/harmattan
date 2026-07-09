@@ -2,6 +2,8 @@ import api from './dolibarr';
 
 export const listContractQuotes = (contractId) => api.get(`/contracts/${contractId}/quotes`);
 export const createContractQuote = (contractId, data) => api.post(`/contracts/${contractId}/quotes`, data);
+// Révision d'un devis négocié : remplace en place (même réf), tant qu'il n'est pas facturé.
+export const updateContractQuote = (id, data) => api.put(`/quotes/${id}`, data);
 export const getQuote = (id) => api.get(`/quotes/${id}`);
 export const markQuoteSent = (id) => api.post(`/quotes/${id}/send`);
 export const deleteQuote = (id) => api.delete(`/quotes/${id}`);

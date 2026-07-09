@@ -63,6 +63,7 @@ export function ensureNotificationsSchema(db) {
 // Catégorisation des stages workflow pour les opt-out
 const STAGE_CATEGORY = {
   submitted: 'workflow', in_evaluation: 'workflow', evaluation_positive: 'workflow',
+  evaluation_rework: 'workflow',
   evaluation_negative: 'workflow', in_correction: 'workflow', correction_author_review: 'workflow',
   in_editorial: 'workflow', editorial_validated: 'workflow',
   contract_pending: 'critical', contract_signed: 'critical', payment_pending: 'critical',
@@ -117,6 +118,8 @@ function buildNotificationCopy(manuscript, toStage) {
       return { title: 'Évaluation en cours', message: `Votre manuscrit « ${title} » a été transmis au comité éditorial.` };
     case 'evaluation_positive':
       return { title: 'Évaluation favorable', message: `Bonne nouvelle : « ${title} » a reçu une évaluation favorable.` };
+    case 'evaluation_rework':
+      return { title: 'Manuscrit à retravailler', message: `Le comité vous invite à retravailler « ${title} » avant une nouvelle évaluation.` };
     case 'evaluation_negative':
       return { title: 'Décision éditoriale', message: `Le comité n'a pas retenu « ${title} » pour publication.` };
     case 'contract_pending':
@@ -190,6 +193,44 @@ export function createAuthorNotification(db, manuscript, toStage, author, siteUr
   }
 }
 
+/**
+ * Notification in-app pour un ÉVÉNEMENT hors machine à états (envoi du lien de
+ * signature, devis transmis…). Complète createAuthorNotification (réservée aux
+ * stages) : la cloche auteur ignorait ces moments clés (audit 09/07/2026).
+ * `key` joue le rôle du stage pour l'anti-doublon (1 h) et le suivi.
+ */
+export function createAuthorEventNotification(db, { authorId, manuscript = null, key, title, message, actionUrl = null, actionRequired = false }) {
+  if (!authorId || !key || !title) return null;
+  try {
+    const recent = db.prepare(
+      `SELECT id FROM author_notifications
+       WHERE author_id = ? AND manuscript_id IS ? AND stage = ?
+         AND created_at > datetime('now', '-1 hour')
+       LIMIT 1`
+    ).get(authorId, manuscript?.id || null, key);
+    if (recent) return recent.id;
+    const info = db.prepare(
+      `INSERT INTO author_notifications
+        (author_id, manuscript_id, manuscript_ref, manuscript_title, stage, title, message, action_url, action_required)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      authorId,
+      manuscript?.id || null,
+      manuscript?.ref || null,
+      manuscript?.title || null,
+      key,
+      title,
+      message || '',
+      actionUrl,
+      actionRequired ? 1 : 0,
+    );
+    return info.lastInsertRowid;
+  } catch (err) {
+    console.error('[NOTIF] createAuthorEventNotification error:', err.message);
+    return null;
+  }
+}
+
 function escapeHtml(str) {
   if (typeof str !== 'string') return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -254,6 +295,14 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
             ? `<p>Vous trouverez <strong>ci-joint le rapport de lecture</strong> de votre manuscrit.</p>`
             : '')
           + btn('Accéder à mon espace', authorUrl);
+        break;
+      case 'evaluation_rework':
+        subject = `${msTitle} — Manuscrit à retravailler`;
+        body = header('Votre manuscrit mérite d\'être retravaillé')
+          + greeting
+          + `<p>Après examen, notre comité éditorial estime que votre manuscrit <strong>« ${msTitle} »</strong> présente un réel potentiel, mais qu'il doit être <strong>retravaillé</strong> avant de pouvoir être publié.</p>`
+          + `<p>Vous pouvez consulter l'avis du comité depuis votre espace auteur, puis nous renvoyer votre version retravaillée : elle fera l'objet d'une nouvelle évaluation.</p>`
+          + btn('Consulter l\'avis', authorUrl);
         break;
       case 'evaluation_negative':
         subject = `${msTitle} — Décision éditoriale`;
@@ -414,6 +463,14 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
           + `<p>Le BAT du manuscrit <strong>« ${msTitle} »</strong> a été validé par l'auteur. Préparez l'ordre d'impression (MO).</p>`
           + btn('Préparer l\'impression', adminUrl('printing'));
         break;
+      case 'printed':
+        subject = `[Impression] ${msTitle} — Impression terminée`;
+        body = header('Impression terminée')
+          + greeting
+          + `<p>L'impression de <strong>« ${msTitle} »</strong> (réf. ${msRef}) est terminée.</p>`
+          + `<p><strong>Prochaine étape : enregistrer le dépôt légal</strong> (BNS / IFAN) et intégrer l'ouvrage au catalogue.</p>`
+          + btn('Registre du dépôt légal', adminUrl('legal-deposits'));
+        break;
       default:
         subject = `[${STAGE_LABELS[toStage] || toStage}] ${msTitle}`;
         body = header('Étape workflow')
@@ -521,6 +578,7 @@ export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recip
     in_evaluation: { subject: 'Manuscrit à évaluer', intro: `Nous sollicitons votre évaluation du manuscrit <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le manuscrit' },
     in_correction: { subject: 'Manuscrit à corriger', intro: `Le manuscrit <strong>« ${msTitle} »</strong> vous est confié pour correction`, fileLabel: 'Télécharger le fichier à corriger' },
     cover_design: { subject: 'Couverture à concevoir', intro: `Merci de concevoir la couverture du manuscrit <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le texte final' },
+    print_preparation: { subject: 'Impression à venir', intro: `Le BAT de l'ouvrage <strong>« ${msTitle} »</strong> vient d'être validé — l'ordre d'impression suivra très prochainement. Vous pouvez d'ores et déjà anticiper (papier, planning)`, fileLabel: "Télécharger le fichier d'impression" },
     printing: { subject: "Ouvrage à imprimer", intro: `L'ouvrage <strong>« ${msTitle} »</strong> est prêt pour l'impression`, fileLabel: "Télécharger le fichier d'impression" },
   };
   const copy = TASK_COPY[toStage] || { subject: 'Nouvelle tâche', intro: `Une tâche vous est confiée pour <strong>« ${msTitle} »</strong>`, fileLabel: 'Télécharger le fichier' };
@@ -620,14 +678,19 @@ export function notifySeriesSubmission(db, transporter, manuscripts, author, ser
  * et crée une notification in-app pour l'auteur.
  */
 export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl, opts = {}) {
-  // 1. Auteur : notification in-app (toujours) + email (selon préférences)
+  // 1. Auteur : notification in-app + email (selon préférences).
+  //    opts.skipAuthorNotification : ne PAS prévenir l'auteur à cette transition.
+  //    Utilisé à la validation de correction — la Direction veut que l'auteur ne
+  //    soit informé « corrections validées » QUE sur sa demande, via le bouton
+  //    « Notifier l'auteur » (qui rappelle notifyTransition avec opts.authorOnly).
   const author = db.prepare('SELECT id, email, firstname, lastname FROM authors WHERE id = ?').get(manuscript.author_id);
-  if (author?.id) {
+  if (author?.id && !opts.skipAuthorNotification) {
     // Notification in-app — toujours créée, même sans transporter et même si email opt-out
     createAuthorNotification(db, manuscript, toStage, author, siteUrl);
 
-    // Email — uniquement si transporter dispo, email connu, ET préférence active pour la catégorie
-    if (transporter && author.email && shouldEmailAuthor(db, author.id, toStage)) {
+    // Email — uniquement si transporter dispo, email connu, ET préférence active pour la
+    // catégorie. opts.forceAuthorEmail force l'envoi (notification « sur demande » de l'auteur).
+    if (transporter && author.email && (opts.forceAuthorEmail || shouldEmailAuthor(db, author.id, toStage))) {
       // Pièce jointe optionnelle : le rapport de lecture, joint à l'email
       // d'acceptation lorsque l'évaluateur l'a explicitement demandé.
       let authorAttachments = null;
@@ -639,24 +702,41 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
              ORDER BY version DESC, uploaded_at DESC LIMIT 1`
           ).get(manuscript.id);
           if (report?.file_path && existsSync(report.file_path)) {
-            authorAttachments = [{ filename: report.file_name || 'rapport-de-lecture', path: report.file_path }];
+            // Même plafond que les pièces jointes intervenant : au-delà de 18 Mo,
+            // le SMTP rejette l'envoi ENTIER (silencieusement) — mieux vaut un
+            // email d'acceptation sans PJ qu'aucun email du tout.
+            const reportSize = statSync(report.file_path).size;
+            if (reportSize > 0 && reportSize <= MAX_EMAIL_ATTACHMENT_BYTES) {
+              authorAttachments = [{ filename: report.file_name || 'rapport-de-lecture', path: report.file_path }];
+            } else {
+              console.warn('[WORKFLOW] Rapport de lecture trop volumineux pour pièce jointe (', reportSize, 'octets) — email d\'acceptation envoyé sans PJ (manuscrit', manuscript.id, ')');
+            }
           } else {
             console.warn('[WORKFLOW] Rapport de lecture introuvable — email d\'acceptation envoyé sans pièce jointe (manuscrit', manuscript.id, ')');
           }
         } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe rapport de lecture:', err.message); }
       }
+      // Trace l'envoi sur la frise APRÈS confirmation SMTP (audit direction :
+      // preuve que l'auteur a été notifié). Les senders résolvent `undefined`
+      // en cas d'échec (catch interne) → on ne journalise que si info est truthy,
+      // sinon la frise affirmait « e-mail envoyé » même quand le SMTP échouait.
       sendTransitionEmail(transporter, manuscript, toStage, {
         type: 'author',
         email: author.email,
         firstname: author.firstname,
-      }, siteUrl, authorAttachments);
-      // Trace l'envoi sur la frise (audit direction : preuve que l'auteur a été notifié).
-      try {
-        logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-          `« ${STAGE_LABELS[toStage] || toStage} » → auteur (${author.email})`);
-      } catch (e) { console.warn('[WORKFLOW] log email_sent (author) warning:', e.message); }
+      }, siteUrl, authorAttachments).then((info) => {
+        if (!info) return;
+        try {
+          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+            `« ${STAGE_LABELS[toStage] || toStage} » → auteur (${author.email})`);
+        } catch (e) { console.warn('[WORKFLOW] log email_sent (author) warning:', e.message); }
+      });
     }
   }
+
+  // Notification « à la demande de l'auteur » : on n'informe QUE l'auteur, jamais
+  // les acteurs métier (le manuscrit a déjà avancé dans le pipeline éditorial).
+  if (opts.authorOnly) return;
 
   if (!transporter) return;
 
@@ -665,6 +745,9 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
   const roleToContact = {
     in_evaluation: 'assigned_evaluator_contact_id',
     in_correction: 'assigned_corrector_contact_id',
+    // L'imprimeur est prévenu DÈS le BAT validé (print_preparation) — pas
+    // seulement au lancement du MO (printing) : il peut anticiper papier/planning.
+    print_preparation: 'assigned_printer_contact_id',
     printing: 'assigned_printer_contact_id',
   };
   // Couverture : désormais conçue en interne par la Production éditoriale
@@ -702,11 +785,14 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
             }
           } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe intervenant:', err.message); }
         }
-        sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl, attachments);
-        try {
-          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-            `Tâche « ${STAGE_LABELS[toStage] || toStage} » → ${intervenant.nom} (${intervenant.metier})`);
-        } catch (e) { console.warn('[WORKFLOW] log email_sent (intervenant) warning:', e.message); }
+        // Frise écrite après confirmation SMTP (cf. commentaire côté auteur).
+        sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl, attachments).then((info) => {
+          if (!info) return;
+          try {
+            logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+              `Tâche « ${STAGE_LABELS[toStage] || toStage} » → ${intervenant.nom} (${intervenant.metier})`);
+          } catch (e) { console.warn('[WORKFLOW] log email_sent (intervenant) warning:', e.message); }
+        });
         notifiedContact = true;
       }
     } catch (err) {
@@ -752,23 +838,29 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
 
   // 3. Admins généraux sur transitions clés (nouvelle soumission, paiement attendu,
   //    évaluation positive, contrat signé, éditorial validé — étapes qui nécessitent
-  //    une action humaine côté équipe ou un suivi rapproché)
-  const adminEmailStages = ['submitted', 'evaluation_positive', 'payment_pending', 'editorial_validated', 'contract_signed'];
+  //    une action humaine côté équipe ou un suivi rapproché).
+  //    + print_preparation (BAT validé : préparer le MO — sinon personne n'était
+  //      prévenu et l'ouvrage restait en attente) et printed (impression terminée :
+  //      relais vers le dépôt légal, module autrement déconnecté du pipeline).
+  const adminEmailStages = ['submitted', 'evaluation_positive', 'payment_pending', 'editorial_validated', 'contract_signed', 'print_preparation', 'printed'];
   if (adminEmailStages.includes(toStage)) {
     try {
       const fs = global.__siteConfigFallback;
       const configEmail = fs?.contact?.emails?.[0];
       if (configEmail) {
+        // Frise écrite après confirmation SMTP (cf. commentaire côté auteur).
         sendTransitionEmail(transporter, manuscript, toStage, {
           type: 'admin',
           email: configEmail,
           role: 'admin',
           label: 'Administrateur',
-        }, siteUrl);
-        try {
-          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-            `« ${STAGE_LABELS[toStage] || toStage} » → équipe (admins)`);
-        } catch (e) { void e; }
+        }, siteUrl).then((info) => {
+          if (!info) return;
+          try {
+            logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+              `« ${STAGE_LABELS[toStage] || toStage} » → équipe (admins)`);
+          } catch (e) { void e; }
+        });
       }
     } catch (err) { /* fallback silencieux */ void err; }
   }
@@ -781,13 +873,16 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
     if (accountantEmail) {
       try {
         const authorName = author ? `${author.firstname || ''} ${author.lastname || ''}`.trim() : '';
+        // Frise écrite après confirmation SMTP (cf. commentaire côté auteur).
         sendAccountantEvaluationEmail(transporter, {
           manuscript, authorName, accountantEmail, accountantName, siteUrl,
+        }).then((info) => {
+          if (!info) return;
+          try {
+            logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+              `Élaboration contrat & devis → comptable (${accountantEmail})`);
+          } catch (e) { console.warn('[WORKFLOW] log email_sent (accountant) warning:', e.message); }
         });
-        try {
-          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-            `Élaboration contrat & devis → comptable (${accountantEmail})`);
-        } catch (e) { console.warn('[WORKFLOW] log email_sent (accountant) warning:', e.message); }
       } catch (err) { console.warn('[WORKFLOW] accountant notify error:', err.message); }
     }
   }

@@ -332,6 +332,16 @@
 .ac-timeline-ref { font-family: monospace; }
 .ac-timeline-remaining { margin-left: auto; }
 
+/* Correction du moyen de paiement (bouton admin sur une ligne de paiement) */
+.ac-timeline-correct {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border: 1px solid #c7d2fe; border-radius: 12px;
+  background: #eef2ff; color: #4338ca; font-size: 0.72rem; font-weight: 700;
+  cursor: pointer; transition: background .15s, border-color .15s;
+}
+.ac-timeline-correct:hover { background: #e0e7ff; border-color: #a5b4fc; }
+.ac-timeline-lock { display: inline-flex; align-items: center; color: #94a3b8; }
+
 /* Pastille crédit (acompte/avoir) */
 .ac-credit-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; background: #ede9fe; color: #5b21b6; }
 

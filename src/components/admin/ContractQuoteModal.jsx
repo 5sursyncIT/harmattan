@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
-import { FiX, FiPlus, FiTrash2, FiCheckCircle, FiFileText } from 'react-icons/fi';
+import { FiX, FiPlus, FiTrash2, FiCheckCircle, FiFileText, FiRotateCcw } from 'react-icons/fi';
 import toast from 'react-hot-toast';
-import { createContractQuote, openQuotePdf } from '../../api/quotes';
+import { createContractQuote, updateContractQuote, openQuotePdf } from '../../api/quotes';
 
 const FCFA_PER_EUR = 655.957;
 const DEFAULT_AUTHOR_DISCOUNT = 30;  // remise auteur par défaut (%) si non renseignée au contrat
@@ -45,7 +45,26 @@ function buildDefaultItems({ pages, priceEur, qty, color, discountPct }) {
   return items;
 }
 
-export default function ContractQuoteModal({ contract, onClose, onCreated }) {
+// Recharge les lignes d'un devis existant (révision). Les lignes stockées ne
+// gardent que {label, price} : on réattribue un id pour l'affichage. Un libellé
+// « 1 - … / 2 - … / 4 - … / 6 - … » remappe sur la ligne standard correspondante
+// (pour permettre un « rétablir le prix calculé » ciblé) ; tout le reste devient
+// une ligne libre (id >= 100). L'auto-recalcul est désactivé en révision, donc
+// AUCUN prix négocié n'est écrasé.
+function loadItemsFromQuote(items) {
+  const used = new Set();
+  let customSeq = 100;
+  return (items || []).map(it => {
+    const m = String(it.label || '').match(/^\s*(\d+)\s*[-–]/);
+    let id = m ? parseInt(m[1]) : NaN;
+    if (![1, 2, 4, 6].includes(id) || used.has(id)) id = ++customSeq;
+    used.add(id);
+    return { id, label: String(it.label || ''), price: Math.max(0, parseInt(it.price) || 0) };
+  });
+}
+
+export default function ContractQuoteModal({ contract, quote, onClose, onCreated }) {
+  const isEdit = !!quote;
   const ef = contract.extrafields || {};
   const author = contract.author || {};
 
@@ -74,7 +93,25 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     ? rawDiscount
     : DEFAULT_AUTHOR_DISCOUNT;
 
-  const [form, setForm] = useState({
+  // En révision : présence d'une ligne « impression Couleur » dans le devis existant.
+  const quoteHasColor = isEdit && (quote.items || []).some(i => /impression\s+couleur/i.test(i.label || ''));
+
+  const [form, setForm] = useState(() => (isEdit ? {
+    // Révision : on repart des valeurs EXACTES du devis enregistré.
+    recipient_title: quote.recipient_title || inferredTitle,
+    recipient_name: quote.recipient_name || author.name || '',
+    book_title: quote.book_title || ef.bookTitle || '',
+    book_pages: quote.book_pages ?? numPages,
+    book_format: quote.book_format || '13.5 cm sur 21.5 cm',
+    book_interior: quote.book_interior || 'une couleur N & B',
+    book_paper: quote.book_paper || 'bouffant 80 grammes',
+    book_cover: quote.book_cover || 'cartonné, coucher brillant, quadrichromie avec pellicule',
+    book_price_eur: quote.book_price_eur ?? numPriceEur,
+    discount_pct: (quote.discount_pct ?? purchaseDiscount),
+    copies_qty: initialQty,
+    diffusion: quote.diffusion || 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet',
+    color: quoteHasColor,
+  } : {
     recipient_title: inferredTitle,
     recipient_name: author.name || '',
     book_title: ef.bookTitle || '',
@@ -93,18 +130,20 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
     copies_qty: initialQty,
     diffusion: 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet',
     color: false,
-  });
+  }));
   // Format « Autre » : saisie libre dès que la valeur ne fait pas partie des choix figés.
   const [formatCustom, setFormatCustom] = useState(
     () => !FORMAT_OPTIONS.some(o => o.value === form.book_format),
   );
-  const [items, setItems] = useState(() => buildDefaultItems({
-    pages: parseInt(form.book_pages) || 0,
-    priceEur: parseFloat(form.book_price_eur) || 0,
-    qty: initialQty,
-    color: false,
-    discountPct: purchaseDiscount,
-  }));
+  const [items, setItems] = useState(() => (isEdit
+    ? loadItemsFromQuote(quote.items)
+    : buildDefaultItems({
+      pages: parseInt(form.book_pages) || 0,
+      priceEur: parseFloat(form.book_price_eur) || 0,
+      qty: initialQty,
+      color: false,
+      discountPct: purchaseDiscount,
+    })));
 
   const [submitting, setSubmitting] = useState(false);
 
@@ -126,20 +165,52 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
   // Why: les lignes 1/2/6 dépendent linéairement du nombre de pages, et la 4
   // dépend du prix public en €. Sans recompute live, l'éditeur changeait les pages
   // et la ligne couleur restait figée à l'ancien total.
-  // How to apply: les lignes libres (id >= 100) ne sont jamais écrasées.
+  // How to apply: les lignes libres (id >= 100) ne sont jamais écrasées ; les lignes
+  // standard dont le PRIX a été ajusté à la main (`manual` — négociation auteur) sont
+  // préservées au lieu d'être recalculées, sinon le montant négocié sauterait au
+  // moindre changement de pages/exemplaires.
   useEffect(() => {
+    // Révision d'un devis existant : on NE recalcule JAMAIS automatiquement.
+    // Les lignes chargées sont les montants négociés retenus — ils restent
+    // intacts. La Direction ajuste chaque ligne à la main (« Rétablir le prix
+    // calculé » reste dispo par ligne pour repartir de la formule si voulu).
+    if (isEdit) return;
     const pages = parseInt(form.book_pages) || 0;
     const priceEur = parseFloat(form.book_price_eur) || 0;
     const qty = Math.max(0, parseInt(form.copies_qty) || 0);
     setItems(prev => {
       const customs = prev.filter(i => i.id >= 100);
-      const next = buildDefaultItems({ pages, priceEur, qty, color: form.color, discountPct: form.discount_pct });
-      return [...next, ...customs];
+      const computed = buildDefaultItems({ pages, priceEur, qty, color: form.color, discountPct: form.discount_pct });
+      const merged = computed.map(c => {
+        const prevLine = prev.find(p => p.id === c.id);
+        // Prix négocié verrouillé : on garde le montant (et le libellé) saisis à la main.
+        return prevLine?.manual ? { ...c, price: prevLine.price, label: prevLine.label, manual: true } : c;
+      });
+      return [...merged, ...customs];
     });
-  }, [form.book_pages, form.book_price_eur, form.color, form.discount_pct, form.copies_qty]);
+  }, [isEdit, form.book_pages, form.book_price_eur, form.color, form.discount_pct, form.copies_qty]);
 
   const updateItem = (idx, patch) => {
-    setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const next = { ...it, ...patch };
+      // Édition manuelle du prix/libellé d'une ligne standard (id < 100) → « négocié » :
+      // la ligne ne sera plus écrasée par le recalcul automatique.
+      if (it.id < 100 && ('price' in patch || 'label' in patch)) next.manual = true;
+      return next;
+    }));
+  };
+  // Rétablit le prix calculé d'une ligne standard « négociée » (retire l'override).
+  const resetItem = (idx) => {
+    const pages = parseInt(form.book_pages) || 0;
+    const priceEur = parseFloat(form.book_price_eur) || 0;
+    const qty = Math.max(0, parseInt(form.copies_qty) || 0);
+    const computed = buildDefaultItems({ pages, priceEur, qty, color: form.color, discountPct: form.discount_pct });
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const c = computed.find(x => x.id === it.id);
+      return c ? { ...c } : { ...it, manual: false };
+    }));
   };
   const removeItem = (idx) => setItems(prev => prev.filter((_, i) => i !== idx));
   const addCustomItem = () => {
@@ -157,7 +228,7 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
 
     setSubmitting(true);
     try {
-      const res = await createContractQuote(contract.id, {
+      const payload = {
         recipient_title: form.recipient_title,
         recipient_name: form.recipient_name.trim(),
         book_title: form.book_title.trim(),
@@ -173,13 +244,16 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
         copies_qty: Math.max(0, parseInt(form.copies_qty) || 0),
         diffusion: form.diffusion,
         items: cleanItems,
-      });
-      toast.success(`Devis ${res.data.ref} créé`);
+      };
+      const res = isEdit
+        ? await updateContractQuote(quote.id, payload)
+        : await createContractQuote(contract.id, payload);
+      toast.success(isEdit ? `Devis ${res.data.ref} révisé` : `Devis ${res.data.ref} créé`);
       openQuotePdf(res.data.id);
       onCreated?.(res.data);
       onClose?.();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur création devis');
+      toast.error(err.response?.data?.error || (isEdit ? 'Erreur révision devis' : 'Erreur création devis'));
     } finally {
       setSubmitting(false);
     }
@@ -187,13 +261,19 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
 
   return (
     <div className="ct-modal-overlay" onClick={() => !submitting && onClose?.()}>
-      <div className="ct-modal ct-modal-large" role="dialog" aria-modal="true" aria-label="Générer un devis" onClick={e => e.stopPropagation()}>
+      <div className="ct-modal ct-modal-large" role="dialog" aria-modal="true" aria-label={isEdit ? 'Réviser le devis' : 'Générer un devis'} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <FiFileText size={18} /> Générer un devis
+            <FiFileText size={18} /> {isEdit ? `Réviser le devis ${quote.ref}` : 'Générer un devis'}
           </h3>
           <button type="button" className="ct-btn-ghost" onClick={onClose}><FiX size={18} /></button>
         </div>
+        {isEdit && (
+          <p style={{ margin: '0 0 12px', padding: '8px 12px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 6, fontSize: '0.8rem', color: '#92400e' }}>
+            Révision après négociation : ajustez librement les montants. En enregistrant, le devis <strong>{quote.ref}</strong> est
+            remplacé (même référence) avec les montants négociés{quote.status === 'sent' ? ' et repasse en brouillon — pensez à le ré-envoyer à l\'auteur' : ''}.
+          </p>
+        )}
 
         <div className="ct-quote-form">
           <h5 className="ct-quote-section">Destinataire</h5>
@@ -309,20 +389,40 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
               <FiPlus size={12} /> Ajouter une ligne
             </button>
           </h5>
+          <p style={{ margin: '0 0 8px', fontSize: '0.78rem', color: '#94a3b8' }}>
+            {isEdit
+              ? 'Montants négociés du devis existant : ils ne sont jamais recalculés automatiquement. Ajustez chaque ligne à la main ; « ↺ » rétablit le prix calculé d\'une ligne standard.'
+              : 'Chaque montant est librement ajustable (négociation avec l\'auteur). Une ligne dont le prix est saisi à la main passe en « négocié » et n\'est plus recalculée automatiquement.'}
+          </p>
           <div className="ct-quote-items">
-            {items.map((item, idx) => (
-              <div key={item.id} className="ct-quote-item-row">
-                <input className="ct-quote-item-label" value={item.label}
-                  onChange={e => updateItem(idx, { label: e.target.value })}
-                  placeholder="Description" maxLength={200} />
-                <input className="ct-quote-item-price" type="number" value={item.price}
-                  onChange={e => updateItem(idx, { price: e.target.value })} min={0} step={500} />
-                <span className="ct-quote-item-unit">FCFA</span>
-                <button type="button" className="ct-btn-ghost" onClick={() => removeItem(idx)} title="Supprimer">
-                  <FiTrash2 size={14} />
-                </button>
-              </div>
-            ))}
+            {items.map((item, idx) => {
+              const negotiated = item.id < 100 && item.manual;
+              // En révision, tout est déjà « négocié » : on autorise le rétablissement
+              // du prix calculé sur les lignes standard même non modifiées à la main.
+              const canReset = item.id < 100 && (item.manual || isEdit);
+              return (
+                <div key={item.id} className="ct-quote-item-row">
+                  <input className="ct-quote-item-label" value={item.label}
+                    onChange={e => updateItem(idx, { label: e.target.value })}
+                    placeholder="Description" maxLength={200} />
+                  <input className={`ct-quote-item-price${negotiated ? ' is-manual' : ''}`} type="number" value={item.price}
+                    onChange={e => updateItem(idx, { price: e.target.value })} min={0} step={500}
+                    title={negotiated ? 'Prix négocié (saisi à la main)' : 'Montant ajustable'} />
+                  <span className="ct-quote-item-unit">{negotiated ? 'négocié' : 'FCFA'}</span>
+                  <span className="ct-quote-item-reset">
+                    {canReset && (
+                      <button type="button" className="ct-btn-ghost" onClick={() => resetItem(idx)}
+                        title="Rétablir le prix calculé" style={{ color: '#b45309' }}>
+                        <FiRotateCcw size={13} />
+                      </button>
+                    )}
+                  </span>
+                  <button type="button" className="ct-btn-ghost" onClick={() => removeItem(idx)} title="Supprimer">
+                    <FiTrash2 size={14} />
+                  </button>
+                </div>
+              );
+            })}
             {items.length === 0 && (
               <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: '8px 0' }}>Aucune ligne — ajoutez-en au moins une.</p>
             )}
@@ -337,7 +437,9 @@ export default function ContractQuoteModal({ contract, onClose, onCreated }) {
         <div className="ct-modal-actions">
           <button type="button" className="ct-btn ct-btn-outline" onClick={onClose} disabled={submitting}>Annuler</button>
           <button type="button" className="ct-btn ct-btn-primary" onClick={handleSubmit} disabled={submitting || items.length === 0}>
-            {submitting ? 'Création...' : <>Créer et télécharger PDF <FiCheckCircle size={14} /></>}
+            {submitting
+              ? (isEdit ? 'Enregistrement...' : 'Création...')
+              : <>{isEdit ? 'Enregistrer la révision' : 'Créer et télécharger PDF'} <FiCheckCircle size={14} /></>}
           </button>
         </div>
       </div>

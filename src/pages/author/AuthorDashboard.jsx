@@ -15,6 +15,7 @@ function stageBadge(stage) {
     submitted: '#0284c7',
     in_evaluation: '#ea580c',
     evaluation_positive: '#10531a',
+    evaluation_rework: '#d97706',
     evaluation_negative: '#dc2626',
     contract_pending: '#d97706',
     contract_signed: '#10531a',

@@ -15,6 +15,7 @@
 export const MANUSCRIPT_STAGES = [
   'submitted',
   'in_evaluation',
+  'evaluation_rework',
   'evaluation_negative',
   'evaluation_positive',
   'contract_pending',
@@ -34,6 +35,7 @@ export const MANUSCRIPT_STAGES = [
 export const STAGE_LABELS = {
   submitted: 'Reçu',
   in_evaluation: 'En évaluation',
+  evaluation_rework: 'À retravailler',
   evaluation_negative: 'Rejeté',
   evaluation_positive: 'Évaluation favorable',
   contract_pending: 'Contrat à signer',
@@ -60,6 +62,7 @@ export const STAGE_LABELS = {
  */
 export const MANUSCRIPT_EVENTS = {
   quote_created:     { label: 'Devis généré',                   authorVisible: false },
+  quote_revised:     { label: 'Devis révisé (négociation)',     authorVisible: false },
   quote_sent:        { label: "Devis envoyé à l'auteur",        authorVisible: true },
   quote_paid:        { label: 'Devis encaissé',                 authorVisible: false },
   quote_deleted:     { label: 'Devis supprimé',                 authorVisible: false },
@@ -83,6 +86,7 @@ export const STAGE_ACTORS = {
   submitted: 'admin',
   in_evaluation: 'evaluateur',
   evaluation_positive: 'admin',
+  evaluation_rework: 'author',
   evaluation_negative: 'terminal',
   contract_pending: 'author',
   contract_signed: 'system',
@@ -106,7 +110,16 @@ export const ALLOWED_TRANSITIONS = {
   ],
   in_evaluation: [
     { to: 'evaluation_positive', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
+    { to: 'evaluation_rework', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
     { to: 'evaluation_negative', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
+  ],
+  // « À retravailler » n'est pas terminal : quand l'auteur renvoie une version
+  // retravaillée, on relance l'évaluation ; l'équipe peut aussi trancher
+  // directement (accepter ou rejeter) sans nouveau cycle.
+  evaluation_rework: [
+    { to: 'in_evaluation', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
+    { to: 'evaluation_positive', roles: ['editor', 'super_admin', 'admin'] },
+    { to: 'evaluation_negative', roles: ['editor', 'super_admin', 'admin'] },
   ],
   evaluation_negative: [],
   evaluation_positive: [
@@ -117,9 +130,15 @@ export const ALLOWED_TRANSITIONS = {
   ],
   contract_signed: [
     { to: 'payment_pending', roles: ['system', 'super_admin', 'admin'] },
+    // Démarrage anticipé de la correction, dès la signature, sans passer par
+    // l'étape paiement (le paiement du devis n'est pas une obligation).
+    { to: 'in_correction', roles: ['super_admin', 'admin', 'editor', 'production'] },
   ],
   payment_pending: [
-    { to: 'in_correction', roles: ['super_admin', 'admin', 'comptable', 'system'] },
+    // Le paiement du devis n'est PAS une obligation pour démarrer la correction :
+    // l'équipe éditoriale (editor/production) peut lancer la correction sans
+    // attendre l'encaissement ; comptable/admin peuvent aussi confirmer le paiement.
+    { to: 'in_correction', roles: ['super_admin', 'admin', 'comptable', 'editor', 'production', 'system'] },
   ],
   in_correction: [
     { to: 'correction_author_review', roles: ['correcteur', 'editor', 'super_admin', 'admin'] },
@@ -139,6 +158,10 @@ export const ALLOWED_TRANSITIONS = {
     { to: 'cover_design', roles: ['editor', 'production', 'super_admin', 'admin'] },
   ],
   cover_design: [
+    // Couverture = Production éditoriale (fusion Éditeur + Infographiste : un
+    // seul service interne s'occupe de l'éditorial ET de l'infographie).
+    // Le rôle externe `infographiste` est déprécié et VOLONTAIREMENT absent :
+    // ses comptes sont non connectables, il ne doit pas réapparaître ici.
     { to: 'bat_author_review', roles: ['editor', 'production', 'super_admin', 'admin'] },
   ],
   bat_author_review: [
@@ -158,6 +181,7 @@ export const STAGE_KIND_MAP = {
   submitted: 'original',
   in_evaluation: 'original',
   evaluation_positive: 'evaluation_report',
+  evaluation_rework: 'evaluation_report',
   evaluation_negative: 'evaluation_report',
   in_correction: 'correction',
   correction_author_review: 'correction',

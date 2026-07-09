@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
 import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS, logManuscriptEvent } from './manuscript-workflow.js';
 import { notifyTransition, sendAssignmentEmail } from './manuscript-emails.js';
+import { revokeFileTokens } from './manuscript-file-tokens.js';
 import { createManuscriptMulter } from './author-routes.js';
 import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS } from './intervenants.js';
 
@@ -330,8 +331,11 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       } else {
         const target = db.prepare('SELECT id, role FROM admin_users WHERE id = ?').get(user_id);
         if (!target) return res.status(404).json({ error: 'Utilisateur introuvable' });
-        if (!['super_admin', 'admin', 'editor'].includes(target.role)) {
-          return res.status(400).json({ error: 'Utilisateur invalide pour le rôle éditeur' });
+        // Production éditoriale = service fusionné Éditeur + Infographiste :
+        // un compte `production` est un responsable valide (aligné sur le
+        // dropdown by-role et la route to-editorial, qui l'acceptent déjà).
+        if (!['super_admin', 'admin', 'editor', 'production'].includes(target.role)) {
+          return res.status(400).json({ error: 'Utilisateur invalide pour piloter la production éditoriale' });
         }
       }
     }
@@ -377,6 +381,12 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
           if (prev) sendAssignmentEmail(transporter, manuscript, role, prev, siteUrl, 'unassigned');
           logManuscriptEvent(db, msId, 'intervenant_unassigned', wfActor,
             `${roleLabel} retiré : ${prev?.label || '#' + before.prev_id}`);
+          // Révoque ses liens de téléchargement encore actifs : un intervenant
+          // retiré du dossier ne doit plus pouvoir récupérer le manuscrit.
+          if (isContactRole) {
+            const revoked = revokeFileTokens(db, { manuscriptId: msId, intervenantId: before.prev_id });
+            if (revoked > 0) console.log(`[FILES] ${revoked} lien(s) de téléchargement révoqué(s) (intervenant #${before.prev_id}, manuscrit #${msId})`);
+          }
         } catch (err) { console.warn('[WORKFLOW] previous assignee notify error:', err.message); }
       }
 
@@ -419,15 +429,57 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   });
 
   // Transition générique (éditeur / admin / super_admin)
+  // SANS bypass : le flag `force` du body n'est plus honoré ici — un editor
+  // pouvait contourner toute la machine à états (sauter paiement, BAT, etc.)
+  // sans motif ni trace spécifique. Le SEUL chemin de contournement est
+  // /override-stage ci-dessous : admins uniquement + motif obligatoire.
   router.post('/manuscripts/v2/:id/transition', auth, csrfProtection, (req, res) => {
     if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
       return res.status(403).json({ error: 'Réservé à l\'éditeur ou l\'administrateur' });
     }
-    const { to_stage, note, force } = req.body;
+    const { to_stage, note } = req.body;
     try {
       const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
-      const updated = transition(db, req.params.id, to_stage, actor, { note: note || null, force: !!force });
+      const updated = transition(db, req.params.id, to_stage, actor, { note: note || null });
       notifyTransition(db, transporter, updated, to_stage, actor, siteUrl);
+      res.json({ success: true, manuscript: describeManuscript(updated) });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Correction manuelle de l'état (super_admin / admin uniquement).
+  // Réservée aux ERREURS MATÉRIELLES : ex. un manuscrit rejeté par erreur qu'il
+  // faut « débloquer », ou un mauvais état saisi. Contourne la machine à états
+  // (force) pour atteindre N'IMPORTE quel état — y compris depuis un état terminal
+  // (Rejeté / Imprimé). Contrairement à la transition normale :
+  //   • un MOTIF est obligatoire (tracé dans la frise) ;
+  //   • AUCUN email n'est envoyé (correction interne, pas un vrai franchissement).
+  router.post('/manuscripts/v2/:id/override-stage', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Correction de l\'état réservée aux administrateurs' });
+    }
+    const { to_stage } = req.body || {};
+    const reason = String(req.body?.reason || '').trim();
+    if (!MANUSCRIPT_STAGES.includes(to_stage)) {
+      return res.status(400).json({ error: 'État cible invalide' });
+    }
+    if (reason.length < 3) {
+      return res.status(400).json({ error: 'Motif de la correction requis (erreur constatée)' });
+    }
+    const current = db.prepare('SELECT current_stage FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (current.current_stage === to_stage) {
+      return res.status(400).json({ error: 'Le manuscrit est déjà à cet état' });
+    }
+    try {
+      const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+      const fromLabel = STAGE_LABELS[current.current_stage] || current.current_stage;
+      const toLabel = STAGE_LABELS[to_stage] || to_stage;
+      const updated = transition(db, req.params.id, to_stage, actor, {
+        force: true,
+        note: `Correction manuelle de l'état : ${fromLabel} → ${toLabel}. Motif : ${reason}`,
+      });
       res.json({ success: true, manuscript: describeManuscript(updated) });
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -454,7 +506,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     multerFor('evaluation_report').single('report'),
     async (req, res) => {
       const { verdict, recommendation, strengths, weaknesses, note } = req.body;
-      if (!['positive', 'negative'].includes(verdict)) {
+      if (!['positive', 'rework', 'negative'].includes(verdict)) {
         return res.status(400).json({ error: 'Verdict invalide' });
       }
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
@@ -480,7 +532,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       }
 
       const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
-      const nextStage = verdict === 'positive' ? 'evaluation_positive' : 'evaluation_negative';
+      const nextStage = { positive: 'evaluation_positive', rework: 'evaluation_rework', negative: 'evaluation_negative' }[verdict];
       const updated = transition(db, manuscript.id, nextStage, actor, {
         note: `Verdict : ${verdict}${recommendation ? ' — ' + recommendation : ''}`,
       });
@@ -550,6 +602,63 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     res.json({ success: true });
   });
 
+  // Validation de la correction par l'administration. Réservé aux admin /
+  // super_admin (cf. table des transitions). Deux cas couverts :
+  //  • depuis « En correction » (in_correction) : l'admin approuve directement la
+  //    correction → Production éditoriale, sans relecture auteur.
+  //  • depuis « en attente de validation auteur » (correction_author_review) :
+  //    l'admin débloque à la place de l'auteur (approuve → éditorial, ou renvoie
+  //    en correction).
+  router.post('/corrections/:manuscriptId/validate', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Action réservée aux administrateurs' });
+    }
+    const { decision, comment } = req.body || {};
+    if (!['approved', 'changes_requested'].includes(decision)) {
+      return res.status(400).json({ error: 'Décision invalide' });
+    }
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!['in_correction', 'correction_author_review'].includes(manuscript.current_stage)) {
+      return res.status(400).json({ error: `Validation impossible au stade ${manuscript.current_stage}` });
+    }
+    // « Renvoyer en correction » n'a de sens que depuis l'attente de validation auteur.
+    if (decision === 'changes_requested' && manuscript.current_stage !== 'correction_author_review') {
+      return res.status(400).json({ error: 'Le manuscrit est déjà en correction.' });
+    }
+    // Pour transmettre en production, le document corrigé doit avoir été chargé.
+    if (decision === 'approved') {
+      const hasCorrection = db.prepare(
+        `SELECT 1 FROM manuscript_files WHERE manuscript_id = ? AND kind = 'correction' LIMIT 1`
+      ).get(manuscript.id);
+      if (!hasCorrection) {
+        return res.status(400).json({ error: 'Aucun document corrigé n\'a été chargé. Uploadez-le d\'abord.' });
+      }
+    }
+    // Trace la validation au nom de l'auteur (author_id obligatoire), en précisant
+    // qu'elle a été effectuée par l'administration.
+    db.prepare(
+      `INSERT INTO manuscript_validations (manuscript_id, kind, decision, comment, author_id)
+       VALUES (?, 'correction', ?, ?, ?)`
+    ).run(
+      manuscript.id,
+      decision,
+      `[Validé par l'administration — ${req.admin.username}]${comment ? ' ' + comment : ''}`,
+      manuscript.author_id,
+    );
+    const nextStage = decision === 'approved' ? 'in_editorial' : 'in_correction';
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    const note = `Validation correction par l'administration : ${decision}${comment ? ' — ' + comment : ''}`;
+    const updated = transition(db, manuscript.id, nextStage, actor, { note });
+    // Quand la correction est validée (→ Production éditoriale), l'auteur n'est PAS
+    // prévenu automatiquement : la Direction veut qu'il le soit uniquement sur sa
+    // demande (bouton « Notifier l'auteur » sur la fiche manuscrit). Un retour en
+    // correction (changes_requested) garde la notification habituelle.
+    notifyTransition(db, transporter, updated, nextStage, actor, siteUrl,
+      decision === 'approved' ? { skipAuthorNotification: true } : {});
+    res.json({ success: true, stage: nextStage });
+  });
+
   // Transmission directe à la Production éditoriale : un admin charge le document
   // corrigé (renvoyé par email par le correcteur) via /upload, puis l'envoie à
   // l'équipe de production éditoriale sans passer par la relecture auteur. On peut
@@ -591,12 +700,42 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       note: 'Document corrigé transmis à la Production éditoriale',
       updates,
     });
-    notifyTransition(db, transporter, updated, 'in_editorial', actor, siteUrl);
+    // Correction validée → l'auteur n'est pas prévenu automatiquement (notification
+    // « sur demande » uniquement, cf. bouton « Notifier l'auteur »).
+    notifyTransition(db, transporter, updated, 'in_editorial', actor, siteUrl, { skipAuthorNotification: true });
     res.json({
       success: true,
       stage: 'in_editorial',
       assignedEditor: assignedEditor ? { id: assignedEditor.id, username: assignedEditor.username } : null,
     });
+  });
+
+  // Notification « sur demande de l'auteur » : la Direction ne veut pas que l'auteur
+  // soit prévenu automatiquement de la validation de ses corrections. Ce bouton (fiche
+  // manuscrit) envoie le message « corrections validées / Production éditoriale »
+  // (email + cloche) UNIQUEMENT lorsque l'auteur en fait la demande.
+  const CORRECTION_VALIDATED_STAGES = [
+    'in_editorial', 'editorial_validated', 'cover_design',
+    'bat_author_review', 'print_preparation', 'printing', 'printed',
+  ];
+  router.post('/corrections/:manuscriptId/notify-author', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin', 'editor', 'production'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Action réservée à l\'équipe éditoriale' });
+    }
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    // La correction doit avoir été validée (manuscrit en production éditoriale ou au-delà).
+    if (!CORRECTION_VALIDATED_STAGES.includes(manuscript.current_stage)) {
+      return res.status(400).json({ error: 'La correction n\'a pas encore été validée pour ce manuscrit.' });
+    }
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    // On informe l'auteur seul (email forcé + cloche) ; les acteurs métier ne sont
+    // pas re-notifiés. La frise « email_sent » est écrite par notifyTransition
+    // APRÈS confirmation SMTP — plus de double trace inconditionnelle ici.
+    notifyTransition(db, transporter, describeManuscript(manuscript), 'in_editorial', actor, siteUrl,
+      { authorOnly: true, forceAuthorEmail: true });
+    res.json({ success: true });
   });
 
   // ─── ÉDITORIAL ───────────────────────────────────────────
@@ -728,6 +867,26 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     if (manuscript.current_stage !== 'print_preparation') {
       return res.status(400).json({ error: `Préparation impossible au stade ${manuscript.current_stage}` });
     }
+    // Garde-fou ISBN : impression = point de non-retour (code-barres produit,
+    // dépôt légal, royalties). Sans ISBN ici, l'ouvrage partait à l'impression
+    // introuvable en recherche et incalculable en droits (cf. file d'attente
+    // ISBN côté compta). Format : 13 chiffres (tirets/espaces tolérés).
+    const effectiveIsbn = String(isbn || manuscript.isbn || '').trim();
+    if (!effectiveIsbn) {
+      return res.status(400).json({ error: 'ISBN obligatoire avant l\'impression — attribuez-le sur le contrat ou saisissez-le ici' });
+    }
+    if (!/^\d{13}$/.test(effectiveIsbn.replace(/[\s-]/g, ''))) {
+      return res.status(400).json({ error: 'ISBN invalide — 13 chiffres attendus (tirets acceptés)' });
+    }
+    // Garde-fou BAT : on ne lance pas la fabrication sans un BAT approuvé
+    // (l'étape bat_author_review peut avoir été sautée par une correction
+    // manuelle d'état — override-stage — qui ne vérifie rien).
+    const batOk = db.prepare(
+      "SELECT id FROM manuscript_validations WHERE manuscript_id = ? AND kind = 'bat' AND decision = 'approved' ORDER BY id DESC LIMIT 1"
+    ).get(manuscript.id);
+    if (!batOk) {
+      return res.status(400).json({ error: 'Aucun BAT approuvé pour ce manuscrit — faites valider le BAT (auteur ou admin) avant de lancer l\'impression' });
+    }
 
     let moResult = { dolibarr_mo_id: null, dolibarr_mo_ref: null, dolibarr_product_id: manuscript.dolibarr_product_id };
     if (hooks.onPrintPrepare) {
@@ -744,12 +903,17 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       note: `MO ${moResult.dolibarr_mo_ref || ''} — qty ${qty}`,
       updates: {
         print_qty: qty,
-        isbn: isbn || manuscript.isbn,
+        isbn: effectiveIsbn,
         dolibarr_mo_id: moResult.dolibarr_mo_id,
         dolibarr_mo_ref: moResult.dolibarr_mo_ref,
         dolibarr_product_id: moResult.dolibarr_product_id,
       },
     });
+    // Frise : un ISBN saisi À L'IMPRESSION doit être tracé comme l'est celui
+    // saisi sur le contrat (l'audit direction exige de savoir qui/quand).
+    if (!manuscript.isbn && effectiveIsbn) {
+      logManuscriptEvent(db, manuscript.id, 'isbn_assigned', actor, `ISBN ${effectiveIsbn} (saisi à la préparation d'impression)`);
+    }
     notifyTransition(db, transporter, updated, 'printing', actor, siteUrl);
     res.json({ success: true, mo: moResult });
   });
@@ -779,6 +943,28 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     }
     const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
     const updated = transition(db, manuscript.id, 'in_correction', actor, { note: req.body?.note || 'Paiement confirmé' });
+    notifyTransition(db, transporter, updated, 'in_correction', actor, siteUrl);
+    res.json({ success: true });
+  });
+
+  // ─── DÉMARRER LA CORRECTION SANS ATTENDRE LE PAIEMENT ────
+  // Le paiement du devis n'est pas une obligation pour passer en correction :
+  // l'équipe éditoriale peut lancer la phase de correction directement, sans
+  // que le devis ait été encaissé (l'encaissement reste un acte comptable distinct).
+  router.post('/manuscripts/v2/:id/start-correction', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin', 'editor', 'production'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Action réservée à l\'équipe éditoriale' });
+    }
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    // Lançable dès la signature (contract_signed) ou en attente de paiement
+    // (payment_pending) : dans les deux cas le paiement n'est pas requis.
+    if (!['contract_signed', 'payment_pending'].includes(manuscript.current_stage)) {
+      return res.status(400).json({ error: `Action impossible au stade ${manuscript.current_stage}` });
+    }
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    const updated = transition(db, manuscript.id, 'in_correction', actor,
+      { note: req.body?.note || 'Correction démarrée sans attendre le paiement du devis' });
     notifyTransition(db, transporter, updated, 'in_correction', actor, siteUrl);
     res.json({ success: true });
   });

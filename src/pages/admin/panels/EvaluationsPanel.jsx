@@ -89,6 +89,7 @@ export default function EvaluationsPanel() {
               <label>Verdict</label>
               <select value={form.verdict} onChange={(e) => setForm({ ...form, verdict: e.target.value })}>
                 <option value="positive">Favorable</option>
+                <option value="rework">À retravailler</option>
                 <option value="negative">Défavorable</option>
               </select>
             </div>

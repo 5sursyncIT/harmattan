@@ -87,6 +87,7 @@
 .ms-stage-submitted { background: #0284c7; }
 .ms-stage-in_evaluation { background: #ea580c; }
 .ms-stage-evaluation_positive, .ms-stage-editorial_validated, .ms-stage-contract_signed, .ms-stage-printed { background: #10531a; }
+.ms-stage-evaluation_rework { background: #d97706; }
 .ms-stage-evaluation_negative { background: #dc2626; }
 .ms-stage-contract_pending, .ms-stage-payment_pending { background: #d97706; }
 .ms-stage-in_correction { background: #0d9488; }
@@ -260,6 +261,8 @@
 .ms-btn-primary { background: #10531a; color: #fff; border-color: #10531a; }
 .ms-btn-primary:hover { background: #0e461a; }
 .ms-btn-danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+.ms-btn-success { background: #059669; color: #fff; border-color: #059669; }
+.ms-btn-success:hover { background: #047857; }
 .ms-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .ms-modal-backdrop {

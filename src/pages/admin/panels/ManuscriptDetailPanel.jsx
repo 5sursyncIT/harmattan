@@ -31,6 +31,12 @@ const ROLE_API = {
   assigned_editor_id: 'editor',
   assigned_printer_contact_id: 'imprimeur',
 };
+// Étapes où la correction est déjà validée : on peut alors, sur demande de
+// l'auteur, lui envoyer la confirmation (le message n'est plus automatique).
+const CORRECTION_VALIDATED_STAGES = [
+  'in_editorial', 'editorial_validated', 'cover_design',
+  'bat_author_review', 'print_preparation', 'printing', 'printed',
+];
 // Ancienne colonne (historique admin_users) associée à chaque ligne, pour rappel en lecture seule.
 const LEGACY_COL = {
   assigned_evaluator_contact_id: 'assigned_evaluator_id',
@@ -47,6 +53,7 @@ export default function ManuscriptDetailPanel() {
   // — on masque donc ces boutons pour eux (sinon ils s'affichent mais renvoient 403).
   const role = useAdminRole();
   const canEditWorkflow = ['super_admin', 'admin', 'editor'].includes(role);
+  const isAdmin = ['super_admin', 'admin'].includes(role);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [assignModal, setAssignModal] = useState(null); // col name
@@ -66,6 +73,13 @@ export default function ManuscriptDetailPanel() {
   const [signModal, setSignModal] = useState(false);
   const [signForm, setSignForm] = useState({ file: null, signed_date: '', signer_name: '' });
   const [signBusy, setSignBusy] = useState(false);
+  // Notification « corrections validées » à l'auteur — sur sa demande uniquement.
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  // Correction manuelle de l'état (erreur matérielle) — admin uniquement.
+  const [stageOptions, setStageOptions] = useState({ stages: [], labels: {} });
+  const [overrideModal, setOverrideModal] = useState(false);
+  const [overrideForm, setOverrideForm] = useState({ to_stage: '', reason: '' });
+  const [overrideBusy, setOverrideBusy] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -76,6 +90,14 @@ export default function ManuscriptDetailPanel() {
   };
 
   useEffect(() => { load();   }, [id]);
+
+  // Liste des états possibles pour le sélecteur de correction manuelle (admin).
+  useEffect(() => {
+    if (!isAdmin) return;
+    manuscriptsApi.stages()
+      .then((res) => setStageOptions({ stages: res.data?.stages || [], labels: res.data?.labels || {} }))
+      .catch(() => {});
+  }, [isAdmin]);
 
   const openAssign = (col) => {
     setAssignModal(col);
@@ -132,6 +154,69 @@ export default function ManuscriptDetailPanel() {
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur');
     }
+  };
+
+  // Le paiement du devis n'est pas obligatoire : on peut lancer la correction sans.
+  const startCorrection = async () => {
+    if (!confirm('Démarrer la correction sans attendre le paiement du devis ?')) return;
+    try {
+      await manuscriptsApi.startCorrection(id);
+      toast.success('Correction démarrée');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
+  // Après un verdict « À retravailler » : relance un cycle d'évaluation dès que
+  // l'auteur a renvoyé sa version retravaillée (transition légale → in_evaluation).
+  const relaunchEvaluation = async () => {
+    if (!confirm('Relancer l\'évaluation de ce manuscrit (version retravaillée reçue) ?')) return;
+    try {
+      await manuscriptsApi.transition(id, 'in_evaluation', 'Version retravaillée reçue — nouvelle évaluation');
+      toast.success('Évaluation relancée');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
+  // Notifie l'auteur que ses corrections sont validées. L'envoi n'est plus
+  // automatique à la validation (choix Direction) : on ne prévient l'auteur que
+  // lorsqu'il en fait la demande.
+  const notifyAuthor = async () => {
+    if (!confirm('Envoyer à l\'auteur le message confirmant que ses corrections sont validées ?')) return;
+    setNotifyBusy(true);
+    try {
+      await manuscriptsApi.notifyAuthorCorrectionValidated(id);
+      toast.success('Auteur notifié (email + espace auteur)');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setNotifyBusy(false); }
+  };
+
+  // ── Correction manuelle de l'état (erreur matérielle) — admin only ──
+  const openOverride = () => {
+    setOverrideForm({ to_stage: data?.manuscript?.current_stage || '', reason: '' });
+    setOverrideModal(true);
+  };
+  const confirmOverride = async () => {
+    if (!overrideForm.to_stage || overrideForm.to_stage === data?.manuscript?.current_stage) {
+      return toast.error('Choisissez un état différent de l\'état actuel');
+    }
+    if (overrideForm.reason.trim().length < 3) {
+      return toast.error('Indiquez le motif de la correction');
+    }
+    setOverrideBusy(true);
+    try {
+      await manuscriptsApi.overrideStage(id, overrideForm.to_stage, overrideForm.reason.trim());
+      toast.success('État du manuscrit corrigé');
+      setOverrideModal(false);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setOverrideBusy(false); }
   };
 
   // ── Contrat : créer / rattacher / signer manuellement ──
@@ -218,6 +303,15 @@ export default function ManuscriptDetailPanel() {
         <span className={`ms-stage-badge ms-stage-${manuscript.current_stage}`} style={{ marginLeft: 8 }}>
           {manuscript.stage_label}
         </span>
+        {isAdmin && (
+          <button
+            type="button" className="ms-btn" onClick={openOverride}
+            title="Corriger l'état en cas d'erreur (ex. manuscrit rejeté par erreur)"
+            style={{ marginLeft: 10, fontSize: '0.78rem', padding: '2px 10px', verticalAlign: 'middle' }}
+          >
+            <FiEdit3 style={{ verticalAlign: 'middle', marginRight: 4 }} /> Corriger l'état
+          </button>
+        )}
       </p>
 
       {isSeries && (
@@ -244,12 +338,40 @@ export default function ManuscriptDetailPanel() {
         </div>
       )}
 
-      {manuscript.current_stage === 'payment_pending' && canEditWorkflow && (
+      {manuscript.current_stage === 'evaluation_rework' && canEditWorkflow && (
         <div className="ms-action-banner">
-          <h4>Paiement en attente</h4>
-          <p>Confirmez le paiement pour déclencher la phase de correction.</p>
+          <h4>Manuscrit à retravailler</h4>
+          <p>Le comité a demandé à l'auteur de <strong>retravailler son manuscrit</strong>. Quand la version retravaillée est reçue (déposez-la dans les fichiers), relancez l'évaluation pour un nouveau cycle.</p>
           <div className="ms-actions">
-            <button type="button" className="ms-btn ms-btn-primary" onClick={markPaid}>Confirmer le paiement</button>
+            <button type="button" className="ms-btn ms-btn-primary" onClick={relaunchEvaluation}>Relancer l'évaluation</button>
+          </div>
+        </div>
+      )}
+
+      {['contract_signed', 'payment_pending'].includes(manuscript.current_stage) && canEditWorkflow && (
+        <div className="ms-action-banner">
+          <h4>Prêt pour la correction</h4>
+          <p>Le paiement du devis <strong>n'est pas obligatoire</strong> pour démarrer la correction : vous pouvez la lancer dès la signature du contrat. L'encaissement du devis reste un acte comptable distinct.</p>
+          <div className="ms-actions">
+            <button type="button" className="ms-btn ms-btn-primary" onClick={startCorrection}>Démarrer la correction</button>
+            {isAdmin && manuscript.current_stage === 'payment_pending' && (
+              <button type="button" className="ms-btn" onClick={markPaid}>Confirmer le paiement</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {CORRECTION_VALIDATED_STAGES.includes(manuscript.current_stage) && canEditWorkflow && (
+        <div className="ms-action-banner">
+          <h4>Notifier l'auteur de la validation des corrections</h4>
+          <p>
+            L'auteur n'est <strong>pas prévenu automatiquement</strong> que ses corrections sont validées.
+            Envoyez-lui le message (email + espace auteur) <strong>uniquement s'il en fait la demande</strong>.
+          </p>
+          <div className="ms-actions">
+            <button type="button" className="ms-btn ms-btn-primary" onClick={notifyAuthor} disabled={notifyBusy}>
+              {notifyBusy ? 'Envoi…' : 'Notifier l\'auteur'}
+            </button>
           </div>
         </div>
       )}
@@ -338,7 +460,7 @@ export default function ManuscriptDetailPanel() {
             ) : (
               <>
                 <p style={{ color: '#6b7280' }}>Aucun contrat rattaché à ce manuscrit.</p>
-                {['submitted', 'in_evaluation', 'evaluation_negative'].includes(manuscript.current_stage) ? (
+                {['submitted', 'in_evaluation', 'evaluation_rework', 'evaluation_negative'].includes(manuscript.current_stage) ? (
                   <small style={{ color: '#9ca3af' }}>Un contrat se crée après une évaluation favorable.</small>
                 ) : canEditWorkflow ? (
                   <div className="ms-actions">
@@ -390,8 +512,8 @@ export default function ManuscriptDetailPanel() {
               <h3>Évaluations ({evaluations.length})</h3>
               {evaluations.map((ev) => (
                 <div key={ev.id} style={{ padding: '8px 0', borderBottom: '1px solid #f3f4f6' }}>
-                  <strong style={{ color: ev.verdict === 'positive' ? '#10531a' : '#dc2626' }}>
-                    {ev.verdict === 'positive' ? 'Avis favorable' : 'Avis défavorable'}
+                  <strong style={{ color: ev.verdict === 'positive' ? '#10531a' : ev.verdict === 'rework' ? '#d97706' : '#dc2626' }}>
+                    {ev.verdict === 'positive' ? 'Avis favorable' : ev.verdict === 'rework' ? 'À retravailler' : 'Avis défavorable'}
                   </strong>
                   {ev.recommendation && <span> · {ev.recommendation}</span>}
                   {ev.note && <p style={{ color: '#4b5563', margin: '4px 0 0' }}>{ev.note}</p>}
@@ -445,7 +567,7 @@ export default function ManuscriptDetailPanel() {
 
           <div className="ms-card">
             <h3>Historique</h3>
-            <ManuscriptTimeline stages={stages} />
+            <ManuscriptTimeline stages={stages} showFullJournalToggle />
           </div>
         </aside>
       </div>
@@ -596,6 +718,49 @@ export default function ManuscriptDetailPanel() {
               <button type="button" className="ms-btn" onClick={() => setSignModal(false)} disabled={signBusy}>Annuler</button>
               <button type="button" className="ms-btn ms-btn-primary" onClick={confirmSign} disabled={signBusy}>
                 {signBusy ? 'Enregistrement…' : 'Enregistrer la signature'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {overrideModal && (
+        <div className="ms-modal-backdrop" onClick={() => !overrideBusy && setOverrideModal(false)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Corriger l'état du manuscrit</h3>
+            <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
+              Réservé aux <strong>erreurs matérielles</strong> (ex. un manuscrit rejeté ou
+              classé par erreur). Cette correction <strong>contourne le déroulé normal</strong> du
+              workflow, <strong>n'envoie aucun email</strong> à l'auteur, et reste tracée dans la frise
+              avec son motif.
+            </p>
+            <div className="form-group">
+              <label>Nouvel état *</label>
+              <select
+                value={overrideForm.to_stage}
+                onChange={(e) => setOverrideForm({ ...overrideForm, to_stage: e.target.value })}
+              >
+                {stageOptions.stages.map((s) => (
+                  <option key={s} value={s}>
+                    {(stageOptions.labels[s] || s)}{s === data?.manuscript?.current_stage ? ' (état actuel)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Motif de la correction *</label>
+              <textarea
+                rows={3}
+                placeholder="Ex. : rejet enregistré par erreur, l'évaluation était en réalité favorable."
+                value={overrideForm.reason}
+                onChange={(e) => setOverrideForm({ ...overrideForm, reason: e.target.value })}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', resize: 'vertical' }}
+              />
+            </div>
+            <div className="ms-modal-actions">
+              <button type="button" className="ms-btn" onClick={() => setOverrideModal(false)} disabled={overrideBusy}>Annuler</button>
+              <button type="button" className="ms-btn ms-btn-primary" onClick={confirmOverride} disabled={overrideBusy}>
+                {overrideBusy ? 'Correction…' : 'Corriger l\'état'}
               </button>
             </div>
           </div>

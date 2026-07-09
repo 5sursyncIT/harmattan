@@ -9,7 +9,7 @@ import {
 
 const STAGE_LABELS = {
   submitted: 'Soumis', in_evaluation: 'En évaluation',
-  evaluation_positive: 'Évaluation positive', evaluation_negative: 'Rejeté',
+  evaluation_positive: 'Évaluation positive', evaluation_rework: 'À retravailler', evaluation_negative: 'Rejeté',
   contract_pending: 'Contrat en attente', contract_signed: 'Contrat signé',
   payment_pending: 'Paiement en attente', in_correction: 'En correction',
   correction_author_review: 'Relecture auteur', in_editorial: 'Validation éditoriale',

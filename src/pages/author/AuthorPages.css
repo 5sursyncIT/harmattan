@@ -140,6 +140,7 @@
 }
 .author-eval-positive { border-left-color: #10531a; background: #f0fdf4; }
 .author-eval-negative { border-left-color: #dc2626; background: #fef2f2; }
+.author-eval-rework { border-left-color: #d97706; background: #fffbeb; }
 .author-eval em { display: block; font-size: 0.8rem; color: #6b7280; margin-top: 4px; font-style: normal; }
 .author-files {
   list-style: none;

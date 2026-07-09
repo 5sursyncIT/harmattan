@@ -3,10 +3,17 @@ import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { FiUpload } from 'react-icons/fi';
 import { manuscriptsApi } from '../../../api/manuscripts';
+import useAdminRole from '../../../hooks/useAdminRole.js';
 import './ManuscriptsWorkflow.css';
 
 export default function CorrectionsPanel() {
   const navigate = useNavigate();
+  const role = useAdminRole();
+  const isAdmin = role === 'super_admin' || role === 'admin';
+  // Transmission à la Production éditoriale : mêmes rôles que le serveur
+  // (POST /corrections/:id/to-editorial). Un correcteur voyait le bouton
+  // mais récoltait un 403 + un dropdown vide (audit 09/07/2026).
+  const canSendEditorial = ['super_admin', 'admin', 'editor', 'production'].includes(role);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
@@ -48,6 +55,22 @@ export default function CorrectionsPanel() {
     try {
       await manuscriptsApi.submitCorrectionToAuthor(id);
       toast.success('Corrections envoyées à l\'auteur');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
+  // Validation de la correction par l'administration, à la place de l'auteur
+  // (manuscrit resté « en attente de validation auteur »).
+  const validateCorrection = async (id, decision) => {
+    const msg = decision === 'approved'
+      ? 'Valider la correction et transmettre à la Production éditoriale ? (Le document corrigé doit avoir été uploadé.)'
+      : 'Renvoyer ce manuscrit en correction au nom de l\'auteur ?';
+    if (!confirm(msg)) return;
+    try {
+      await manuscriptsApi.validateCorrection(id, decision);
+      toast.success(decision === 'approved' ? 'Corrections validées — transmis à la Production éditoriale' : 'Renvoyé en correction');
       load();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur');
@@ -103,8 +126,25 @@ export default function CorrectionsPanel() {
                       <button className="ms-btn ms-btn-primary" style={{ marginLeft: 6 }} onClick={() => sendToAuthor(m.id)}>
                         Envoyer à l'auteur
                       </button>
-                      <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => openEditorial(m.id)}>
-                        → Production éditoriale
+                      {isAdmin && (
+                        <button className="ms-btn ms-btn-success" style={{ marginLeft: 6 }} onClick={() => validateCorrection(m.id, 'approved')}>
+                          Valider la correction
+                        </button>
+                      )}
+                      {canSendEditorial && (
+                        <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => openEditorial(m.id)}>
+                          → Production éditoriale
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {m.current_stage === 'correction_author_review' && isAdmin && (
+                    <>
+                      <button className="ms-btn ms-btn-primary" style={{ marginLeft: 6 }} onClick={() => validateCorrection(m.id, 'approved')}>
+                        Valider la correction
+                      </button>
+                      <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => validateCorrection(m.id, 'changes_requested')}>
+                        Renvoyer en correction
                       </button>
                     </>
                   )}

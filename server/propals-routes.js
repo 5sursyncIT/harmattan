@@ -11,9 +11,17 @@
 
 import { Router } from 'express';
 import axios from 'axios';
+import { findExistingTier } from './tier-dedup.js';
 
 // Statuts Dolibarr d'une proposition commerciale.
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Validé', 2: 'Signé', 3: 'Non signé', 4: 'Facturé' };
+
+// Client par défaut pour une proforma de comptoir anonyme + entrepôt de vente.
+const DEFAULT_QUOTE_CUSTOMER = 13; // CLIENT LIBRAIRE
+const WAREHOUSE = 4;               // Rayon (idwarehouse pour la décrémentation de stock)
+
+// Libellés d'état d'une proforma POS (SQLite pos_quotes.status).
+const POS_QUOTE_STATUS_LABELS = { valid: 'Proforma POS', invoiced: 'Facturée', refused: 'Refusée' };
 
 // Client REST Dolibarr (création de devis via /proposals — même patron que le POS).
 const adminApi = axios.create({
@@ -27,6 +35,16 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
   // No-op si la protection CSRF n'est pas fournie (montage hérité).
   const csrf = csrfProtection || ((req, res, next) => next());
 
+  // Colonnes de suivi conversion proforma → facture (idempotent — la table
+  // pos_quotes est créée par pos-routes au démarrage).
+  const ensureQuoteInvoiceCols = () => {
+    if (!db) return;
+    for (const col of ['dolibarr_invoice_id INTEGER', 'invoice_ref TEXT']) {
+      try { db.exec(`ALTER TABLE pos_quotes ADD COLUMN ${col}`); } catch { /* déjà présente */ }
+    }
+  };
+  try { ensureQuoteInvoiceCols(); } catch { /* table pas encore prête */ }
+
   // Met en forme une ligne pos_quotes (SQLite) pour l'affichage admin / l'impression.
   const shapePosQuote = (q) => {
     let items = [];
@@ -39,16 +57,50 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
       d.setDate(d.getDate() + validity);
       expiry = d.toISOString();
     }
+    const code = q.status && POS_QUOTE_STATUS_LABELS[q.status] ? q.status : 'valid';
     return {
       id: `pos:${q.ref}`, source: 'pos', ref: q.ref,
       customer_name: q.customer_name || 'Client comptoir',
       customer_phone: q.customer_phone || null, customer_email: q.customer_email || null,
       date: created, expiry,
-      status: 'pos', statusLabel: 'Proforma POS',
+      status: 'pos', status_code: code, statusLabel: POS_QUOTE_STATUS_LABELS[code],
+      invoice_ref: q.invoice_ref || null, dolibarr_invoice_id: q.dolibarr_invoice_id || null,
       total_ttc: Number(q.total_ttc) || 0,
       items, validity_days: validity,
       staff: q.staff_name || null, terminal: q.terminal || null,
     };
+  };
+
+  // Résout (ou crée) le tiers Dolibarr correspondant au client d'une proforma.
+  // Une proforma ne stocke qu'un nom/téléphone/email libres (pas de socid).
+  const resolveQuoteClient = async (quote, bodySocid) => {
+    // 1. Client explicitement choisi par l'admin.
+    const explicit = parseInt(bodySocid, 10);
+    if (explicit) {
+      const [[s]] = await dolibarrPool.query('SELECT rowid FROM llx_societe WHERE rowid = ? AND status = 1', [explicit]);
+      if (s) return explicit;
+    }
+    const name = String(quote.customer_name || '').trim();
+    const phone = String(quote.customer_phone || '').trim();
+    const email = String(quote.customer_email || '').trim();
+    // 2. Comptoir anonyme → client libraire par défaut.
+    if ((!name || /^client comptoir$/i.test(name)) && !phone && !email) return DEFAULT_QUOTE_CUSTOMER;
+    // 3. Dédup par email / téléphone (évite les doublons de tiers).
+    const existing = await findExistingTier(dolibarrPool, { email, phone });
+    if (existing?.id) return existing.id;
+    // 4. Sinon, correspondance exacte par nom.
+    if (name) {
+      const [[byName]] = await dolibarrPool.query(
+        'SELECT rowid FROM llx_societe WHERE status = 1 AND nom = ? ORDER BY rowid ASC LIMIT 1', [name]
+      );
+      if (byName) return byName.rowid;
+    }
+    // 5. Création d'un nouveau tiers client.
+    const created = await adminApi.post('/thirdparties', {
+      name: name || 'Client comptoir', client: 1,
+      phone: phone || undefined, email: email || undefined,
+    });
+    return created.data;
   };
 
   // ═══════════════════════════════════════════════════════════
@@ -186,6 +238,105 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // FACTURER UNE PROFORMA POS — crée une facture Dolibarr validée
+  // (impayée, stock décrémenté) depuis les articles de la proforma et
+  // marque la proforma « Facturée ». Body optionnel : { socid }.
+  // Atomique : si la validation échoue (stock insuffisant…), le brouillon
+  // est supprimé et la proforma reste intacte.
+  // ═══════════════════════════════════════════════════════════
+  router.post('/pos-quotes/:ref/invoice', csrf, async (req, res) => {
+    try {
+      if (!db) return res.status(404).json({ error: 'Indisponible' });
+      ensureQuoteInvoiceCols();
+      const q = db.prepare('SELECT * FROM pos_quotes WHERE ref = ?').get(req.params.ref);
+      if (!q) return res.status(404).json({ error: 'Proforma introuvable' });
+      if (q.status === 'invoiced') return res.status(409).json({ error: 'Cette proforma est déjà facturée' });
+      if (q.status === 'refused') return res.status(409).json({ error: 'Cette proforma a été refusée — impossible de la facturer' });
+
+      let items = [];
+      try { items = JSON.parse(q.items || '[]'); } catch { items = []; }
+      if (!items.length) return res.status(409).json({ error: 'Proforma sans article — facturation impossible' });
+
+      const socid = await resolveQuoteClient(q, req.body?.socid);
+
+      const lines = items.map((it) => {
+        const qty = Number(it.qty) > 0 ? Number(it.qty) : 1;
+        const line = {
+          qty,
+          subprice: parseInt(it.price_ttc) || 0,
+          tva_tx: 0, product_type: 0,
+          remise_percent: Number(it.discount) || 0,
+        };
+        if (!it.is_free && it.product_id) line.fk_product = parseInt(it.product_id, 10);
+        if (it.label) line.desc = String(it.label).slice(0, 200);
+        return line;
+      });
+
+      const today = new Date().toISOString().split('T')[0];
+      const invoiceRes = await adminApi.post('/invoices', {
+        socid: parseInt(socid, 10),
+        date: today,
+        type: 0,
+        module_source: 'proforma',
+        note_private: `Facture générée depuis la proforma ${q.ref} (caisse)`,
+        lines,
+      });
+      const invoiceId = invoiceRes.data;
+
+      // Valider → décrémente le stock (Rayon). Atomique en cas d'échec.
+      try {
+        await adminApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: WAREHOUSE });
+      } catch (valErr) {
+        try { await adminApi.delete(`/invoices/${invoiceId}`); } catch { /* ignore */ }
+        const dmsg = valErr.response?.data?.error?.message || valErr.response?.data?.error || valErr.message;
+        const stockIssue = /stock/i.test(String(dmsg));
+        console.error('[PROPALS] pos-quote invoice validate error:', dmsg);
+        return res.status(409).json({
+          error: stockIssue
+            ? 'Stock insuffisant pour facturer cette proforma. Réapprovisionnez les articles puis réessayez.'
+            : `Impossible de valider la facture : ${dmsg}`,
+        });
+      }
+
+      let invoiceRef = null;
+      try {
+        const [[f]] = await dolibarrPool.query('SELECT ref FROM llx_facture WHERE rowid = ?', [invoiceId]);
+        invoiceRef = f?.ref || null;
+      } catch { /* ignore */ }
+
+      db.prepare("UPDATE pos_quotes SET status = 'invoiced', dolibarr_invoice_id = ?, invoice_ref = ? WHERE ref = ?")
+        .run(invoiceId, invoiceRef, q.ref);
+
+      console.log(`[PROPALS] Proforma ${q.ref} facturée → ${invoiceRef || invoiceId} (client ${socid}) par ${req.admin?.email || req.admin?.role}`);
+      res.json({ success: true, invoice_id: invoiceId, invoice_ref: invoiceRef, client_id: socid });
+    } catch (err) {
+      const dolMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
+      console.error('[PROPALS] pos-quote invoice error:', dolMsg);
+      res.status(500).json({ error: 'Erreur lors de la facturation de la proforma', detail: dolMsg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // REFUSER UNE PROFORMA POS — la classe « Refusée » (invalidée).
+  // ═══════════════════════════════════════════════════════════
+  router.post('/pos-quotes/:ref/refuse', csrf, (req, res) => {
+    try {
+      if (!db) return res.status(404).json({ error: 'Indisponible' });
+      ensureQuoteInvoiceCols();
+      const q = db.prepare('SELECT ref, status FROM pos_quotes WHERE ref = ?').get(req.params.ref);
+      if (!q) return res.status(404).json({ error: 'Proforma introuvable' });
+      if (q.status === 'invoiced') return res.status(409).json({ error: 'Cette proforma est déjà facturée — impossible de la refuser' });
+      if (q.status === 'refused') return res.status(409).json({ error: 'Cette proforma est déjà refusée' });
+      db.prepare("UPDATE pos_quotes SET status = 'refused' WHERE ref = ?").run(q.ref);
+      console.log(`[PROPALS] Proforma ${q.ref} refusée par ${req.admin?.email || req.admin?.role}`);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[PROPALS] pos-quote refuse error:', err.message);
+      res.status(500).json({ error: 'Erreur lors du refus de la proforma' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // RECHERCHE CLIENT (pour le formulaire de création)
   // ═══════════════════════════════════════════════════════════
   router.get('/clients/search', async (req, res) => {
@@ -284,6 +435,134 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // VALIDER ET FACTURER — transforme le devis en facture Dolibarr
+  // (validée / impayée) et classe le devis « Facturé ».
+  //
+  // Workflow : validate (si brouillon) → création facture depuis les lignes
+  // du devis → validation facture (décrémente le stock, STOCK_CALCULATE_ON_BILL)
+  // → lien devis↔facture → setinvoiced. Atomique : si la validation de la
+  // facture échoue (stock insuffisant…), le brouillon est supprimé et le devis
+  // reste intact.
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/invoice', csrf, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'Identifiant de devis invalide' });
+    try {
+      const [[propal]] = await dolibarrPool.query(
+        'SELECT rowid AS id, ref, fk_statut, fk_soc, note_public FROM llx_propal WHERE rowid = ?', [id]
+      );
+      if (!propal) return res.status(404).json({ error: 'Devis introuvable' });
+      if (propal.fk_statut === 4) return res.status(409).json({ error: 'Ce devis est déjà facturé' });
+      if (propal.fk_statut === 3) return res.status(409).json({ error: 'Ce devis a été refusé — impossible de le facturer' });
+      if (!propal.fk_soc) return res.status(409).json({ error: 'Devis sans client — facturation impossible' });
+
+      const [lines] = await dolibarrPool.query(
+        `SELECT fk_product, qty, subprice, remise_percent, tva_tx, product_type, description
+         FROM llx_propaldet WHERE fk_propal = ? ORDER BY rang ASC, rowid ASC`, [id]
+      );
+      if (!lines.length) return res.status(409).json({ error: 'Devis sans ligne — facturation impossible' });
+
+      // 1. Valider le devis s'il est encore en brouillon (réf PROV → définitive).
+      if (propal.fk_statut === 0) {
+        await adminApi.post(`/proposals/${id}/validate`);
+      }
+
+      // 2. Créer la facture depuis les lignes du devis (TVA telle quelle = 0).
+      const today = new Date().toISOString().split('T')[0];
+      const invoiceRes = await adminApi.post('/invoices', {
+        socid: parseInt(propal.fk_soc, 10),
+        date: today,
+        note_public: propal.note_public || '',
+        note_private: `Facture générée depuis le devis ${propal.ref}`,
+        lines: lines.map((l) => ({
+          fk_product: l.fk_product ? parseInt(l.fk_product, 10) : undefined,
+          qty: parseFloat(l.qty),
+          subprice: parseFloat(l.subprice),
+          remise_percent: parseFloat(l.remise_percent) || 0,
+          tva_tx: parseFloat(l.tva_tx) || 0,
+          product_type: parseInt(l.product_type) || 0,
+          description: l.description || undefined,
+        })),
+      });
+      const invoiceId = invoiceRes.data;
+
+      // 3. Valider la facture → décrémente le stock (warehouse Rayon).
+      //    Atomique : en cas d'échec, on purge le brouillon et on n'altère pas le devis.
+      try {
+        await adminApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
+      } catch (valErr) {
+        try { await adminApi.delete(`/invoices/${invoiceId}`); } catch { /* ignore */ }
+        const dmsg = valErr.response?.data?.error?.message || valErr.response?.data?.error || valErr.message;
+        const stockIssue = /stock/i.test(String(dmsg));
+        console.error('[PROPALS] invoice validate error:', dmsg);
+        return res.status(409).json({
+          error: stockIssue
+            ? 'Stock insuffisant pour facturer ce devis. Réapprovisionnez les articles puis réessayez.'
+            : `Impossible de valider la facture : ${dmsg}`,
+        });
+      }
+
+      // 4. Relier devis ↔ facture (relation Dolibarr) — best effort.
+      try {
+        await dolibarrPool.query(
+          `INSERT INTO llx_element_element (fk_source, sourcetype, fk_target, targettype)
+           VALUES (?, 'propal', ?, 'facture')`, [id, invoiceId]
+        );
+      } catch (e) { console.warn('[PROPALS] lien devis/facture non créé:', e.message); }
+
+      // 5. Classer le devis « Facturé » (statut 4).
+      try { await adminApi.post(`/proposals/${id}/setinvoiced`); } catch (e) { console.warn('[PROPALS] setinvoiced warning:', e.message); }
+
+      let invoiceRef = null;
+      try {
+        const [[f]] = await dolibarrPool.query('SELECT ref FROM llx_facture WHERE rowid = ?', [invoiceId]);
+        invoiceRef = f?.ref || null;
+      } catch { /* ignore */ }
+
+      console.log(`[PROPALS] Devis ${propal.ref} facturé → ${invoiceRef || invoiceId} par ${req.admin?.email || req.admin?.role}`);
+      res.json({ success: true, invoice_id: invoiceId, invoice_ref: invoiceRef });
+    } catch (err) {
+      const dolMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
+      console.error('[PROPALS] invoice error:', dolMsg);
+      res.status(500).json({ error: 'Erreur lors de la facturation du devis', detail: dolMsg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // REFUSER / INVALIDER — classe le devis « Non signé » (refusé).
+  // Body optionnel : { reason }. Un brouillon est validé au préalable pour
+  // conserver une réf définitive (trace propre).
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/refuse', csrf, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'Identifiant de devis invalide' });
+    const reason = String(req.body?.reason || '').trim().slice(0, 500);
+    try {
+      const [[propal]] = await dolibarrPool.query(
+        'SELECT rowid AS id, ref, fk_statut FROM llx_propal WHERE rowid = ?', [id]
+      );
+      if (!propal) return res.status(404).json({ error: 'Devis introuvable' });
+      if (propal.fk_statut === 4) return res.status(409).json({ error: 'Ce devis est déjà facturé — impossible de le refuser' });
+      if (propal.fk_statut === 3) return res.status(409).json({ error: 'Ce devis est déjà refusé' });
+
+      // Un brouillon doit d'abord être validé pour obtenir une réf définitive.
+      if (propal.fk_statut === 0) {
+        await adminApi.post(`/proposals/${id}/validate`);
+      }
+
+      const note = reason ? `Devis refusé : ${reason}` : 'Devis refusé';
+      await adminApi.post(`/proposals/${id}/close`, { status: 3, note_private: note });
+
+      console.log(`[PROPALS] Devis ${propal.ref} refusé par ${req.admin?.email || req.admin?.role}`);
+      res.json({ success: true });
+    } catch (err) {
+      const dolMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
+      console.error('[PROPALS] refuse error:', dolMsg);
+      res.status(500).json({ error: 'Erreur lors du refus du devis', detail: dolMsg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // DÉTAIL
   // ═══════════════════════════════════════════════════════════
   router.get('/:id', async (req, res) => {
@@ -313,6 +592,19 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
          ORDER BY pd.rang ASC, pd.rowid ASC`, [id]
       );
 
+      // Facture générée depuis ce devis (si facturé) — pour l'affichage.
+      let linkedInvoice = null;
+      if (propal.fk_statut === 4) {
+        const [[li]] = await dolibarrPool.query(
+          `SELECT f.rowid AS id, f.ref, f.fk_statut, f.paye
+           FROM llx_element_element ee
+           JOIN llx_facture f ON f.rowid = ee.fk_target
+           WHERE ee.fk_source = ? AND ee.sourcetype = 'propal' AND ee.targettype = 'facture'
+           ORDER BY f.rowid DESC LIMIT 1`, [id]
+        );
+        if (li) linkedInvoice = { id: li.id, ref: li.ref, status: li.fk_statut, paid: !!li.paye };
+      }
+
       res.json({
         propal: {
           id: propal.id, ref: propal.ref, ref_client: propal.ref_client || null,
@@ -320,6 +612,7 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
           date: propal.date, expiry: propal.expiry,
           total_ht: Number(propal.total_ht), total_tva: Number(propal.total_tva), total_ttc: Number(propal.total_ttc),
           note_public: propal.note_public, note_private: propal.note_private,
+          linked_invoice: linkedInvoice,
           customer: {
             id: propal.fk_soc, name: propal.customer_name, email: propal.customer_email,
             phone: propal.customer_phone, address: propal.address, zip: propal.zip, town: propal.town,

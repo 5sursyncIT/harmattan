@@ -610,7 +610,11 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     const nextStage = decision === 'approved' ? 'in_editorial' : 'in_correction';
     const actor = { role: 'author', id: req.author.id, label: `${req.author.firstname} ${req.author.lastname}` };
     const updated = transition(db, manuscript.id, nextStage, actor, { note: `Validation correction : ${decision}${comment ? ' — ' + comment : ''}` });
-    notifyTransition(db, transporter, updated, nextStage, actor, siteUrl);
+    // L'auteur vient de valider lui-même : on ne lui renvoie pas le message
+    // « validation éditoriale » (redondant). Il sera prévenu sur sa demande
+    // uniquement (cf. bouton « Notifier l'auteur » côté admin).
+    notifyTransition(db, transporter, updated, nextStage, actor, siteUrl,
+      decision === 'approved' ? { skipAuthorNotification: true } : {});
     res.json({ success: true, stage: nextStage });
   });
 

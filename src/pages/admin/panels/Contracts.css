@@ -399,7 +399,7 @@ a.ct-card { text-decoration: none; color: inherit; }
 .ct-quote-section:first-of-type { border-top: none; padding-top: 0; }
 .ct-quote-items { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .ct-quote-item-row {
-  display: grid; grid-template-columns: 1fr 110px auto auto; gap: 8px; align-items: center;
+  display: grid; grid-template-columns: 1fr 110px auto auto auto; gap: 8px; align-items: center;
 }
 .ct-quote-item-label,
 .ct-quote-item-price {
@@ -408,7 +408,10 @@ a.ct-card { text-decoration: none; color: inherit; }
 .ct-quote-item-label:focus,
 .ct-quote-item-price:focus { border-color: var(--color-green-deep); outline: none; }
 .ct-quote-item-price { text-align: right; }
+/* Prix négocié (saisi à la main) : surlignage ambré pour le distinguer du calcul auto. */
+.ct-quote-item-price.is-manual { border-color: #b45309; background: #fffbeb; font-weight: 600; }
 .ct-quote-item-unit { font-size: 0.78rem; color: #64748b; }
+.ct-quote-item-reset { display: flex; align-items: center; justify-content: center; min-width: 18px; }
 .ct-quote-total {
   display: flex; justify-content: space-between; align-items: center;
   margin-top: 14px; padding: 12px 16px;

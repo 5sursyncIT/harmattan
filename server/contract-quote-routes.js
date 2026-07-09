@@ -5,6 +5,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { logManuscriptEvent } from './manuscript-workflow.js';
+import { createAuthorEventNotification } from './manuscript-emails.js';
 import { makeAdminAuth } from './admin-auth.js';
 import { adminApi } from './dolibarr-admin-client.js';
 import { recordInvoicePayment, resolvePaymentId } from './dolibarr-payments.js';
@@ -64,7 +65,97 @@ function numberToWordsFR(n) {
   return chunk(n);
 }
 
-export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) {
+// Génère le PDF d'un devis (ODT → LibreOffice → PDF) et renvoie le Buffer.
+// Réutilisé par la route GET /quotes/:id/pdf (aperçu) ET par l'envoi email à
+// l'auteur. `quote` doit contenir items_json + les champs du devis.
+async function renderQuotePdf(quote) {
+  let tmpDir;
+  try {
+    const items = JSON.parse(quote.items_json);
+    const templatePath = join(__dirname, 'templates', 'devis-contrat.odt');
+    if (!existsSync(templatePath)) throw new Error('Template devis introuvable');
+
+    tmpDir = join('/tmp', `quote-${quote.id}-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+
+    await execFile('unzip', ['-oq', templatePath], { cwd: tmpDir });
+    let content = readFileSync(join(tmpDir, 'content.xml'), 'utf-8');
+
+    const dateStr = new Date(quote.created_at).toLocaleDateString('fr-FR');
+
+    const disc = Number(quote.discount_pct);
+    const hasDiscount = Number.isFinite(disc) && disc > 0;
+    const discountStr = hasDiscount
+      ? (Number.isInteger(disc) ? String(disc) : disc.toFixed(1).replace('.', ','))
+      : '';
+    if (!hasDiscount) {
+      content = content.replace(/\s*<text:p text:style-name="SpecBullet">- Remise auteur[^<]*<\/text:p>/, '');
+    }
+
+    const replacements = {
+      REF: quote.ref,
+      DATE: dateStr,
+      RECIPIENT_TITLE: quote.recipient_title,
+      RECIPIENT_NAME: quote.recipient_name,
+      BOOK_TITLE: quote.book_title,
+      BOOK_PAGES: String(quote.book_pages),
+      BOOK_FORMAT: quote.book_format,
+      BOOK_INTERIOR: quote.book_interior,
+      BOOK_PAPER: quote.book_paper,
+      BOOK_COVER: quote.book_cover,
+      BOOK_PRICE_EUR: Number(quote.book_price_eur).toFixed(2),
+      DISCOUNT_PCT: discountStr,
+      DIFFUSION: quote.diffusion,
+      TOTAL_AMOUNT: Number(quote.total).toLocaleString('fr-FR'),
+      TOTAL_TEXT: numberToWordsFR(quote.total) + ' Francs CFA',
+    };
+    for (const [k, v] of Object.entries(replacements)) {
+      content = content.split(`{${k}}`).join(escapeXml(v));
+    }
+
+    // Duplicate the item row for each item
+    const rowRegex = /<table:table-row[^>]*>(?:(?!<table:table-row)[\s\S])*?\{ITEM_LABEL\}[\s\S]*?<\/table:table-row>/;
+    const rowMatch = content.match(rowRegex);
+    if (rowMatch) {
+      const tpl = rowMatch[0];
+      const rows = items.map((item, i) => {
+        let row = tpl
+          .split('{ITEM_LABEL}').join(escapeXml(item.label))
+          .split('{ITEM_PRICE}').join(escapeXml(parseInt(item.price).toLocaleString('fr-FR')));
+        if (i % 2 === 1) row = row.split('"QuoteCell"').join('"QuoteCellAlt"');
+        return row;
+      }).join('');
+      content = content.replace(tpl, rows);
+    }
+
+    writeFileSync(join(tmpDir, 'content.xml'), content);
+
+    const odtPath = join(tmpDir, 'output.odt');
+    const hasPictures = existsSync(join(tmpDir, 'Pictures'));
+    await execFile('zip', ['-q', '-X', '-0', odtPath, 'mimetype'], { cwd: tmpDir });
+    await execFile('zip', [
+      '-q', '-r', '-X', odtPath,
+      'META-INF', 'content.xml', 'styles.xml', 'meta.xml',
+      ...(hasPictures ? ['Pictures'] : []),
+    ], { cwd: tmpDir });
+
+    const sofficeProfile = join(tmpDir, 'soffice-profile');
+    mkdirSync(sofficeProfile, { recursive: true });
+    await enqueueSoffice(() => execFile('soffice', [
+      '--headless', '--norestore', '--nologo', '--nofirststartwizard',
+      `-env:UserInstallation=file://${sofficeProfile}`,
+      '--convert-to', 'pdf', '--outdir', tmpDir, odtPath,
+    ], { timeout: 60000 }));
+    const pdfPath = join(tmpDir, 'output.pdf');
+    if (!existsSync(pdfPath)) throw new Error('Conversion PDF échouée');
+
+    return readFileSync(pdfPath);
+  } finally {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, transporter, siteUrl }) {
   const router = Router();
 
   // Vérifie qu'un contrat parent existe réellement dans Dolibarr avant d'y
@@ -129,6 +220,19 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     if (!dolibarrPool) return null;
     const [rows] = await dolibarrPool.query('SELECT fk_soc FROM llx_contrat WHERE rowid = ? LIMIT 1', [contractId]);
     return rows[0]?.fk_soc ? Number(rows[0].fk_soc) : null;
+  }
+
+  // Coordonnées de l'auteur (tiers du contrat) pour l'envoi du devis par email.
+  async function contractAuthorContact(contractId) {
+    if (!dolibarrPool) return null;
+    const [rows] = await dolibarrPool.query(
+      `SELECT s.rowid AS socid, s.email, s.nom
+       FROM llx_contrat c JOIN llx_societe s ON s.rowid = c.fk_soc
+       WHERE c.rowid = ? LIMIT 1`,
+      [contractId],
+    );
+    if (!rows.length) return null;
+    return { socid: Number(rows[0].socid), email: rows[0].email || null, name: rows[0].nom || '' };
   }
 
   // Total / déjà payé / reste à payer d'une facture Dolibarr (lecture directe).
@@ -271,6 +375,108 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     }
   });
 
+  // PUT /api/quotes/:id — RÉVISION d'un devis après négociation.
+  // Remplace en place (même id, même référence) toutes les lignes/champs par les
+  // montants négociés retenus par la Direction. Le total est recalculé à partir des
+  // prix SOUMIS (jamais régénéré par la formule) → le prix négocié est maintenu.
+  // Garde-fou : révision autorisée uniquement tant qu'AUCUNE facture n'existe
+  // (statut draft/sent) — sinon la facture Dolibarr déjà émise se désynchroniserait.
+  // Un devis révisé repasse en « brouillon » : s'il avait été envoyé, la Direction
+  // doit le ré-envoyer pour communiquer le nouveau montant à l'auteur.
+  router.put('/quotes/:id', auth, csrfProtection, async (req, res) => {
+    try {
+      const quoteId = parseInt(req.params.id);
+      if (!quoteId) return res.status(400).json({ error: 'Devis invalide' });
+
+      const existing = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(quoteId);
+      if (!existing) return res.status(404).json({ error: 'Devis introuvable' });
+      if (existing.dolibarr_invoice_id || !['draft', 'sent'].includes(existing.status)) {
+        return res.status(409).json({ error: 'Ce devis est déjà facturé — révision impossible' });
+      }
+
+      const {
+        recipient_title, recipient_name, book_title, book_pages, book_format,
+        book_interior, book_paper, book_cover, book_price_eur, diffusion, items, discount_pct,
+        copies_qty,
+      } = req.body;
+
+      const copiesQty = copies_qty === undefined
+        ? null
+        : Math.max(0, parseInt(copies_qty) || 0);
+
+      const rawDiscount = parseFloat(discount_pct);
+      const discountPct = Number.isFinite(rawDiscount)
+        ? Math.min(100, Math.max(0, rawDiscount))
+        : DEFAULT_AUTHOR_DISCOUNT;
+
+      if (!recipient_name?.trim()) return res.status(400).json({ error: 'Nom du destinataire requis' });
+      if (!book_title?.trim()) return res.status(400).json({ error: 'Titre de l\'ouvrage requis' });
+      if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'Au moins une ligne requise' });
+
+      const sanitizedItems = items
+        .map(i => ({ label: String(i.label || '').trim().slice(0, 200), price: Math.max(0, parseInt(i.price) || 0) }))
+        .filter(i => i.label && i.price > 0);
+      if (sanitizedItems.length === 0) return res.status(400).json({ error: 'Items invalides' });
+
+      const total = sanitizedItems.reduce((s, i) => s + i.price, 0);
+
+      // Remplacement en place : la référence et l'id ne changent JAMAIS (c'est le même
+      // devis, révisé). Repasse en 'draft' pour forcer un ré-envoi si besoin.
+      db.prepare(`UPDATE contract_quotes SET
+        recipient_title = ?, recipient_name = ?, book_title = ?, book_pages = ?,
+        book_format = ?, book_interior = ?, book_paper = ?, book_cover = ?,
+        book_price_eur = ?, diffusion = ?, items_json = ?, total = ?, discount_pct = ?,
+        status = 'draft'
+        WHERE id = ?`).run(
+        String(recipient_title || 'Monsieur').slice(0, 20),
+        recipient_name.trim().slice(0, 120),
+        book_title.trim().slice(0, 300),
+        Math.max(0, parseInt(book_pages) || 0),
+        String(book_format || '13.5 cm sur 21.5 cm').slice(0, 60),
+        String(book_interior || 'une couleur N & B').slice(0, 60),
+        String(book_paper || 'bouffant 80 grammes').slice(0, 60),
+        String(book_cover || 'cartonné, coucher brillant, quadrichromie avec pellicule').slice(0, 200),
+        parseFloat(book_price_eur) || 0,
+        String(diffusion || 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet').slice(0, 200),
+        JSON.stringify(sanitizedItems),
+        total,
+        discountPct,
+        quoteId,
+      );
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'update_quote', `Devis ${existing.ref} révisé — total ${total} FCFA (était ${existing.total})`);
+
+      // Persiste le nombre d'exemplaires contractuels choisi sur le contrat (comme à la création).
+      if (copiesQty !== null) {
+        try {
+          await adminApi.put(`/contracts/${existing.contract_id}`, {
+            array_options: {
+              options_author_purchase_qty: copiesQty,
+              options_author_purchase_enabled: copiesQty > 0 ? 1 : 0,
+            },
+          });
+        } catch (e) {
+          console.warn('Persist author_purchase_qty warning:', e.response?.data?.error || e.message);
+        }
+      }
+
+      try {
+        const msId = manuscriptIdForContract(existing.contract_id);
+        if (msId) {
+          logManuscriptEvent(db, msId, 'quote_revised',
+            { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+            `Devis ${existing.ref} révisé — ${total.toLocaleString('fr-FR')} FCFA`);
+        }
+      } catch (e) { console.warn('Manuscript event (quote_revised) warning:', e.message); }
+
+      res.json({ id: quoteId, ref: existing.ref, total, status: 'draft' });
+    } catch (err) {
+      console.error('Update quote error:', err.message);
+      res.status(500).json({ error: 'Erreur révision devis' });
+    }
+  });
+
   // GET /api/contracts/:contractId/quotes — list quotes for a contract
   router.get('/contracts/:contractId/quotes', auth, async (req, res) => {
     try {
@@ -375,127 +581,30 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
     }
   });
 
-  // GET /api/quotes/:id/pdf — render PDF
+  // GET /api/quotes/:id/pdf — render PDF (aperçu / téléchargement admin)
   router.get('/quotes/:id/pdf', auth, async (req, res) => {
-    let tmpDir;
     try {
       const quote = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
-
-      const items = JSON.parse(quote.items_json);
-      const templatePath = join(__dirname, 'templates', 'devis-contrat.odt');
-      if (!existsSync(templatePath)) return res.status(500).json({ error: 'Template devis introuvable' });
-
-      tmpDir = join('/tmp', `quote-${quote.id}-${Date.now()}`);
-      mkdirSync(tmpDir, { recursive: true });
-
-      // Unzip template — execFile (pas de shell) : aucun risque d'injection
-      // même si un chemin venait à contenir des métacaractères shell.
-      // Asynchrone : la conversion peut durer plusieurs secondes, l'event loop
-      // doit rester disponible (POS, paiements…).
-      await execFile('unzip', ['-oq', templatePath], { cwd: tmpDir });
-
-      let content = readFileSync(join(tmpDir, 'content.xml'), 'utf-8');
-
-      // Locale-aware date
-      const dateStr = new Date(quote.created_at).toLocaleDateString('fr-FR');
-
-      // Remise auteur : affichée uniquement si une valeur > 0 a été enregistrée.
-      // Les anciens devis (colonne NULL) ou une remise à 0 % font disparaître la
-      // puce entière du document pour ne pas afficher « Remise : 0 % ».
-      const disc = Number(quote.discount_pct);
-      const hasDiscount = Number.isFinite(disc) && disc > 0;
-      const discountStr = hasDiscount
-        ? (Number.isInteger(disc) ? String(disc) : disc.toFixed(1).replace('.', ','))
-        : '';
-      if (!hasDiscount) {
-        content = content.replace(/\s*<text:p text:style-name="SpecBullet">- Remise auteur[^<]*<\/text:p>/, '');
-      }
-
-      const replacements = {
-        REF: quote.ref,
-        DATE: dateStr,
-        RECIPIENT_TITLE: quote.recipient_title,
-        RECIPIENT_NAME: quote.recipient_name,
-        BOOK_TITLE: quote.book_title,
-        BOOK_PAGES: String(quote.book_pages),
-        BOOK_FORMAT: quote.book_format,
-        BOOK_INTERIOR: quote.book_interior,
-        BOOK_PAPER: quote.book_paper,
-        BOOK_COVER: quote.book_cover,
-        BOOK_PRICE_EUR: Number(quote.book_price_eur).toFixed(2),
-        DISCOUNT_PCT: discountStr,
-        DIFFUSION: quote.diffusion,
-        TOTAL_AMOUNT: Number(quote.total).toLocaleString('fr-FR'),
-        TOTAL_TEXT: numberToWordsFR(quote.total) + ' Francs CFA',
-      };
-      for (const [k, v] of Object.entries(replacements)) {
-        content = content.split(`{${k}}`).join(escapeXml(v));
-      }
-
-      // Duplicate the item row for each item
-      const rowRegex = /<table:table-row[^>]*>(?:(?!<table:table-row)[\s\S])*?\{ITEM_LABEL\}[\s\S]*?<\/table:table-row>/;
-      const rowMatch = content.match(rowRegex);
-      if (rowMatch) {
-        const tpl = rowMatch[0];
-        const rows = items.map((item, i) => {
-          let row = tpl
-            .split('{ITEM_LABEL}').join(escapeXml(item.label))
-            .split('{ITEM_PRICE}').join(escapeXml(parseInt(item.price).toLocaleString('fr-FR')));
-          // Zébrage : une ligne sur deux bascule sur le style à fond vert très pâle.
-          // (Le remplacement cible le style de cellule "QuoteCell" sans toucher
-          //  "QuoteCellText"/"QuoteCellPrice" grâce aux guillemets englobants.)
-          if (i % 2 === 1) row = row.split('"QuoteCell"').join('"QuoteCellAlt"');
-          return row;
-        }).join('');
-        content = content.replace(tpl, rows);
-      }
-
-      writeFileSync(join(tmpDir, 'content.xml'), content);
-
-      // Repack ODT (mimetype must be first, uncompressed). Inclut Pictures/ si présent
-      // (le template embarque le logo PNG).
-      const odtPath = join(tmpDir, 'output.odt');
-      const hasPictures = existsSync(join(tmpDir, 'Pictures'));
-      // mimetype d'abord, non compressé (-0), puis le reste — sans shell.
-      await execFile('zip', ['-q', '-X', '-0', odtPath, 'mimetype'], { cwd: tmpDir });
-      await execFile('zip', [
-        '-q', '-r', '-X', odtPath,
-        'META-INF', 'content.xml', 'styles.xml', 'meta.xml',
-        ...(hasPictures ? ['Pictures'] : []),
-      ], { cwd: tmpDir });
-
-      // Convert to PDF via LibreOffice headless.
-      // --user-installation : nécessaire sous systemd ProtectHome=read-only, sinon soffice
-      // tente d'écrire son profil dans $HOME/.config et plante "Unspecified Application Error".
-      const sofficeProfile = join(tmpDir, 'soffice-profile');
-      mkdirSync(sofficeProfile, { recursive: true });
-      await enqueueSoffice(() => execFile('soffice', [
-        '--headless', '--norestore', '--nologo', '--nofirststartwizard',
-        `-env:UserInstallation=file://${sofficeProfile}`,
-        '--convert-to', 'pdf', '--outdir', tmpDir, odtPath,
-      ], { timeout: 60000 }));
-      const pdfPath = join(tmpDir, 'output.pdf');
-      if (!existsSync(pdfPath)) throw new Error('Conversion PDF échouée');
-
-      const pdfBuffer = readFileSync(pdfPath);
+      const pdfBuffer = await renderQuotePdf(quote);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${quote.ref}.pdf"`);
       res.send(pdfBuffer);
     } catch (err) {
       console.error('Quote PDF error:', err.message);
       res.status(500).json({ error: 'Erreur génération PDF' });
-    } finally {
-      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  // POST /api/quotes/:id/send — marque le devis comme envoyé à l'auteur.
-  // (Il n'y a pas d'envoi email automatique : le PDF est transmis manuellement ;
-  //  ce clic enregistre l'envoi sur la frise du manuscrit.)
-  router.post('/quotes/:id/send', auth, csrfProtection, (req, res) => {
+  // POST /api/quotes/:id/send — ENVOI EXPLICITE du devis à l'auteur (semi-auto).
+  // Rien ne part à l'auteur tant que ce bouton n'est pas cliqué. Au clic :
+  //   1) génère le PDF du devis et l'envoie par email à l'auteur (si email connu) ;
+  //   2) marque le devis « envoyé » → il devient visible dans l'espace auteur (frise) ;
+  //   3) journalise (admin + frise manuscrit).
+  // L'absence d'email ne bloque pas la publication dans l'espace auteur (emailed=false).
+  router.post('/quotes/:id/send', auth, csrfProtection, async (req, res) => {
     try {
-      const quote = db.prepare('SELECT id, ref, contract_id, status FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
+      const quote = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(parseInt(req.params.id));
       if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
       // On ne « renvoie » qu'un brouillon ou un devis déjà envoyé : ne jamais
       // écraser un statut comptable (facturé/acompte/payé).
@@ -503,20 +612,69 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection }) 
         return res.status(409).json({ error: 'Ce devis est déjà facturé — statut non modifiable' });
       }
 
+      // Coordonnées auteur (best-effort : un échec Dolibarr ne bloque pas l'envoi).
+      let contact = null;
+      try { contact = await contractAuthorContact(quote.contract_id); } catch (e) { void e; }
+
+      // 1) Email du PDF à l'auteur, si une adresse est connue et le SMTP dispo.
+      let emailed = false;
+      if (transporter && contact?.email) {
+        try {
+          const pdfBuffer = await renderQuotePdf(quote);
+          const espaceLink = siteUrl ? `${siteUrl}/auteur` : null;
+          await transporter.sendMail({
+            from: '"L\'Harmattan Sénégal" <direction@senharmattan.com>',
+            to: contact.email,
+            subject: `Devis de contribution ${quote.ref} — « ${quote.book_title} »`,
+            html: `
+              <p>Bonjour ${escapeXml(`${quote.recipient_title || ''} ${quote.recipient_name || ''}`.trim())},</p>
+              <p>Veuillez trouver ci-joint le devis de contribution pour votre ouvrage
+                 <strong>« ${escapeXml(quote.book_title)} »</strong> (réf. ${escapeXml(quote.ref)}).</p>
+              <p><strong>Montant total : ${Number(quote.total).toLocaleString('fr-FR')} FCFA.</strong></p>
+              ${espaceLink ? `<p>Vous pouvez également le retrouver et suivre votre ouvrage dans votre espace auteur : <a href="${espaceLink}">${espaceLink}</a></p>` : ''}
+              <p>Pour toute question, vous pouvez répondre directement à cet email.</p>
+              <p>Cordialement,<br>L'équipe éditoriale de L'Harmattan Sénégal</p>
+            `,
+            attachments: [{ filename: `${quote.ref}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }],
+          });
+          emailed = true;
+        } catch (e) {
+          // On n'échoue pas la requête : le devis sera quand même publié dans l'espace.
+          console.error('Send quote email error:', e.message);
+        }
+      }
+
+      // 2) Marque « envoyé » → visible dans l'espace auteur.
       db.prepare("UPDATE contract_quotes SET status = 'sent' WHERE id = ?").run(quote.id);
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-        .run(req.admin.username, 'send_quote', `Devis ${quote.ref} marqué envoyé`);
+        .run(req.admin.username, 'send_quote',
+          `Devis ${quote.ref} envoyé à l'auteur${emailed ? ` (email ${contact.email})` : ' (publié dans l\'espace, sans email)'}`);
 
+      // 3) Frise manuscrit (quote_sent est authorVisible → visible côté auteur).
       try {
         const msId = manuscriptIdForContract(quote.contract_id);
         if (msId) {
           logManuscriptEvent(db, msId, 'quote_sent',
             { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
-            `Devis ${quote.ref} envoyé à l'auteur`);
+            `Devis ${quote.ref} envoyé à l'auteur${emailed ? '' : ' (publié dans l\'espace, sans email)'}`);
+          // Cloche auteur : le devis n'était signalé QUE par email — un auteur
+          // qui rate l'email ne voyait rien dans son espace (audit 09/07/2026).
+          const ms = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(msId);
+          if (ms) {
+            createAuthorEventNotification(db, {
+              authorId: ms.author_id,
+              manuscript: ms,
+              key: 'quote_sent',
+              title: 'Devis de contribution reçu',
+              message: `Le devis ${quote.ref} (${Number(quote.total).toLocaleString('fr-FR')} FCFA) est disponible dans votre espace auteur.`,
+              actionUrl: `/auteur/manuscrits/${ms.id}`,
+              actionRequired: false,
+            });
+          }
         }
       } catch (e) { console.warn('Manuscript event (quote_sent) warning:', e.message); }
 
-      res.json({ success: true, status: 'sent' });
+      res.json({ success: true, status: 'sent', emailed, email: emailed ? contact.email : null });
     } catch (err) {
       console.error('Send quote error:', err.message);
       res.status(500).json({ error: 'Erreur envoi devis' });
