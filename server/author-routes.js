@@ -8,6 +8,7 @@ import multer from 'multer';
 import { generateManuscriptRef, transition, STAGE_LABELS, MANUSCRIPT_EVENTS } from './manuscript-workflow.js';
 import { notifyTransition, sendTransitionEmail, getAuthorPreferences } from './manuscript-emails.js';
 import { computeRoyaltyBreakdown } from './royalties.js';
+import { ensureAuthorTier } from './author-tier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
@@ -119,6 +120,12 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
           .run(email, hash, firstname, lastname, phone || null);
         authorId = r.lastInsertRowid;
       }
+      // Invariant « auteur = tiers » : l'auto-inscription (email réel) crée/relie
+      // une fiche tiers Dolibarr. Non bloquant — un échec réseau ne doit pas
+      // empêcher la création du compte auteur.
+      ensureAuthorTier({ db, dolibarrPool }, authorId)
+        .catch((err) => console.error('[AUTHOR] ensureAuthorTier (register):', err.message));
+
       const { token } = createSession(authorId);
       setSessionCookie(res, token);
       res.json({ success: true, id: authorId, firstname, lastname, email });

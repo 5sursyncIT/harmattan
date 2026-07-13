@@ -52,7 +52,10 @@ Le déploiement nécessite sudo (dossier Dolibarr appartenant à `www-data`). Le
 - `book-routes.js` — Book CRUD: create/update products, cover image upload, extrafield metadata
 - `contract-routes.js` — Contract management: CRUD, manuscript linking, ODT-driven PDF generation via Dolibarr extrafields, inline thirdparty (author) creation
 - `preorder-utils.js` — Preorder helpers: pricing, payment resolution, email templates, status transitions
+- `author-tier.js` — `ensureAuthorTier()` : garantit l'invariant « un auteur est forcément un tiers » (cf. section dédiée)
+- `tier-dedup.js` — `findExistingTier()` : dédup d'un tiers par email/téléphone (jamais par le nom), validation d'identité
 - `dolibarr-client.js` — Axios client for Dolibarr API with DOLAPIKEY auth, 30s timeout
+- `dolibarr-admin-client.js` — Axios client avec la clé ADMIN (`DOLIBARR_ADMIN_API_KEY`) : écritures sensibles (création de tiers/contrats/factures, règlements). La clé régulière renvoie 403 dessus.
 - `sync.js` — In-memory cache (SimpleCache) + sync functions for products/categories/stock
 
 **Dual database architecture:**
@@ -94,7 +97,7 @@ ADMIN_DEFAULT_PASSWORD
 ## Contract System (/admin/contracts/*)
 
 - Wizard `ContractCreate.jsx` en 3 étapes : auteur → type/conditions → vérification.
-- **Auteur** : recherche + création inline (POST `/api/contracts/thirdparties`, nom + email + téléphone tous obligatoires, dédup par nom).
+- **Auteur** : recherche + création inline (POST `/api/contracts/thirdparties`, nom + prénom + email + téléphone tous obligatoires). Dédup par **email puis téléphone** via `findExistingTier` — **jamais par le nom** (cf. section « Auteurs & Tiers »).
 - **Type de contrat** = combinaison **modèle × étendue de droits** stockée dans `options_contract_type` au format `modele_scope` (ex : `harmattan_2024_edition_numerique`) :
   - **Modèles** : `harmattan_2024` (classique), `harmattan_dll` (subventionné DLL), `tamarinier` (collection).
   - **Étendues** : `edition_simple` (papier), `edition_numerique` (+ avenant numérique), `edition_complete` (+ adaptations audiovisuelle & théâtrale).
@@ -104,6 +107,31 @@ ADMIN_DEFAULT_PASSWORD
 - **Logo en-tête** : chaque ODT embarque `public/images/logo.png` sous `Pictures/logo.png` (entrée manifest + `draw:frame`/`draw:image` `as-char` en tête de l'ouverture, 4,5 × 2,29 cm). Le chemin source et les dimensions sont en constantes (`LOGO_SRC`, `LOGO_WIDTH_CM`, `LOGO_HEIGHT_CM`) en tête du script. Format ouvrage standard : `15,5 × 24 cm`.
 - Workflow manuscrit : la création auto de contrat (`server/index.js`) bascule sur `harmattan_2024_edition_simple` par défaut.
 - Signature en ligne : URL générée via `generateSignatureUrl(ref)` (HMAC bcrypt avec `DOLIBARR_INSTANCE_KEY` + `DOLIBARR_SIGN_TOKEN`).
+
+## Auteurs & Tiers — invariant « un auteur est forcément un tiers »
+
+Règle métier (direction) : **un tiers peut être un auteur, mais tout auteur ayant une VRAIE relation est forcément un tiers Dolibarr.**
+
+- **Modèle** : les auteurs vivent dans SQLite (`authors`), les tiers dans Dolibarr (`llx_societe`). Lien = `authors.dolibarr_thirdparty_id` (nullable).
+- **Relation réelle** = auto-inscription avec **email réel**, **soumission de manuscrit**, **contrat** ou **devis**. Dans ces cas, le tiers est créé/relié automatiquement.
+- **Exclusion volontaire** : les fiches de catalogue importées en masse (email factice `auteur+<slug>@senharmattan.local`, **sans** manuscrit) ne deviennent **PAS** des tiers — cela repolluerait `llx_societe` (cf. dépollution 2026-05 : 1493 faux fournisseurs nettoyés).
+
+**Helper unique — ne pas dupliquer la logique** : `ensureAuthorTier({ db, dolibarrPool }, authorId, opts)` dans `server/author-tier.js`.
+- Idempotent (un auteur déjà lié n'est jamais retouché) ; **dédup d'abord** (email puis téléphone via `findExistingTier`, **jamais par le nom** — patronymes communs = personnes distinctes), création ensuite via la clé admin (`client:1`, `code_client:-1`).
+- `opts` : `force` (ignore le garde-fou « relation réelle » — chemins où la relation est certaine), `dryRun`, `throwOnError` (chemin critique), `client`.
+
+**Points d'appel** (non bloquants — un échec réseau ne doit pas casser le flux utilisateur, sauf le contrat) :
+
+| Déclencheur | Fichier |
+|---|---|
+| Auto-inscription auteur | `author-routes.js` (`POST /register`) |
+| Soumission de manuscrit public | `admin-routes.js` (`submitManuscriptHandler`) |
+| Création admin inline | `admin-people-routes.js` (`POST /authors`) — le garde-fou ignore les emails factices |
+| Création auto de contrat | `index.js` (`createContractDraft`) — `force` + `throwOnError` |
+
+`pos-routes.js` (`POST /pos/customers/from-author/:id`) fait encore sa propre création inline : à refactorer vers le helper si on y touche.
+
+**Rattrapage de l'existant** : `node scripts/backfill-author-tiers.mjs` (DRY-RUN par défaut, `--apply` pour écrire, journal réversible dans `backups/`). Exécuté le 2026-07-13 : 52 auteurs à relation réelle → 43 tiers créés + 9 reliés par dédup, 0 erreur.
 
 ## Security Patterns
 

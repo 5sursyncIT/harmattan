@@ -35,6 +35,10 @@ manuscripts/
 public/uploads/
 
 .webhook-secret
+.csrf-secret
+
+# Scans de contrats signés (données personnelles) — ne pas versionner
+contract-signatures/
 
 # Sauvegardes opérationnelles (dumps DB, rollbacks) — ne pas versionner
 backups/

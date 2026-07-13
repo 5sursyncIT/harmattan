@@ -9,6 +9,7 @@ import { existsSync } from 'fs';
 import rateLimit from 'express-rate-limit';
 import { generateManuscriptRef } from './manuscript-workflow.js';
 import { notifyTransition, notifySeriesSubmission } from './manuscript-emails.js';
+import { ensureAuthorTier } from './author-tier.js';
 import {
   ROLES,
   validRoles,
@@ -1195,6 +1196,13 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         console.error('[MANUSCRIPT] DB error:', err.message);
         cleanupAll();
         return res.status(500).json({ error: 'Erreur enregistrement manuscrit' });
+      }
+
+      // Invariant « auteur = tiers » : une soumission de manuscrit est une vraie
+      // relation → créer/relier la fiche tiers Dolibarr. Non bloquant.
+      if (dolibarrPool) {
+        ensureAuthorTier({ db, dolibarrPool }, author.id)
+          .catch((err) => console.error('[MANUSCRIPT] ensureAuthorTier:', err.message));
       }
 
       const manuscripts = createdIds.map((id) => db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(id));

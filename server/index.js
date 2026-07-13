@@ -22,7 +22,7 @@ import { dolibarrApi } from './dolibarr-client.js';
 import { adminApi } from './dolibarr-admin-client.js';
 import { recordEcommerceInvoicePayment } from './dolibarr-payments.js';
 import { fetchOrderDetail } from './order-detail.js';
-import { findExistingTier } from './tier-dedup.js';
+import { ensureAuthorTier } from './author-tier.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
 import { EXCLUDED_CATEGORIES_SET, excludedCategorySqlList } from '../src/utils/excludedCategories.js';
 import {
@@ -1075,32 +1075,14 @@ async function createContractDraft(manuscript) {
   const author = db.prepare('SELECT * FROM authors WHERE id = ?').get(manuscript.author_id);
   if (!author) throw new Error('Auteur introuvable');
 
-  // Créer la thirdparty Dolibarr si nécessaire
+  // Garantir la thirdparty Dolibarr (invariant « auteur = tiers »). Chemin
+  // critique : force=true (la relation contrat est certaine) + throwOnError pour
+  // ne jamais créer un contrat orphelin de tiers. Dédup email/téléphone incluse.
   let thirdpartyId = author.dolibarr_thirdparty_id;
   if (!thirdpartyId) {
-    try {
-      // Dédup : réutiliser un tier actif existant (même email / téléphone) plutôt
-      // que d'en créer un doublon, puis lier l'auteur.
-      const existing = await findExistingTier(dolibarrPool, { email: author.email, phone: author.phone });
-      if (existing) {
-        thirdpartyId = existing.id;
-      } else {
-        // Écriture sensible → clé admin (DOLIBARR_ADMIN_API_KEY). La clé régulière
-        // n'a pas les droits de création de tiers/contrats (403 Insufficient rights).
-        const doliRes = await adminApi.post('/thirdparties', {
-          name: `${author.firstname} ${author.lastname}`,
-          email: author.email,
-          phone: author.phone || '',
-          client: 1,
-          code_client: -1,
-        });
-        thirdpartyId = doliRes.data;
-      }
-      db.prepare('UPDATE authors SET dolibarr_thirdparty_id = ? WHERE id = ?').run(thirdpartyId, author.id);
-    } catch (err) {
-      console.error('[WORKFLOW] Thirdparty create error:', err.response?.data || err.message);
-      throw new Error('Échec création thirdparty Dolibarr');
-    }
+    const r = await ensureAuthorTier({ db, dolibarrPool }, author.id, { force: true, throwOnError: true });
+    thirdpartyId = r.thirdpartyId;
+    if (!thirdpartyId) throw new Error('Échec création thirdparty Dolibarr');
   }
 
   // Créer le contrat brouillon via Dolibarr REST API.

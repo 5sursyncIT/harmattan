@@ -12,6 +12,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { ensureAuthorTier } from './author-tier.js';
 import { buildSocieteReportPdf } from './societe-report.js';
 import { computeRoyaltyBreakdown } from './royalties.js';
 
@@ -104,9 +105,13 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       let where = '';
       const params = [];
       if (q) {
-        where = `WHERE email LIKE ? OR firstname LIKE ? OR lastname LIKE ? OR phone LIKE ?`;
+        // Le nom complet doit matcher aussi (« Prénom Nom » / « Nom Prénom ») :
+        // chaque colonne seule ne contient jamais les deux à la fois.
+        where = `WHERE email LIKE ? OR firstname LIKE ? OR lastname LIKE ? OR phone LIKE ?
+                 OR (COALESCE(firstname, '') || ' ' || COALESCE(lastname, '')) LIKE ?
+                 OR (COALESCE(lastname, '') || ' ' || COALESCE(firstname, '')) LIKE ?`;
         const pat = `%${safeLike(q)}%`;
-        params.push(pat, pat, pat, pat);
+        params.push(pat, pat, pat, pat, pat, pat);
       }
 
       const total = db.prepare(`SELECT COUNT(*) AS n FROM customers ${where}`).get(...params).n;
@@ -289,9 +294,14 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
       let where = '';
       const params = [];
       if (q) {
-        where = `WHERE email LIKE ? OR firstname LIKE ? OR lastname LIKE ? OR phone LIKE ?`;
+        // Le nom complet doit matcher aussi (« Abdoulaye BAH » / « BAH Abdoulaye »
+        // / nom d'affichage) : chaque colonne seule ne contient jamais les deux.
+        where = `WHERE email LIKE ? OR firstname LIKE ? OR lastname LIKE ? OR phone LIKE ?
+                 OR COALESCE(display_name, '') LIKE ?
+                 OR (COALESCE(firstname, '') || ' ' || COALESCE(lastname, '')) LIKE ?
+                 OR (COALESCE(lastname, '') || ' ' || COALESCE(firstname, '')) LIKE ?`;
         const pat = `%${safeLike(q)}%`;
-        params.push(pat, pat, pat, pat);
+        params.push(pat, pat, pat, pat, pat, pat, pat);
       }
 
       const total = db.prepare(`SELECT COUNT(*) AS n FROM authors ${where}`).get(...params).n;
@@ -376,6 +386,14 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin?.username || 'unknown', 'author_create_inline', `#${r.lastInsertRowid} ${displayName} (slug=${slug})`);
+
+      // Invariant « auteur = tiers » : si un email réel a été fourni, créer/relier
+      // la fiche tiers Dolibarr. Le garde-fou ignore les fiches à email factice
+      // (auteur+slug@senharmattan.local) sans manuscrit — pas de pollution. Non bloquant.
+      if (dolibarrPool) {
+        ensureAuthorTier({ db, dolibarrPool }, r.lastInsertRowid)
+          .catch((err) => console.error('[ADMIN] ensureAuthorTier (inline):', err.message));
+      }
 
       res.status(201).json({ created: true, id: r.lastInsertRowid, display_name: displayName, slug, firstname, lastname });
     } catch (err) {
