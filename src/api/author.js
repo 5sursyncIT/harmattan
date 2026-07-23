@@ -56,6 +56,10 @@ export const authorApi = {
     api.post(`/author/manuscripts/${id}/validate-correction`, { decision, comment }),
   validateBat: (id, decision, comment) =>
     api.post(`/author/manuscripts/${id}/validate-bat`, { decision, comment }),
+  submitRework: (id, formData) =>
+    api.post(`/author/manuscripts/${id}/submit-rework`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
   // Notifications in-app (cloche)
   listNotifications: (limit = 30) => api.get('/author/notifications', { params: { limit } }),
   getUnreadCount: () => api.get('/author/notifications/unread-count'),

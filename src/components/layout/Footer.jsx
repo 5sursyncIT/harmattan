@@ -90,7 +90,7 @@ export default function Footer() {
       </div>
       <div className="footer-copyright">
         <div className="container">
-          <p>&copy; {new Date().getFullYear()} - Made by <strong>5/Sync IT</strong> 77 097 29 08</p>
+          <p>&copy; {new Date().getFullYear()} - Made by <a href="https://5sursync.com/" target="_blank" rel="noopener noreferrer"><strong>5/Sync IT</strong></a> 77 097 29 08</p>
         </div>
       </div>
     </footer>

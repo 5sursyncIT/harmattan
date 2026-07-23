@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { FiArrowLeft, FiDownload, FiUser, FiPlus, FiExternalLink, FiFileText, FiLink2, FiEdit3 } from 'react-icons/fi';
+import { FiArrowLeft, FiDownload, FiUser, FiPlus, FiExternalLink, FiFileText, FiLink2, FiEdit3, FiUpload, FiSend, FiLock, FiUnlock, FiStar } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { manuscriptsApi, intervenantsApi } from '../../../api/manuscripts';
 import { getContracts, signContractPhysical, validateContract } from '../../../api/contracts';
@@ -8,6 +8,7 @@ import useAdminRole from '../../../hooks/useAdminRole';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 import ManuscriptTimeline from '../../../components/common/ManuscriptTimeline';
+import ManuscriptPhaseBar from '../../../components/common/ManuscriptPhaseBar';
 import './ManuscriptsWorkflow.css';
 
 // Acteurs externes affectés depuis le carnet d'intervenants (colonnes *_contact_id).
@@ -36,6 +37,7 @@ const ROLE_API = {
 const CORRECTION_VALIDATED_STAGES = [
   'in_editorial', 'editorial_validated', 'cover_design',
   'bat_author_review', 'print_preparation', 'printing', 'printed',
+  'in_communication', 'published',
 ];
 // Ancienne colonne (historique admin_users) associée à chaque ligne, pour rappel en lecture seule.
 const LEGACY_COL = {
@@ -80,6 +82,21 @@ export default function ManuscriptDetailPanel() {
   const [overrideModal, setOverrideModal] = useState(false);
   const [overrideForm, setOverrideForm] = useState({ to_stage: '', reason: '' });
   const [overrideBusy, setOverrideBusy] = useState(false);
+  // Micro-corrections de la fiche (fautes de frappe : titre, sous-titre, genre, synopsis).
+  const [editModal, setEditModal] = useState(false);
+  const [editForm, setEditForm] = useState({ title: '', subtitle: '', genre: '', synopsis: '' });
+  const [editBusy, setEditBusy] = useState(false);
+  // Versionnage du fichier manuscrit : dépôt d'une nouvelle version (toute étape),
+  // demande de révision à l'auteur (lien de dépôt), version définitive.
+  const [versionModal, setVersionModal] = useState(false);
+  const [versionForm, setVersionForm] = useState({ file: null, note: '' });
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [revisionModal, setRevisionModal] = useState(false);
+  const [revisionMessage, setRevisionMessage] = useState('');
+  const [revisionBusy, setRevisionBusy] = useState(false);
+  const [unlockModal, setUnlockModal] = useState(false);
+  const [unlockReason, setUnlockReason] = useState('');
+  const [finalBusy, setFinalBusy] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -168,6 +185,31 @@ export default function ManuscriptDetailPanel() {
     }
   };
 
+  // Prolongement de la frise après l'impression : relais commercial (Parutions).
+  // Ces passages sont aussi automatiques via la checklist du panneau Parutions
+  // (première action de lancement → « En communication » ; 17/17 → « Paru »).
+  const startCommunication = async () => {
+    if (!confirm('Passer cet ouvrage « En communication » (lancement commercial démarré) ?')) return;
+    try {
+      await manuscriptsApi.transition(id, 'in_communication', 'Lancement commercial démarré (passage manuel)');
+      toast.success('Ouvrage en communication');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
+  const markPublished = async () => {
+    if (!confirm('Marquer cet ouvrage comme « Paru » ? Cette étape clôture le suivi du manuscrit.')) return;
+    try {
+      await manuscriptsApi.transition(id, 'published', 'Ouvrage paru — lancement commercial déroulé');
+      toast.success('Ouvrage marqué comme paru');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
   // Après un verdict « À retravailler » : relance un cycle d'évaluation dès que
   // l'auteur a renvoyé sa version retravaillée (transition légale → in_evaluation).
   const relaunchEvaluation = async () => {
@@ -196,6 +238,30 @@ export default function ManuscriptDetailPanel() {
     } finally { setNotifyBusy(false); }
   };
 
+  // ── Micro-corrections de la fiche (faute de frappe) — admin/éditeur ──
+  const openEdit = () => {
+    const m = data?.manuscript || {};
+    setEditForm({ title: m.title || '', subtitle: m.subtitle || '', genre: m.genre || '', synopsis: m.synopsis || '' });
+    setEditModal(true);
+  };
+  const confirmEdit = async () => {
+    if (!editForm.title.trim()) return toast.error('Le titre ne peut pas être vide');
+    setEditBusy(true);
+    try {
+      await manuscriptsApi.updateDetails(id, {
+        title: editForm.title,
+        subtitle: editForm.subtitle,
+        genre: editForm.genre,
+        synopsis: editForm.synopsis,
+      });
+      toast.success('Fiche corrigée (modification tracée dans la frise)');
+      setEditModal(false);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setEditBusy(false); }
+  };
+
   // ── Correction manuelle de l'état (erreur matérielle) — admin only ──
   const openOverride = () => {
     setOverrideForm({ to_stage: data?.manuscript?.current_stage || '', reason: '' });
@@ -217,6 +283,73 @@ export default function ManuscriptDetailPanel() {
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur');
     } finally { setOverrideBusy(false); }
+  };
+
+  // ── Versionnage du fichier manuscrit ──
+  const confirmVersionUpload = async () => {
+    if (!versionForm.file) return toast.error('Choisissez le fichier de la nouvelle version');
+    setVersionBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', versionForm.file);
+      if (versionForm.note.trim()) fd.append('note', versionForm.note.trim());
+      const res = await manuscriptsApi.uploadManuscriptVersion(id, fd);
+      toast.success(`Version v${res.data?.version} enregistrée — c'est désormais la version courante`);
+      setVersionModal(false);
+      setVersionForm({ file: null, note: '' });
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors du dépôt');
+    } finally { setVersionBusy(false); }
+  };
+
+  const confirmRevisionRequest = async () => {
+    setRevisionBusy(true);
+    try {
+      const res = await manuscriptsApi.requestAuthorRevision(id, revisionMessage.trim() || null);
+      toast.success(`Lien de dépôt envoyé à l'auteur (valable ${res.data?.expires_days || 14} jours)`);
+      setRevisionModal(false);
+      setRevisionMessage('');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setRevisionBusy(false); }
+  };
+
+  const markFinal = async (file) => {
+    if (!confirm(`Arrêter la v${file.version} comme VERSION DÉFINITIVE ?\nPlus aucun dépôt ne sera possible (admin ou auteur) sans déverrouillage, et les liens de dépôt actifs seront révoqués.`)) return;
+    setFinalBusy(true);
+    try {
+      await manuscriptsApi.markFileFinal(id, file.id);
+      toast.success(`v${file.version} arrêtée comme version définitive`);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setFinalBusy(false); }
+  };
+
+  const confirmUnlockFinal = async (file) => {
+    if (unlockReason.trim().length < 3) return toast.error('Indiquez le motif du déverrouillage');
+    setFinalBusy(true);
+    try {
+      await manuscriptsApi.unlockFileFinal(id, file.id, unlockReason.trim());
+      toast.success('Version définitive déverrouillée — les dépôts sont rouverts');
+      setUnlockModal(false);
+      setUnlockReason('');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setFinalBusy(false); }
+  };
+
+  const toggleMilestone = async (file) => {
+    try {
+      await manuscriptsApi.setFileMilestone(id, file.id, file.is_milestone ? 0 : 1);
+      toast.success(file.is_milestone ? `v${file.version} retirée des jalons` : `v${file.version} marquée jalon (protégée de la purge)`);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
   };
 
   // ── Contrat : créer / rattacher / signer manuellement ──
@@ -289,6 +422,24 @@ export default function ManuscriptDetailPanel() {
   const seriesTomes = Array.isArray(series) ? series : [];
   const isSeries = Boolean(manuscript.series_ref) && seriesTomes.length > 1;
 
+  // Chaîne de versions du texte du manuscrit (kind 'original') : la plus récente
+  // est LA version courante. Les autres kinds restent listés à part.
+  const textVersions = (files || [])
+    .filter((f) => f.kind === 'original')
+    .sort((a, b) => (b.version - a.version) || (b.id - a.id));
+  const currentVersion = textVersions[0] || null;
+  const finalVersion = textVersions.find((f) => f.is_final) || null;
+  const otherFiles = (files || []).filter((f) => f.kind !== 'original');
+  const depositRequest = data.deposit_request || null;
+  const fmtSize = (bytes) => {
+    if (!bytes) return '';
+    return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} Mo` : `${Math.max(1, Math.round(bytes / 1024))} Ko`;
+  };
+  const uploaderLabel = (f) => ({
+    author: 'l\'auteur', admin: 'l\'administration', super_admin: 'l\'administration',
+    editor: 'l\'équipe éditoriale', production: 'la production',
+  }[f.uploaded_by_role] || f.uploaded_by_role || '—');
+
   return (
     <div className="ms-panel">
       <Link to="/admin/manuscripts" className="back-link" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16, color: '#10531a', textDecoration: 'none' }}>
@@ -303,11 +454,20 @@ export default function ManuscriptDetailPanel() {
         <span className={`ms-stage-badge ms-stage-${manuscript.current_stage}`} style={{ marginLeft: 8 }}>
           {manuscript.stage_label}
         </span>
+        {canEditWorkflow && (
+          <button
+            type="button" className="ms-btn" onClick={openEdit}
+            title="Micro-corrections de la fiche (faute de frappe : titre, sous-titre, genre, synopsis)"
+            style={{ marginLeft: 10, fontSize: '0.78rem', padding: '2px 10px', verticalAlign: 'middle' }}
+          >
+            <FiEdit3 style={{ verticalAlign: 'middle', marginRight: 4 }} /> Modifier la fiche
+          </button>
+        )}
         {isAdmin && (
           <button
             type="button" className="ms-btn" onClick={openOverride}
             title="Corriger l'état en cas d'erreur (ex. manuscrit rejeté par erreur)"
-            style={{ marginLeft: 10, fontSize: '0.78rem', padding: '2px 10px', verticalAlign: 'middle' }}
+            style={{ marginLeft: 8, fontSize: '0.78rem', padding: '2px 10px', verticalAlign: 'middle' }}
           >
             <FiEdit3 style={{ verticalAlign: 'middle', marginRight: 4 }} /> Corriger l'état
           </button>
@@ -341,9 +501,14 @@ export default function ManuscriptDetailPanel() {
       {manuscript.current_stage === 'evaluation_rework' && canEditWorkflow && (
         <div className="ms-action-banner">
           <h4>Manuscrit à retravailler</h4>
-          <p>Le comité a demandé à l'auteur de <strong>retravailler son manuscrit</strong>. Quand la version retravaillée est reçue (déposez-la dans les fichiers), relancez l'évaluation pour un nouveau cycle.</p>
+          <p>
+            Le comité a demandé à l&apos;auteur de <strong>retravailler son manuscrit</strong>.
+            L&apos;auteur peut déposer la nouvelle version depuis son espace
+            (transition automatique vers « En évaluation »). Vous pouvez aussi
+            relancer manuellement l&apos;évaluation si le fichier a été reçu hors portail.
+          </p>
           <div className="ms-actions">
-            <button type="button" className="ms-btn ms-btn-primary" onClick={relaunchEvaluation}>Relancer l'évaluation</button>
+            <button type="button" className="ms-btn ms-btn-primary" onClick={relaunchEvaluation}>Relancer l&apos;évaluation</button>
           </div>
         </div>
       )}
@@ -376,6 +541,34 @@ export default function ManuscriptDetailPanel() {
         </div>
       )}
 
+      {manuscript.current_stage === 'printed' && canEditWorkflow && (
+        <div className="ms-action-banner">
+          <h4>Impression terminée — place à la communication</h4>
+          <p>
+            Le suivi continue jusqu'à la parution : passez l'ouvrage <strong>« En communication »</strong> pour
+            suivre le lancement commercial (checklist du panneau Parutions). Le passage est aussi
+            <strong> automatique</strong> dès la première action de lancement cochée dans Parutions.
+          </p>
+          <div className="ms-actions">
+            <button type="button" className="ms-btn ms-btn-primary" onClick={startCommunication}>Démarrer la communication</button>
+          </div>
+        </div>
+      )}
+
+      {manuscript.current_stage === 'in_communication' && canEditWorkflow && (
+        <div className="ms-action-banner">
+          <h4>Lancement commercial en cours</h4>
+          <p>
+            Déroulez la checklist de parution dans le panneau Parutions (l'ouvrage passera
+            <strong> automatiquement</strong> à « Paru » quand elle sera complète), ou marquez-le
+            paru manuellement.
+          </p>
+          <div className="ms-actions">
+            <button type="button" className="ms-btn ms-btn-primary" onClick={markPublished}>Marquer comme paru</button>
+          </div>
+        </div>
+      )}
+
       {manuscript.current_stage === 'contract_pending' && canEditWorkflow && (
         <div className="ms-action-banner">
           <h4>Contrat à signer</h4>
@@ -388,6 +581,14 @@ export default function ManuscriptDetailPanel() {
           {!data.contract && <small style={{ color: '#9ca3af' }}>Rattachez d'abord un contrat à ce manuscrit (carte « Contrat &amp; Devis »).</small>}
         </div>
       )}
+
+      {/* Frise résumé du parcours (9 phases, du dépôt à la parution) —
+          complément visuel de l'historique détaillé plus bas. */}
+      <ManuscriptPhaseBar
+        currentStage={manuscript.current_stage}
+        stageLabel={manuscript.stage_label}
+        history={stages}
+      />
 
       <div className="ms-detail-layout">
         <div>
@@ -478,15 +679,132 @@ export default function ManuscriptDetailPanel() {
             )}
           </div>
 
+          {/* ── Fichier manuscrit : UNE version courante, historique replié ── */}
           <div className="ms-card">
-            <h3>Fichiers ({files?.length || 0})</h3>
-            {files?.length ? (
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <FiFileText style={{ verticalAlign: 'middle' }} />Fichier manuscrit
+              {finalVersion && (
+                <span style={{ background: '#10531a', color: '#fff', borderRadius: 12, padding: '2px 10px', fontSize: '0.7rem', letterSpacing: 0.5 }}>
+                  <FiLock style={{ verticalAlign: 'middle', marginRight: 4 }} />DÉFINITIVE — v{finalVersion.version}
+                </span>
+              )}
+            </h3>
+            {currentVersion ? (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>
+                      v{currentVersion.version} — {currentVersion.file_name}
+                    </div>
+                    <div style={{ fontSize: '0.8rem', color: '#6b7280' }}>
+                      Déposée par {uploaderLabel(currentVersion)} le {new Date(currentVersion.uploaded_at).toLocaleString('fr-FR')}
+                      {currentVersion.file_size ? ` · ${fmtSize(currentVersion.file_size)}` : ''}
+                    </div>
+                    {currentVersion.note && (
+                      <div style={{ fontSize: '0.8rem', color: '#4b5563', marginTop: 2, fontStyle: 'italic' }}>« {currentVersion.note} »</div>
+                    )}
+                  </div>
+                  {!currentVersion.binary_purged && (
+                    <a href={manuscriptsApi.downloadUrl(manuscript.id, currentVersion.id)}
+                      target="_blank" rel="noopener noreferrer" className="ms-btn">
+                      <FiDownload /> Télécharger
+                    </a>
+                  )}
+                </div>
+
+                {depositRequest && !finalVersion && (
+                  <p style={{ background: '#fefce8', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 12px', fontSize: '0.82rem', color: '#854d0e', margin: '10px 0 0' }}>
+                    <FiSend style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                    Lien de dépôt actif envoyé à l&apos;auteur — expire le {new Date(depositRequest.expires_at).toLocaleDateString('fr-FR')}
+                    {' '}(dépôts restants : {Math.max(0, depositRequest.max_uses - depositRequest.used_count)}).
+                    Renvoyer une demande génère un nouveau lien et révoque celui-ci.
+                  </p>
+                )}
+
+                {canEditWorkflow && (
+                  <div className="ms-actions" style={{ marginTop: 12, flexWrap: 'wrap' }}>
+                    {finalVersion ? (
+                      isAdmin && (
+                        <button type="button" className="ms-btn" onClick={() => { setUnlockReason(''); setUnlockModal(true); }} disabled={finalBusy}>
+                          <FiUnlock style={{ verticalAlign: 'middle', marginRight: 6 }} />Déverrouiller la version définitive
+                        </button>
+                      )
+                    ) : (
+                      <>
+                        <button type="button" className="ms-btn ms-btn-primary" onClick={() => { setVersionForm({ file: null, note: '' }); setVersionModal(true); }}>
+                          <FiUpload style={{ verticalAlign: 'middle', marginRight: 6 }} />Déposer une nouvelle version
+                        </button>
+                        <button type="button" className="ms-btn" onClick={() => { setRevisionMessage(''); setRevisionModal(true); }}>
+                          <FiSend style={{ verticalAlign: 'middle', marginRight: 6 }} />Demander une révision à l&apos;auteur
+                        </button>
+                        {isAdmin && (
+                          <button type="button" className="ms-btn" onClick={() => markFinal(currentVersion)} disabled={finalBusy}>
+                            <FiLock style={{ verticalAlign: 'middle', marginRight: 6 }} />Arrêter comme version définitive
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {textVersions.length > 1 && (
+                  <details style={{ marginTop: 12 }}>
+                    <summary style={{ cursor: 'pointer', color: '#10531a', fontSize: '0.85rem' }}>
+                      Historique des versions ({textVersions.length})
+                    </summary>
+                    <ul className="ms-file-list" style={{ marginTop: 8 }}>
+                      {textVersions.map((f) => (
+                        <li key={f.id}>
+                          <div style={{ minWidth: 0 }}>
+                            <strong>v{f.version}</strong> {f.file_name}
+                            {!!f.is_final && <span style={{ color: '#10531a', fontSize: '0.72rem', marginLeft: 6 }}><FiLock style={{ verticalAlign: 'middle' }} /> définitive</span>}
+                            {!!f.is_milestone && !f.is_final && <span style={{ color: '#b45309', fontSize: '0.72rem', marginLeft: 6 }}><FiStar style={{ verticalAlign: 'middle' }} /> jalon</span>}
+                            {!!f.binary_purged && <span style={{ color: '#9ca3af', fontSize: '0.72rem', marginLeft: 6 }}>archivée (fichier purgé)</span>}
+                            <div style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                              {uploaderLabel(f)} · {new Date(f.uploaded_at).toLocaleString('fr-FR')}
+                              {f.note ? ` · « ${f.note} »` : ''}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            {canEditWorkflow && !f.binary_purged && !f.is_final && (
+                              <button
+                                type="button" className="ms-btn"
+                                title={f.is_milestone ? 'Retirer le jalon (la version redevient purgeable)' : 'Marquer jalon : cette version ne sera jamais purgée'}
+                                onClick={() => toggleMilestone(f)}
+                              >
+                                <FiStar style={{ verticalAlign: 'middle', color: f.is_milestone ? '#b45309' : undefined }} />
+                              </button>
+                            )}
+                            {!f.binary_purged && (
+                              <a href={manuscriptsApi.downloadUrl(manuscript.id, f.id)}
+                                target="_blank" rel="noopener noreferrer" className="ms-btn">
+                                <FiDownload />
+                              </a>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <p style={{ fontSize: '0.75rem', color: '#9ca3af', margin: '6px 0 0' }}>
+                      Rétention automatique : la première version, les deux plus récentes et les jalons restent téléchargeables ;
+                      les fichiers des versions intermédiaires sont purgés (métadonnées et empreinte conservées).
+                    </p>
+                  </details>
+                )}
+              </>
+            ) : <p style={{ color: '#6b7280' }}>Aucun fichier manuscrit.</p>}
+          </div>
+
+          <div className="ms-card">
+            <h3>Autres documents ({otherFiles.length})</h3>
+            {otherFiles.length ? (
               <ul className="ms-file-list">
-                {files.map((f) => (
+                {otherFiles.map((f) => (
                   <li key={f.id}>
                     <div>
-                      <span className="ms-file-kind">{f.kind}</span>
+                      <span className="ms-file-kind">{f.kind_label || f.kind}</span>
                       {f.version > 1 && <strong>v{f.version}</strong>} {f.file_name}
+                      {!!f.binary_purged && <span style={{ color: '#9ca3af', fontSize: '0.72rem', marginLeft: 6 }}>archivé (fichier purgé)</span>}
                     </div>
                     {f.external_url ? (
                       <a href={f.external_url}
@@ -494,17 +812,17 @@ export default function ManuscriptDetailPanel() {
                         className="ms-btn">
                         <FiExternalLink /> Ouvrir le lien
                       </a>
-                    ) : (
+                    ) : !f.binary_purged ? (
                       <a href={manuscriptsApi.downloadUrl(manuscript.id, f.id)}
                         target="_blank" rel="noopener noreferrer"
                         className="ms-btn">
                         <FiDownload /> Télécharger
                       </a>
-                    )}
+                    ) : null}
                   </li>
                 ))}
               </ul>
-            ) : <p style={{ color: '#6b7280' }}>Aucun fichier.</p>}
+            ) : <p style={{ color: '#6b7280' }}>Aucun autre document.</p>}
           </div>
 
           {evaluations?.length > 0 && (
@@ -718,6 +1036,152 @@ export default function ManuscriptDetailPanel() {
               <button type="button" className="ms-btn" onClick={() => setSignModal(false)} disabled={signBusy}>Annuler</button>
               <button type="button" className="ms-btn ms-btn-primary" onClick={confirmSign} disabled={signBusy}>
                 {signBusy ? 'Enregistrement…' : 'Enregistrer la signature'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editModal && (
+        <div className="ms-modal-backdrop" onClick={() => !editBusy && setEditModal(false)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Modifier la fiche du manuscrit</h3>
+            <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
+              Pour les <strong>micro-corrections de forme</strong> (faute de frappe de l'auteur
+              dans le titre, le genre, le synopsis…). Le fichier du manuscrit et son état dans le
+              workflow ne sont pas modifiés. Chaque changement est <strong>tracé dans la frise</strong>
+              (ancienne → nouvelle valeur), aucun email n'est envoyé.
+            </p>
+            <div className="form-group">
+              <label>Titre *</label>
+              <input
+                type="text"
+                value={editForm.title}
+                onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label>Sous-titre</label>
+              <input
+                type="text"
+                value={editForm.subtitle}
+                onChange={(e) => setEditForm({ ...editForm, subtitle: e.target.value })}
+                placeholder="Facultatif"
+              />
+            </div>
+            <div className="form-group">
+              <label>Genre</label>
+              <input
+                type="text"
+                value={editForm.genre}
+                onChange={(e) => setEditForm({ ...editForm, genre: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label>Synopsis</label>
+              <textarea
+                rows={5}
+                value={editForm.synopsis}
+                onChange={(e) => setEditForm({ ...editForm, synopsis: e.target.value })}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', resize: 'vertical' }}
+              />
+            </div>
+            <div className="ms-modal-actions">
+              <button type="button" className="ms-btn" onClick={() => setEditModal(false)} disabled={editBusy}>Annuler</button>
+              <button type="button" className="ms-btn ms-btn-primary" onClick={confirmEdit} disabled={editBusy}>
+                {editBusy ? 'Enregistrement…' : 'Enregistrer les corrections'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {versionModal && (
+        <div className="ms-modal-backdrop" onClick={() => !versionBusy && setVersionModal(false)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Déposer une nouvelle version du manuscrit</h3>
+            <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
+              La nouvelle version devient <strong>la version courante</strong> (v{(currentVersion?.version || 0) + 1}) —
+              possible à n&apos;importe quelle étape du workflow. Un fichier identique à la version
+              actuelle est refusé (anti-doublon). Le dépôt est tracé dans la frise.
+            </p>
+            <div className="form-group">
+              <label>Fichier (PDF, DOC, DOCX, ODT ou RTF — max 20 Mo) *</label>
+              <input
+                type="file" accept=".pdf,.doc,.docx,.odt,.rtf"
+                onChange={(e) => setVersionForm({ ...versionForm, file: e.target.files?.[0] || null })}
+              />
+            </div>
+            <div className="form-group">
+              <label>Commentaire (facultatif — ex. « version reçue par email le 21/07 »)</label>
+              <textarea
+                rows={2}
+                value={versionForm.note}
+                onChange={(e) => setVersionForm({ ...versionForm, note: e.target.value })}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', resize: 'vertical' }}
+              />
+            </div>
+            <div className="ms-modal-actions">
+              <button type="button" className="ms-btn" onClick={() => setVersionModal(false)} disabled={versionBusy}>Annuler</button>
+              <button type="button" className="ms-btn ms-btn-primary" onClick={confirmVersionUpload} disabled={versionBusy}>
+                {versionBusy ? 'Dépôt…' : 'Déposer la version'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {revisionModal && (
+        <div className="ms-modal-backdrop" onClick={() => !revisionBusy && setRevisionModal(false)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Demander une révision à l&apos;auteur</h3>
+            <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
+              L&apos;auteur reçoit par email un <strong>lien de dépôt personnel</strong> (valable 14 jours, sans connexion) :
+              il y télécharge la version courante et y dépose sa version révisée, qui devient
+              automatiquement la version courante. Plus d&apos;aller-retour de pièces jointes par email.
+            </p>
+            <div className="form-group">
+              <label>Message à l&apos;auteur (facultatif — consignes de révision)</label>
+              <textarea
+                rows={4}
+                placeholder="Ex. : merci d'intégrer les corrections du chapitre 3 et de renvoyer votre version."
+                value={revisionMessage}
+                onChange={(e) => setRevisionMessage(e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', resize: 'vertical' }}
+              />
+            </div>
+            <div className="ms-modal-actions">
+              <button type="button" className="ms-btn" onClick={() => setRevisionModal(false)} disabled={revisionBusy}>Annuler</button>
+              <button type="button" className="ms-btn ms-btn-primary" onClick={confirmRevisionRequest} disabled={revisionBusy}>
+                {revisionBusy ? 'Envoi…' : 'Envoyer le lien de dépôt'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {unlockModal && finalVersion && (
+        <div className="ms-modal-backdrop" onClick={() => !finalBusy && setUnlockModal(false)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Déverrouiller la version définitive</h3>
+            <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
+              La v{finalVersion.version} a été arrêtée comme définitive. La déverrouiller
+              <strong> rouvre les dépôts</strong> (admin et auteur). Le motif est obligatoire et tracé dans la frise.
+            </p>
+            <div className="form-group">
+              <label>Motif du déverrouillage *</label>
+              <textarea
+                rows={3}
+                placeholder="Ex. : coquille découverte au chapitre 5 après l'arrêt du texte."
+                value={unlockReason}
+                onChange={(e) => setUnlockReason(e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', resize: 'vertical' }}
+              />
+            </div>
+            <div className="ms-modal-actions">
+              <button type="button" className="ms-btn" onClick={() => setUnlockModal(false)} disabled={finalBusy}>Annuler</button>
+              <button type="button" className="ms-btn ms-btn-primary" onClick={() => confirmUnlockFinal(finalVersion)} disabled={finalBusy}>
+                {finalBusy ? 'Déverrouillage…' : 'Déverrouiller'}
               </button>
             </div>
           </div>

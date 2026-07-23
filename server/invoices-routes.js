@@ -42,6 +42,19 @@ const PAYMENT_METHODS_ALLOWED = new Set(['LIQ', 'CB', 'CHQ', 'WAVE', 'OM', 'VIR'
 
 const INVOICE_STATUS_LABELS = { 0: 'Brouillon', 1: 'Validée', 2: 'Payée', 3: 'Abandonnée' };
 
+// Entrepôt des ventes (Rayon). STOCK_CALCULATE_ON_BILL=1 sur cette instance :
+// valider une facture sort le stock, la repasser en brouillon le restitue — mais
+// Dolibarr ne bouge le stock QUE si un idwarehouse lui est passé. Sans lui, le
+// mouvement échoue en silence (setDraft n'incrémente même pas son compteur
+// d'erreurs) et le stock reste amputé. Tout appel validate/settodraft doit donc
+// porter cet entrepôt.
+const STOCK_WAREHOUSE_ID = parseInt(process.env.DOLIBARR_STOCK_WAREHOUSE || '4', 10);
+
+// Modifier les montants d'une facture déjà émise est un acte de direction :
+// réservé à admin / super_admin, même si le libraire a invoices:crud (il garde
+// encaissement, avoir et abandon).
+const ADMIN_ROLES = ['super_admin', 'admin'];
+
 // ─── HELPERS ─────────────────────────────────────────────────
 
 function ensureAuditTable(db) {
@@ -89,6 +102,18 @@ async function loadInvoiceRow(dolibarrPool, id) {
   return row || null;
 }
 
+// Acomptes / avoirs imputés sur la facture. Ils ne passent PAS par
+// llx_paiement_facture : une facture soldée par un acompte affiche zéro paiement.
+// Sans ce contrôle, une renégociation réécrirait un montant déjà partiellement
+// couvert et le lettrage deviendrait faux.
+async function sumAppliedCredits(dolibarrPool, id) {
+  const [[row]] = await dolibarrPool.query(
+    `SELECT COALESCE(SUM(amount_ttc), 0) AS total, COUNT(*) AS nb
+     FROM llx_societe_remise_except WHERE fk_facture = ?`, [id]
+  );
+  return { total: Number(row.total), nb: Number(row.nb) };
+}
+
 async function sumPayments(dolibarrPool, id) {
   const [[row]] = await dolibarrPool.query(
     `SELECT COALESCE(SUM(amount), 0) AS paid, COUNT(*) AS nb
@@ -102,12 +127,140 @@ function nonEmptyReason(s) {
   return trimmed.length >= 4 && trimmed.length <= 500 ? trimmed : null;
 }
 
+// Une facture jamais validée porte une référence provisoire « (PROVxxxx) ».
+// Dès qu'elle a été validée une fois, elle garde son numéro définitif, même
+// repassée en brouillon — et Dolibarr refuse alors de la supprimer (is_erasable),
+// car effacer un numéro déjà attribué creuserait un trou dans la séquence légale.
+function isProvisionalRef(ref) {
+  return String(ref || '').slice(1, 5) === 'PROV';
+}
+
+// Stock sorti pour cette facture et jamais restitué (solde net des mouvements < 0).
+// Cas typique : facture validée (stock -N) puis repassée en brouillon sans que le
+// retour de stock ait eu lieu. Le solde net rend l'opération idempotente : une
+// facture dont le stock a déjà été rendu ne remonte rien.
+async function pendingInvoiceStock(dolibarrPool, id) {
+  const [rows] = await dolibarrPool.query(
+    `SELECT fk_product, fk_entrepot, SUM(value) AS net
+       FROM llx_stock_mouvement
+      WHERE origintype = 'facture' AND fk_origin = ?
+      GROUP BY fk_product, fk_entrepot
+     HAVING net < 0`, [id]
+  );
+  return rows.map(r => ({
+    fk_product: Number(r.fk_product),
+    fk_entrepot: Number(r.fk_entrepot) || STOCK_WAREHOUSE_ID,
+    qty: Math.abs(Number(r.net)),
+  }));
+}
+
+// Utilisateur Dolibarr derrière la clé API admin (pour fk_user_closing).
+let dolibarrUserId = null;
+async function getDolibarrUserId() {
+  if (dolibarrUserId) return dolibarrUserId;
+  const { data } = await adminApi.get('/users/info');
+  dolibarrUserId = parseInt(data.id, 10);
+  return dolibarrUserId;
+}
+
+// Lignes actuelles d'une facture, normalisées — sert de snapshot « avant »
+// dans le journal d'audit d'une renégociation.
+async function snapshotLines(dolibarrPool, id) {
+  const [rows] = await dolibarrPool.query(
+    `SELECT fd.rowid, fd.fk_product, p.ref AS product_ref, fd.description,
+            fd.qty, fd.subprice, fd.remise_percent, fd.total_ttc
+       FROM llx_facturedet fd
+       LEFT JOIN llx_product p ON p.rowid = fd.fk_product
+      WHERE fd.fk_facture = ?
+      ORDER BY fd.rang ASC, fd.rowid ASC`, [id]
+  );
+  return rows.map(l => ({
+    rowid: l.rowid, fk_product: l.fk_product, product_ref: l.product_ref,
+    description: l.description,
+    qty: Number(l.qty), subprice: Number(l.subprice),
+    remise_percent: Number(l.remise_percent), total_ttc: Number(l.total_ttc),
+  }));
+}
+
+// Remplace intégralement les lignes d'un brouillon : Dolibarr n'expose pas de
+// mise à jour en lot, on supprime puis on recrée dans l'ordre reçu.
+// À n'appeler QUE sur un brouillon (fk_statut = 0) : sur une facture validée
+// les suppressions de lignes laisseraient le stock déjà sorti sans contrepartie.
+async function replaceInvoiceLines(id, lines) {
+  const existing = await adminApi.get(`/invoices/${id}`);
+  for (const l of (existing.data.lines || [])) {
+    await adminApi.delete(`/invoices/${id}/lines/${l.id || l.rowid}`);
+  }
+  const created = [];
+  for (const l of lines) {
+    const payload = {
+      qty: parseFloat(l.qty),
+      subprice: parseFloat(l.subprice),
+      remise_percent: parseFloat(l.remise_percent) || 0,
+      tva_tx: parseFloat(l.tva_tx) || 0,
+      product_type: parseInt(l.product_type) || 0,
+    };
+    if (l.fk_product) payload.fk_product = parseInt(l.fk_product);
+    if (l.description) payload.desc = l.description;
+    const r = await adminApi.post(`/invoices/${id}/lines`, payload);
+    created.push({ ...payload, line_id: r.data });
+  }
+  return created;
+}
+
+// Valide un brouillon. L'entrepôt est obligatoire (cf. STOCK_WAREHOUSE_ID) :
+// sans lui le stock ne ressort pas et la facture part avec un stock faux.
+async function validateInvoice(id) {
+  await adminApi.post(`/invoices/${id}/validate`, { idwarehouse: STOCK_WAREHOUSE_ID });
+}
+
+// Contrôle commun aux opérations qui réécrivent les montants d'une facture :
+// seule une facture validée, non payée et sans le moindre paiement imputé peut
+// être renégociée. Dès qu'un règlement existe, la voie est l'avoir.
+function checkRenegotiable(before, payments, credits) {
+  if (before.type === 2) return 'Un avoir ne se renégocie pas';
+  if (before.fk_statut === 3) return 'Facture abandonnée — renégociation impossible';
+  if (before.fk_statut !== 1) return 'Seule une facture validée peut être renégociée';
+  if (before.paye === 1) return 'Facture payée — créez un avoir plutôt qu\'une renégociation';
+  if (payments.nb > 0 || payments.paid > 0) {
+    return 'Facture avec paiement(s) imputé(s) — créez un avoir du différentiel';
+  }
+  if (credits.nb > 0) {
+    return 'Facture avec acompte ou avoir imputé — créez un avoir du différentiel';
+  }
+  return null;
+}
+
+// Lignes reçues du client, validées une à une avant toute écriture Dolibarr.
+function parseLinesPayload(raw) {
+  const lines = Array.isArray(raw) ? raw : null;
+  if (!lines || !lines.length) return { error: 'Au moins une ligne est requise' };
+  for (const l of lines) {
+    const qty = Number(l?.qty);
+    const subprice = Number(l?.subprice);
+    const remise = Number(l?.remise_percent ?? 0);
+    if (!Number.isFinite(qty) || qty <= 0) return { error: 'Quantité invalide (doit être > 0)' };
+    if (!Number.isFinite(subprice) || subprice < 0) return { error: 'Prix unitaire invalide' };
+    if (!Number.isFinite(remise) || remise < 0 || remise > 100) return { error: 'Remise invalide (0-100 %)' };
+  }
+  return { lines };
+}
+
 // ─── ROUTER FACTORY ──────────────────────────────────────────
 
 export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection }) {
   const router = Router();
   ensureAuditTable(db);
   const noCsrf = csrfProtection || ((req, res, next) => next());
+
+  // Réécrire les montants d'une facture émise : direction uniquement.
+  const requireAdmin = (req, res) => {
+    if (!ADMIN_ROLES.includes(req.admin?.role)) {
+      res.status(403).json({ error: 'Action réservée à la direction (admin)' });
+      return false;
+    }
+    return true;
+  };
 
   // ═══════════════════════════════════════════════════════════
   // LISTE FACTURES — filtres : statut, client, ref, date, source
@@ -891,7 +1044,9 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       const { paid, nb } = await sumPayments(dolibarrPool, id);
       if (nb > 0 || paid > 0) return res.status(409).json({ error: 'Facture avec paiement(s) imputé(s) — annulation impossible' });
 
-      await adminApi.post(`/invoices/${id}/settodraft`);
+      // idwarehouse OBLIGATOIRE : sans lui Dolibarr ne restitue pas le stock sorti
+      // à la validation, et le mouvement de retour échoue sans la moindre erreur.
+      await adminApi.post(`/invoices/${id}/settodraft`, { idwarehouse: STOCK_WAREHOUSE_ID });
       const after = await loadInvoiceRow(dolibarrPool, id);
 
       writeAudit(db, {
@@ -909,51 +1064,94 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
   });
 
   // ═══════════════════════════════════════════════════════════
+  // ABANDON — neutraliser une facture qui porte un numéro définitif
+  //
+  // Dès qu'une facture a été validée, son numéro est attribué et Dolibarr
+  // interdit de la supprimer. L'abandon est la voie native : le numéro reste
+  // réservé (séquence intacte), la facture sort des créances, et le stock encore
+  // sorti pour elle est rendu — ce que setCanceled() ne fait pas de lui-même.
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/abandon', auth, noCsrf, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const reason = nonEmptyReason(req.body?.reason);
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+
+    try {
+      const before = await loadInvoiceRow(dolibarrPool, id);
+      if (!before) return res.status(404).json({ error: 'Facture introuvable' });
+      if (before.fk_statut === 3) return res.status(409).json({ error: 'Facture déjà abandonnée' });
+      if (before.paye === 1) return res.status(409).json({ error: 'Facture payée — créez un avoir plutôt qu\'un abandon' });
+      const { paid, nb } = await sumPayments(dolibarrPool, id);
+      if (nb > 0 || paid > 0) return res.status(409).json({ error: 'Facture avec paiement(s) imputé(s) — créez un avoir' });
+
+      // Restitution du stock encore dû (rien à faire si Dolibarr l'a déjà rendu).
+      const restored = [];
+      for (const m of await pendingInvoiceStock(dolibarrPool, id)) {
+        await adminApi.post('/stockmovements', {
+          product_id: m.fk_product,
+          warehouse_id: m.fk_entrepot,
+          qty: m.qty,
+          type: 3,   // entrée
+          price: 0,  // prix nul → le PMP n'est pas altéré (comme le fait setDraft)
+          movementlabel: `Facture ${before.ref} abandonnée — restitution stock`,
+          origin_type: 'facture',
+          origin_id: id,
+        });
+        restored.push({ fk_product: m.fk_product, fk_entrepot: m.fk_entrepot, qty: m.qty });
+      }
+
+      // Dolibarr n'expose pas setCanceled() en REST : on reproduit son écriture
+      // (statut 3 + close_code, et libération des remises que la facture retenait).
+      const closingUser = await getDolibarrUserId();
+      await dolibarrPool.query(
+        `UPDATE llx_facture
+            SET fk_statut = 3, close_code = 'abandon', close_note = ?,
+                fk_user_closing = ?, date_closing = NOW()
+          WHERE rowid = ?`,
+        [`${reason} — abandon par ${req.admin.username}`, closingUser, id]
+      );
+      await dolibarrPool.query(
+        'UPDATE llx_societe_remise_except SET fk_facture = NULL WHERE fk_facture = ?', [id]
+      );
+
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: before.ref,
+        action: 'abandon', reason,
+        before: { fk_statut: before.fk_statut, paye: before.paye, total_ttc: Number(before.total_ttc) },
+        after:  { fk_statut: 3, close_code: 'abandon', stock_restored: restored },
+      });
+      res.json({ success: true, ref: before.ref, stock_restored: restored });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('[INVOICES] abandon error:', msg);
+      res.status(500).json({ error: 'Erreur abandon facture', detail: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // UPDATE LINES — éditer les lignes d'un brouillon
   // ═══════════════════════════════════════════════════════════
   router.put('/:id/lines', auth, noCsrf, async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const id = parseInt(req.params.id);
     const reason = nonEmptyReason(req.body?.reason);
-    const lines = Array.isArray(req.body?.lines) ? req.body.lines : null;
+    const parsed = parseLinesPayload(req.body?.lines);
     if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
-    if (!lines || !lines.length) return res.status(400).json({ error: 'Lignes requises' });
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
 
     try {
       const before = await loadInvoiceRow(dolibarrPool, id);
       if (!before) return res.status(404).json({ error: 'Facture introuvable' });
       if (before.fk_statut !== 0) return res.status(409).json({ error: 'Édition possible uniquement en brouillon' });
 
-      // Récupération des lignes actuelles pour snapshot
-      const [beforeLines] = await dolibarrPool.query(
-        `SELECT rowid, fk_product, qty, subprice, remise_percent, total_ttc
-         FROM llx_facturedet WHERE fk_facture = ?`, [id]
-      );
-
-      // Stratégie : on supprime puis on recrée les lignes via l'API Dolibarr.
-      const existing = await adminApi.get(`/invoices/${id}`);
-      for (const l of (existing.data.lines || [])) {
-        await adminApi.delete(`/invoices/${id}/lines/${l.id || l.rowid}`);
-      }
-      const newLines = [];
-      for (const l of lines) {
-        const payload = {
-          qty: parseFloat(l.qty),
-          subprice: parseFloat(l.subprice),
-          remise_percent: parseFloat(l.remise_percent) || 0,
-          tva_tx: parseFloat(l.tva_tx) || 0,
-          product_type: parseInt(l.product_type) || 0,
-        };
-        if (l.fk_product) payload.fk_product = parseInt(l.fk_product);
-        if (l.description) payload.desc = l.description;
-        const r = await adminApi.post(`/invoices/${id}/lines`, payload);
-        newLines.push({ ...payload, line_id: r.data });
-      }
+      const beforeLines = await snapshotLines(dolibarrPool, id);
+      const newLines = await replaceInvoiceLines(id, parsed.lines);
 
       const after = await loadInvoiceRow(dolibarrPool, id);
       writeAudit(db, {
         admin: req.admin, fk_facture: id, ref_facture: before.ref,
         action: 'edit_lines', reason,
-        before: { lines: beforeLines.map(l => ({ ...l, qty: Number(l.qty), subprice: Number(l.subprice), total_ttc: Number(l.total_ttc) })) },
+        before: { lines: beforeLines, total_ttc: Number(before.total_ttc) },
         after:  { lines: newLines, total_ttc: Number(after?.total_ttc) },
       });
       res.json({ success: true });
@@ -961,6 +1159,125 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] edit lines error:', msg);
       res.status(500).json({ error: 'Erreur édition lignes', detail: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // VALIDATE — revalider un brouillon (contrepartie de settodraft)
+  //
+  // Sans cette route, une facture repassée en brouillon reste bloquée : rien
+  // dans l'application ne permettait de la réémettre.
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/validate', auth, noCsrf, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const reason = nonEmptyReason(req.body?.reason);
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+
+    try {
+      const before = await loadInvoiceRow(dolibarrPool, id);
+      if (!before) return res.status(404).json({ error: 'Facture introuvable' });
+      if (before.fk_statut !== 0) return res.status(409).json({ error: 'Seul un brouillon peut être validé' });
+      if (Number(before.total_ttc) <= 0 && before.type !== 2) {
+        return res.status(409).json({ error: 'Facture à 0 — ajoutez au moins une ligne avant de valider' });
+      }
+
+      await validateInvoice(id);
+      const after = await loadInvoiceRow(dolibarrPool, id);
+
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: before.ref,
+        action: 'validate', reason,
+        before: { fk_statut: before.fk_statut, ref: before.ref },
+        after:  { fk_statut: after?.fk_statut, ref: after?.ref, total_ttc: Number(after?.total_ttc) },
+      });
+      res.json({ success: true, ref: after?.ref || before.ref });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('[INVOICES] validate error:', msg);
+      res.status(500).json({ error: 'Erreur validation facture', detail: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // RENEGOTIATE — réviser les montants d'une facture émise impayée
+  //
+  // Dolibarr interdit de toucher aux lignes d'une facture validée : le seul
+  // chemin natif est dévalider → éditer → revalider. On l'enchaîne ici en une
+  // opération pour que la direction n'ait pas à piloter trois étapes dont
+  // l'abandon en cours de route laisse une facture en brouillon.
+  //
+  // Le numéro de facture est conservé (Dolibarr ne le réattribue pas), donc la
+  // référence remise au tiers reste valable. Le stock suit : settodraft rend les
+  // exemplaires, la revalidation sort les nouvelles quantités.
+  //
+  // Réservé aux factures SANS aucun paiement imputé : dès qu'un règlement existe,
+  // réécrire le montant fausserait le lettrage — la voie est alors l'avoir.
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/renegotiate', auth, noCsrf, async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = parseInt(req.params.id);
+    const reason = nonEmptyReason(req.body?.reason);
+    const parsed = parseLinesPayload(req.body?.lines);
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    let stage = 'checks';
+    try {
+      const before = await loadInvoiceRow(dolibarrPool, id);
+      if (!before) return res.status(404).json({ error: 'Facture introuvable' });
+      const payments = await sumPayments(dolibarrPool, id);
+      const credits = await sumAppliedCredits(dolibarrPool, id);
+      const blocked = checkRenegotiable(before, payments, credits);
+      if (blocked) return res.status(409).json({ error: blocked });
+
+      const beforeLines = await snapshotLines(dolibarrPool, id);
+
+      // 1. Dévalidation — restitue au stock les exemplaires sortis à l'émission.
+      stage = 'settodraft';
+      await adminApi.post(`/invoices/${id}/settodraft`, { idwarehouse: STOCK_WAREHOUSE_ID });
+
+      // 2. Réécriture des lignes aux montants renégociés.
+      stage = 'lines';
+      const newLines = await replaceInvoiceLines(id, parsed.lines);
+
+      // 3. Réémission — ressort du stock les quantités retenues.
+      stage = 'validate';
+      await validateInvoice(id);
+
+      const after = await loadInvoiceRow(dolibarrPool, id);
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: before.ref,
+        action: 'renegotiate', reason,
+        before: { fk_statut: before.fk_statut, total_ttc: Number(before.total_ttc), lines: beforeLines },
+        after:  { fk_statut: after?.fk_statut, total_ttc: Number(after?.total_ttc), lines: newLines },
+      });
+      res.json({
+        success: true,
+        ref: after?.ref || before.ref,
+        total_ttc_before: Number(before.total_ttc),
+        total_ttc_after: Number(after?.total_ttc),
+      });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error(`[INVOICES] renegotiate error (étape ${stage}):`, msg);
+
+      // Après la dévalidation, un échec laisse la facture en brouillon : on le dit
+      // explicitement plutôt que de laisser croire que rien n'a bougé.
+      const current = await loadInvoiceRow(dolibarrPool, id).catch(() => null);
+      const draftLeft = current?.fk_statut === 0;
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: current?.ref,
+        action: 'renegotiate_failed', reason,
+        before: { stage },
+        after: { fk_statut: current?.fk_statut ?? null, error: msg },
+      });
+      res.status(500).json({
+        error: draftLeft
+          ? 'Renégociation interrompue : la facture est restée en brouillon. Corrigez les lignes puis validez-la.'
+          : 'Erreur renégociation',
+        stage,
+        detail: msg,
+      });
     }
   });
 
@@ -1016,6 +1333,17 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       const { paid, nb } = await sumPayments(dolibarrPool, id);
       if (nb > 0 || paid > 0) return res.status(409).json({ error: 'Brouillon avec paiement(s) — suppression refusée' });
 
+      // Un brouillon issu d'une facture validée garde son numéro définitif :
+      // Dolibarr le refusera (403 « Invoice not erasable »). On le dit tout de
+      // suite, avec la sortie de secours, plutôt que de laisser filer une erreur.
+      if (!isProvisionalRef(before.ref)) {
+        return res.status(409).json({
+          error: `La facture ${before.ref} porte un numéro définitif : la supprimer creuserait un trou `
+               + 'dans la numérotation. Utilisez « Abandonner » pour la neutraliser sans casser la séquence.',
+          code: 'INVOICE_NUMBERED',
+        });
+      }
+
       await adminApi.delete(`/invoices/${id}`);
 
       writeAudit(db, {
@@ -1026,8 +1354,13 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       });
       res.json({ success: true });
     } catch (err) {
+      const status = err.response?.status;
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] delete error:', msg);
+      // Refus métier de Dolibarr (facture non effaçable) : ce n'est pas une panne.
+      if (status === 403) {
+        return res.status(409).json({ error: `Dolibarr refuse la suppression de cette facture : ${msg}`, detail: msg });
+      }
       res.status(500).json({ error: 'Erreur suppression facture', detail: msg });
     }
   });

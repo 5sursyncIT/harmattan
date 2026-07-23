@@ -239,6 +239,18 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
     }
 
     const releaseDate = normalizeReleaseDate(body?.release_date);
+    // Conserve la date de parution de façon durable (book_upcoming est vidé au
+    // jour J) : elle pilote l'entrée/sortie automatique des « Nouveautés ».
+    if (releaseDate) {
+      try {
+        db.prepare(`
+          INSERT INTO book_release_dates (product_id, release_date, source, updated_at)
+          VALUES (?, ?, 'fiche', datetime('now'))
+          ON CONFLICT(product_id) DO UPDATE SET
+            release_date = excluded.release_date, source = 'fiche', updated_at = datetime('now')
+        `).run(productId, releaseDate);
+      } catch (e) { console.warn('[BOOKS] book_release_dates upsert:', e.message); }
+    }
     const summary = typeof body?.upcoming_summary === 'string'
       ? body.upcoming_summary.trim().slice(0, 2000) : '';
     let pct = parseFloat(body?.preorder_discount_pct);

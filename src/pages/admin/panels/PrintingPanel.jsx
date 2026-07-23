@@ -11,6 +11,7 @@ export default function PrintingPanel() {
   const [modal, setModal] = useState(null); // manuscript object
   const [qty, setQty] = useState('');
   const [isbn, setIsbn] = useState('');
+  const [printReadyFile, setPrintReadyFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   const load = () => {
@@ -27,6 +28,7 @@ export default function PrintingPanel() {
     setModal(m);
     setQty(m.print_qty ? String(m.print_qty) : '500');
     setIsbn(m.isbn || '');
+    setPrintReadyFile(null);
   };
 
   const prepare = async () => {
@@ -34,6 +36,11 @@ export default function PrintingPanel() {
     if (!q || q < 1) return toast.error('Quantité invalide');
     setSubmitting(true);
     try {
+      if (printReadyFile) {
+        const fd = new FormData();
+        fd.append('file', printReadyFile);
+        await manuscriptsApi.uploadPrintReady(modal.id, fd);
+      }
       const res = await manuscriptsApi.preparePrint(modal.id, q, isbn || null);
       if (res.data?.mo?.dolibarr_mo_ref) {
         toast.success(`Ordre d'impression créé : ${res.data.mo.dolibarr_mo_ref}`);
@@ -100,9 +107,9 @@ export default function PrintingPanel() {
       {modal && (
         <div className="ms-modal-backdrop" onClick={() => setModal(null)}>
           <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Préparer l'ordre d'impression</h3>
+            <h3>Préparer l&apos;ordre d&apos;impression</h3>
             <p style={{ fontSize: '0.85rem', color: '#6b7280' }}>
-              Crée un produit + une MO Dolibarr et lance l'impression.
+              Crée un produit + une MO Dolibarr et lance l&apos;impression.
             </p>
             <div className="form-group">
               <label>Titre</label>
@@ -120,6 +127,17 @@ export default function PrintingPanel() {
                 onChange={(e) => setIsbn(e.target.value)}
                 placeholder="978-2-336-..."
               />
+            </div>
+            <div className="form-group">
+              <label>PDF prêt à imprimer (recommandé)</label>
+              <input
+                type="file"
+                accept=".pdf,application/pdf"
+                onChange={(e) => setPrintReadyFile(e.target.files?.[0] || null)}
+              />
+              <small style={{ display: 'block', marginTop: 4, color: '#6b7280' }}>
+                Transmis à l&apos;imprimeur via le lien sécurisé. Max 100 Mo.
+              </small>
             </div>
             <div className="ms-modal-actions">
               <button className="ms-btn" onClick={() => setModal(null)} disabled={submitting}>Annuler</button>

@@ -42,4 +42,14 @@ export const createCreditNote = (id, reason) => api.post(`/admin/invoices/${id}/
 export const setInvoiceToDraft = (id, reason) => api.post(`/admin/invoices/${id}/settodraft`, { reason });
 export const updateInvoiceLines = (id, lines, reason) => api.put(`/admin/invoices/${id}/lines`, { lines, reason });
 export const reassignInvoiceCustomer = (id, socid, reason) => api.put(`/admin/invoices/${id}/customer`, { socid, reason });
+// Revalide un brouillon (contrepartie de setInvoiceToDraft) : ressort le stock.
+export const validateInvoice = (id, reason) => api.post(`/admin/invoices/${id}/validate`, { reason });
+// Révision des montants d'une facture émise impayée, après renégociation avec le
+// tiers : dévalidation + réécriture des lignes + réémission en une opération.
+export const renegotiateInvoice = (id, lines, reason) => api.post(`/admin/invoices/${id}/renegotiate`, { lines, reason });
 export const deleteInvoiceDraft = (id, reason) => api.delete(`/admin/invoices/${id}`, { data: { reason } });
+
+// Neutralise une facture déjà numérotée (validée au moins une fois) : elle ne peut
+// plus être supprimée sans trouer la numérotation. L'abandon la sort des créances
+// et restitue le stock qu'elle avait sorti.
+export const abandonInvoice = (id, reason) => api.post(`/admin/invoices/${id}/abandon`, { reason });

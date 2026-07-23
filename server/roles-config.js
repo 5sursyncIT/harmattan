@@ -69,6 +69,7 @@ export const ROLE_ALLOWED_PATHS = {
     /^\/api\/admin\/authors(\/.*)?$/,
     /^\/api\/admin\/news(\/.*)?$/,
     /^\/api\/admin\/legal-deposits(\/.*)?$/,
+    /^\/api\/admin\/parutions(\/.*)?$/,
     /^\/api\/admin\/notifications(\/.*)?$/,
   ],
   // Profil « Production éditoriale » : pilote le pipeline éditorial + couvertures.
@@ -115,6 +116,8 @@ export const ROLE_ALLOWED_PATHS = {
     // ── Volet « Site & contenu » : configuration + bannières (slides) ──
     /^\/api\/admin\/config(\/.*)?$/,
     /^\/api\/admin\/slides(\/.*)?$/,
+    // ── Relais commercial : tableau de bord des parutions (checklist + kit) ──
+    /^\/api\/admin\/parutions(\/.*)?$/,
   ],
   // Profil « Gestionnaire de stock » : gestion complète du stock/réappro, des
   // fournisseurs, du catalogue, des BL et du dépôt-vente.
@@ -187,7 +190,7 @@ const M = (modules) => {
     manuscripts: '-', evaluations: '-', corrections: '-', editorial: '-', covers: '-',
     printing: '-', contracts: '-', pos: '-', payments: '-', accounting: '-',
     invoices: '-', deliveries: '-', consignments: '-', orders: '-', special_orders: '-', propals: '-',
-    expenses: '-', legal_deposits: '-',
+    expenses: '-', legal_deposits: '-', parutions: '-',
     config: '-', slides: '-', news: '-', faq: '-', contacts: '-', newsletter: '-',
     customers: '-', users: '-', activity: '-', profile: 'rw',
   };
@@ -199,7 +202,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
+    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', expenses: 'crud', legal_deposits: 'crud', parutions: 'crud',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: 'crud', activity: 'r', profile: 'rw',
   }),
@@ -207,7 +210,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'crud', books: 'crud', tags: 'crud', authors: 'crud', stock: 'crud', inventory: 'crud', suppliers: 'crud',
     manuscripts: 'crud', evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud',
     printing: 'crud', contracts: 'crud', pos: 'crud', payments: 'crud', accounting: 'crud',
-    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', expenses: 'crud', legal_deposits: 'crud',
+    invoices: 'crud', deliveries: 'crud', consignments: 'crud', orders: 'r', special_orders: 'crud', propals: 'crud', expenses: 'crud', legal_deposits: 'crud', parutions: 'crud',
     config: 'crud', slides: 'crud', news: 'crud', faq: 'crud', contacts: 'crud', newsletter: 'crud',
     customers: 'crud', users: '-', activity: 'r', profile: 'rw',
   }),
@@ -215,7 +218,7 @@ export const MODULE_PERMISSIONS = {
     dashboard: 'r', books: 'crud', tags: 'crud', authors: 'crud', manuscripts: 'crud',
     evaluations: 'crud', corrections: 'crud', editorial: 'crud', covers: 'crud', printing: 'crud',
     contracts: 'crud', slides: 'crud', news: 'crud',
-    legal_deposits: 'crud', profile: 'rw',
+    legal_deposits: 'crud', parutions: 'crud', profile: 'rw',
   }),
   production: M({
     dashboard: 'r', manuscripts: 'r', editorial: 'crud', covers: 'crud', profile: 'rw',
@@ -227,6 +230,8 @@ export const MODULE_PERMISSIONS = {
     authors: 'r', contacts: 'crud', faq: 'crud', newsletter: 'crud', customers: 'rw', news: 'crud',
     // Rubrique « Site & contenu » : contrôle total config + bannières.
     config: 'crud', slides: 'crud',
+    // Relais commercial : checklist de lancement des parutions.
+    parutions: 'crud',
     profile: 'rw',
   }),
   gestionnaire_stock: M({
@@ -279,6 +284,7 @@ export const MODULE_LABELS = {
   special_orders: 'Commandes spéciales',
   propals: 'Devis',
   legal_deposits: 'Dépôt légal',
+  parutions: 'Parutions',
   config: 'Configuration',
   slides: 'Bannières',
   news: 'Actualités',
@@ -305,6 +311,11 @@ export const MODULE_LABELS = {
 //   • pos (/api/admin/pos) → administration du POS (caissiers/appareils) + nav.
 //     ⚠️ Le terminal de vente /api/pos reste piloté par PIN (table pos_staff) :
 //     la surcharge n'ouvre/ferme PAS la connexion caissier par PIN.
+//   ⚠️ consignments (/api/admin/consignments) → surchargeable SAUF pour les deux
+//     routes qui touchent à l'argent (création de facture fournisseur, règlement
+//     du reversement) : consignment-routes.js y ajoute un plancher `requireFinance`
+//     (super_admin/admin/comptable). Accorder `consignments` à un autre rôle lui
+//     ouvre les dépôts et les retours, pas la trésorerie.
 // Seul `profile` (espace personnel : /me, /password, /2fa — toujours accessible
 // à son propriétaire) n'est volontairement pas surchargeable.
 export const MODULE_PATHS = {
@@ -333,6 +344,7 @@ export const MODULE_PATHS = {
   special_orders: [/^\/api\/admin\/special-orders(\/.*)?$/],
   propals:        [/^\/api\/admin\/propals(\/.*)?$/],
   legal_deposits: [/^\/api\/admin\/legal-deposits(\/.*)?$/],
+  parutions:      [/^\/api\/admin\/parutions(\/.*)?$/],
   config:         [/^\/api\/admin\/config(\/.*)?$/],
   slides:         [/^\/api\/admin\/slides(\/.*)?$/],
   news:           [/^\/api\/admin\/news(\/.*)?$/],

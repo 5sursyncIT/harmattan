@@ -347,7 +347,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
 
       const totals = db.prepare(
         `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN current_stage IN ('contract_signed','in_correction','correction_author_review','in_editorial','editorial_validated','cover_design','bat_author_review','print_preparation','printing','printed') THEN 1 ELSE 0 END) AS accepted,
+                SUM(CASE WHEN current_stage IN ('contract_signed','in_correction','correction_author_review','in_editorial','editorial_validated','cover_design','bat_author_review','print_preparation','printing','printed','in_communication','published') THEN 1 ELSE 0 END) AS accepted,
                 SUM(CASE WHEN current_stage = 'evaluation_negative' THEN 1 ELSE 0 END) AS rejected,
                 SUM(CASE WHEN current_stage IN ('submitted','in_evaluation') THEN 1 ELSE 0 END) AS pending
          FROM manuscripts WHERE author_id = ?`

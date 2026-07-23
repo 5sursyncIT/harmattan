@@ -43,6 +43,8 @@ export default function POSQuoteReceipt({ quote, onClose, hideOdt = false, onInv
         .quote-col-num { width: 30px; text-align: center; }
         .quote-col-isbn { width: 110px; text-align: left; font-family: monospace; font-size: 8.5pt; }
         .quote-col-desc { text-align: left; }
+        .quote-item-label { display: block; }
+        .quote-item-subtitle { display: block; font-size: 8.5pt; font-style: italic; color: #666; margin-top: 1px; }
         .quote-col-qty { width: 50px; text-align: center; }
         .quote-col-pu { width: 90px; text-align: right; }
         .quote-col-discount { width: 60px; text-align: center; font-weight: 600; color: #e8772e; }
@@ -172,6 +174,7 @@ export default function POSQuoteReceipt({ quote, onClose, hideOdt = false, onInv
                   <td className="quote-col-isbn">{item.ref || ''}</td>
                   <td className="quote-col-desc">
                     <span className="quote-item-label">{item.label}</span>
+                    {item.soustitre && <span className="quote-item-subtitle">{item.soustitre}</span>}
                   </td>
                   <td className="quote-col-qty">{item.qty}</td>
                   <td className="quote-col-pu">{parseInt(item.price_ttc).toLocaleString('fr-FR')}</td>

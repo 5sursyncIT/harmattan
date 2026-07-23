@@ -40,7 +40,7 @@ export default function EvaluationsPanel() {
       if (form.weaknesses) fd.append('weaknesses', form.weaknesses);
       if (form.note) fd.append('note', form.note);
       if (file) fd.append('report', file);
-      if (file && form.verdict === 'positive' && form.attachReport) fd.append('attach_report', '1');
+      if (file && form.attachReport) fd.append('attach_report', '1');
       await manuscriptsApi.submitEvaluation(modal, fd);
       toast.success('Évaluation enregistrée');
       setModal(null);
@@ -121,24 +121,22 @@ export default function EvaluationsPanel() {
                 <input type="file" accept=".pdf,.doc,.docx,.odt" onChange={(e) => setFile(e.target.files?.[0] || null)} />
               </label>
             </div>
-            {form.verdict === 'positive' && (
-              <div className="form-group">
-                <label className="ms-series-apply" style={{ marginTop: 0, opacity: file ? 1 : 0.55 }}>
-                  <input
-                    type="checkbox"
-                    checked={form.attachReport && !!file}
-                    disabled={!file}
-                    onChange={(e) => setForm({ ...form, attachReport: e.target.checked })}
-                  />
-                  Joindre le rapport de lecture à l'email d'acceptation envoyé à l'auteur
-                </label>
-                {!file && (
-                  <p style={{ margin: '6px 0 0', fontSize: '0.82rem', color: '#6b7280' }}>
-                    Sélectionnez d'abord un rapport ci-dessus pour pouvoir le joindre.
-                  </p>
-                )}
-              </div>
-            )}
+            <div className="form-group">
+              <label className="ms-series-apply" style={{ marginTop: 0, opacity: file ? 1 : 0.55 }}>
+                <input
+                  type="checkbox"
+                  checked={form.attachReport && !!file}
+                  disabled={!file}
+                  onChange={(e) => setForm({ ...form, attachReport: e.target.checked })}
+                />
+                Joindre le rapport de lecture à l'email envoyé à l'auteur
+              </label>
+              {!file && (
+                <p style={{ margin: '6px 0 0', fontSize: '0.82rem', color: '#6b7280' }}>
+                  Sélectionnez d'abord un rapport ci-dessus pour pouvoir le joindre.
+                </p>
+              )}
+            </div>
             <div className="ms-modal-actions">
               <button className="ms-btn" onClick={() => setModal(null)} disabled={submitting}>Annuler</button>
               <button className="ms-btn ms-btn-primary" onClick={submit} disabled={submitting}>

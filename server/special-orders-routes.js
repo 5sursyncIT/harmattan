@@ -24,6 +24,9 @@ import { Router } from 'express';
 import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { adminApi } from './dolibarr-admin-client.js';
+import { recordInvoicePayment, resolvePaymentId } from './dolibarr-payments.js';
+import { findExistingTier, TYPENT_PARTICULIER } from './tier-dedup.js';
 
 const EDITOR_NAME = process.env.CONTRACT_EDITOR_SIGNATORY_NAME || "L'Harmattan Sénégal";
 const FOOTER_LEGAL = "L'HARMATTAN SENEGAL SARL – 10 VDN Sicap amitié 3, Lotissement Cité Police, BP 45034 Dakar Fann, RC : SN DKR 2009-B-11.042 NINEA : 004067155";
@@ -61,6 +64,71 @@ const READY = ['available', 'client_notified'];
 const OVERDUE_OPEN = ['registered', 'pending_validation', 'sent_to_supply', 'in_production'];
 
 const PAYMENT_METHODS = ['cash', 'wave', 'orange_money', 'virement', 'cb', 'cheque'];
+
+// ─── Comptabilisation Dolibarr ───────────────────────────────
+// Consigne Direction (2026-07-14) : tout encaissement doit figurer au livre
+// comptable. À la première somme reçue, on crée la facture client Dolibarr et
+// on y impute les règlements au fil de l'eau (acompte, tranches, solde).
+//
+// Correspondance méthode → mode de règlement + compte de trésorerie. Le compte
+// détermine où l'argent tombe réellement : ce n'est pas qu'un libellé.
+// Pièges (cf. dolibarr-payments.js et l'audit des comptes) :
+//   · WAVE → compte 6 (WAVE LIBRAIRIE QR, courant) et non 5, qui est de type
+//     caisse et refuse tout mode ≠ LIQ ;
+//   · le virement passe par P16 : le code VIR existe mais est INACTIF en base ;
+//   · CHQ exige un chqemetteur, sinon Dolibarr renvoie 400.
+const DOLIBARR_PAYMENT = {
+  cash:         { code: 'LIQ',  accountId: 3 },  // COMPTE LIQUIDE
+  wave:         { code: 'WAVE', accountId: 6 },  // WAVE LIBRAIRIE QR
+  orange_money: { code: 'OM',   accountId: 4 },  // Code marchand OM
+  cb:           { code: 'CB',   accountId: 1 },  // COMPTE CBAO
+  cheque:       { code: 'CHQ',  accountId: 1 },  // COMPTE CBAO
+  virement:     { code: 'P16',  accountId: 1 },  // Transfert bancaire (VIR est inactif)
+};
+
+// ─── Alertes internes ────────────────────────────────────────
+// Le client n'est joignable automatiquement que par email — or presque aucun n'en
+// a fourni, et les canaux SMS / WhatsApp ne sont pas branchés. Le module ne peut
+// donc pas prévenir le client tout seul : il retourne la charge vers l'équipe.
+// Toute commande qui dérive lève une alerte, visible dans l'interface et comptée
+// dans la pastille de navigation. Une alerte s'éteint quand l'équipe agit
+// (appel tracé, encaissement, avancement du statut).
+const OPEN_STATUSES = ['registered', 'pending_validation', 'sent_to_supply', 'in_production', 'available', 'client_notified'];
+const STALE_DAYS = 14;           // commande ouverte sans aucun mouvement
+const PICKUP_REMINDER_DAYS = 7;  // client prévenu mais qui n'est jamais venu chercher
+const NO_DATE_DAYS = 3;          // commande ouverte sans date de disponibilité annoncée
+
+const ALERT_DEFS = {
+  not_accounted:   { severity: 'action', label: 'Hors livre comptable' },
+  to_contact:      { severity: 'action', label: 'Client à prévenir' },
+  balance_due:     { severity: 'action', label: 'Solde impayé' },
+  pickup_pending:  { severity: 'warn',   label: 'Livre non retiré' },
+  overdue:         { severity: 'warn',   label: 'Date dépassée' },
+  stale:           { severity: 'warn',   label: 'Sans mouvement' },
+  no_date:         { severity: 'info',   label: 'Sans date prévue' },
+  no_contact_info: { severity: 'info',   label: 'Client injoignable' },
+};
+const ALERT_KEYS = Object.keys(ALERT_DEFS);
+const SEVERITY_RANK = { action: 3, warn: 2, info: 1 };
+// Une alerte « action » ou « warn » = une commande à traiter (pastille de navigation).
+const ACTIONABLE = ['action', 'warn'];
+
+// Contact manuel : l'équipe appelle le client, on trace l'appel pour qu'il compte
+// comme un contact abouti au même titre qu'un email parti.
+const MANUAL_CHANNELS = ['phone', 'whatsapp_manual', 'sms_manual', 'in_person'];
+// Événements pour lesquels le client attend une action de sa part : si aucun canal
+// automatique n'aboutit, l'équipe doit être prévenue de le contacter à la main.
+const STAFF_ALERT_EVENTS = ['available', 'balance_reminder'];
+
+const DAY_MS = 86400000;
+// created_at / updated_at sont écrits par SQLite en UTC — d'où le « Z » à la lecture.
+const daysSinceUtc = (s) => {
+  if (!s) return null;
+  const d = new Date(String(s).replace(' ', 'T') + 'Z');
+  if (isNaN(d.getTime())) return null;
+  return Math.max(0, Math.floor((Date.now() - d.getTime()) / DAY_MS));
+};
+const todayIso = () => new Date().toISOString().slice(0, 10);
 
 const escXml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -142,6 +210,116 @@ function ensureTables(db) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_sporder_hist_order ON special_order_status_history(order_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sporder_pay_order ON special_order_payments(order_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sporder_notif_order ON special_order_notifications(order_id)');
+  // Qui a passé l'appel / envoyé le message (les contacts manuels sont saisis par un agent).
+  try { db.exec('ALTER TABLE special_order_notifications ADD COLUMN actor_username TEXT'); } catch { /* colonne déjà présente */ }
+  // Liaison comptable : la facture Dolibarr portant les encaissements de la commande.
+  try { db.exec('ALTER TABLE special_orders ADD COLUMN dolibarr_invoice_id INTEGER'); } catch { /* déjà présente */ }
+  try { db.exec('ALTER TABLE special_orders ADD COLUMN invoice_ref TEXT'); } catch { /* déjà présente */ }
+  try { db.exec('ALTER TABLE special_orders ADD COLUMN delivered_at DATETIME'); } catch { /* déjà présente */ }
+  // Chaque règlement pointe vers son paiement Dolibarr. NULL = pas encore au livre
+  // comptable (Dolibarr indisponible au moment de l'encaissement) → alerte + rejeu.
+  try { db.exec('ALTER TABLE special_order_payments ADD COLUMN dolibarr_payment_id INTEGER'); } catch { /* déjà présente */ }
+  try { db.exec('ALTER TABLE special_order_payments ADD COLUMN sync_error TEXT'); } catch { /* déjà présente */ }
+}
+
+// ─── MOTEUR D'ALERTES ────────────────────────────────────────
+// Les alertes de toutes les commandes se calculent en 4 requêtes groupées, pas en
+// N+1 : le résultat sert à la fois à la liste, aux KPI, au filtre et à la pastille.
+function buildAlertMap(db) {
+  const orders = db.prepare(`SELECT id, status, expected_date, created_at, updated_at,
+    total_amount, customer_email, customer_phone FROM special_orders`).all();
+  const paid = new Map(db.prepare('SELECT order_id, SUM(amount) AS s FROM special_order_payments GROUP BY order_id')
+    .all().map((r) => [r.order_id, Number(r.s) || 0]));
+  // « Contact abouti » = le CLIENT a réellement appris que son livre l'attend, que ce
+  // soit par un envoi automatique parti ou par un appel que l'équipe a tracé.
+  // Le canal 'internal' est exclu : c'est l'email qui prévient l'équipe qu'elle doit
+  // appeler — le compter ici éteindrait l'alerte qu'il vient précisément de lever.
+  const contacted = new Set(db.prepare(
+    `SELECT DISTINCT order_id FROM special_order_notifications
+     WHERE status = 'sent' AND event = 'available' AND channel <> 'internal'`
+  ).all().map((r) => r.order_id));
+  const notifiedAt = new Map(db.prepare(
+    `SELECT order_id, MAX(created_at) AS d FROM special_order_status_history
+     WHERE to_status = 'client_notified' GROUP BY order_id`
+  ).all().map((r) => [r.order_id, r.d]));
+  // Encaissements restés hors du livre comptable (échec d'écriture Dolibarr).
+  const unaccounted = new Map(db.prepare(
+    `SELECT order_id, COUNT(*) AS n, SUM(amount) AS s FROM special_order_payments
+     WHERE dolibarr_payment_id IS NULL GROUP BY order_id`
+  ).all().map((r) => [r.order_id, { n: Number(r.n), sum: Number(r.s) || 0 }]));
+
+  const map = new Map();
+  for (const o of orders) {
+    map.set(o.id, computeAlerts(o, {
+      paid: paid.get(o.id) || 0,
+      contacted: contacted.has(o.id),
+      notifiedAt: notifiedAt.get(o.id) || null,
+      unaccounted: unaccounted.get(o.id) || null,
+    }));
+  }
+  return map;
+}
+
+function computeAlerts(o, { paid, contacted, notifiedAt, unaccounted }) {
+  const alerts = [];
+  const push = (key, detail) => alerts.push({ key, ...ALERT_DEFS[key], detail });
+  const open = OPEN_STATUSES.includes(o.status);
+  const balance = Math.max(0, Math.round((Number(o.total_amount || 0) - paid) * 100) / 100);
+
+  // De l'argent encaissé qui n'est pas au livre comptable : à rejouer d'urgence.
+  if (unaccounted && unaccounted.n > 0) {
+    push('not_accounted', `${unaccounted.n} règlement${unaccounted.n > 1 ? 's' : ''} (${fmtMoney(unaccounted.sum)}) encaissé${unaccounted.n > 1 ? 's' : ''} hors du livre comptable`);
+  }
+
+  // Le livre est arrivé, mais rien ne prouve que le client l'ait appris.
+  if (['available', 'client_notified'].includes(o.status) && !contacted) {
+    push('to_contact', o.customer_phone
+      ? `Aucun contact abouti — appeler le ${o.customer_phone}`
+      : 'Aucun contact abouti, et aucun téléphone au dossier');
+  }
+  // Livre remis, argent jamais encaissé.
+  if (['picked_up', 'closed'].includes(o.status) && balance > 0) {
+    push('balance_due', `Livre remis mais ${fmtMoney(balance)} jamais encaissés`);
+  }
+  // Client prévenu, qui ne vient pas : il faut le relancer.
+  if (o.status === 'client_notified' && contacted) {
+    const d = daysSinceUtc(notifiedAt);
+    if (d !== null && d >= PICKUP_REMINDER_DAYS) push('pickup_pending', `Prévenu il y a ${d} jours, livre toujours pas retiré`);
+  }
+  if (o.expected_date && OVERDUE_OPEN.includes(o.status) && String(o.expected_date) < todayIso()) {
+    push('overdue', `Disponibilité annoncée au client pour le ${fmtDateFr(o.expected_date)}`);
+  }
+  if (open) {
+    const d = daysSinceUtc(o.updated_at || o.created_at);
+    if (d !== null && d >= STALE_DAYS) push('stale', `Aucun mouvement depuis ${d} jours`);
+  }
+  // Sans date prévue, la commande échappe au radar « en retard » et peut dormir indéfiniment.
+  if (open && !o.expected_date) {
+    const d = daysSinceUtc(o.created_at);
+    if (d !== null && d >= NO_DATE_DAYS) push('no_date', `Ouverte depuis ${d} jours sans date de disponibilité`);
+  }
+  if (open && !o.customer_phone && !o.customer_email) {
+    push('no_contact_info', 'Ni téléphone ni email : ce client sera impossible à prévenir');
+  }
+
+  alerts.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+  return alerts;
+}
+
+const alertLevelOf = (alerts) =>
+  (alerts.length ? alerts.reduce((best, a) => (SEVERITY_RANK[a.severity] > SEVERITY_RANK[best] ? a.severity : best), 'info') : null);
+const needsAction = (alerts) => alerts.some((a) => ACTIONABLE.includes(a.severity));
+
+// Commandes réclamant une action — alimente la pastille de la navigation admin.
+export function countSpecialOrderActionsRequired(db) {
+  try {
+    let n = 0;
+    for (const alerts of buildAlertMap(db).values()) if (needsAction(alerts)) n += 1;
+    return n;
+  } catch (e) {
+    console.error('[SPECIAL-ORDERS] comptage alertes:', e.message);
+    return 0;
+  }
 }
 
 // ─── ROUTER FACTORY ──────────────────────────────────────────
@@ -205,7 +383,7 @@ export function createSpecialOrdersRouter({
       .filter((l) => l.title);
   }
 
-  function orderToDto(row, { withChildren = false } = {}) {
+  function orderToDto(row, { withChildren = false, alerts = null } = {}) {
     const totals = computeTotals(row.id, row.total_amount);
     const dto = {
       id: row.id,
@@ -227,9 +405,19 @@ export function createSpecialOrdersRouter({
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       closedAt: row.closed_at,
+      deliveredAt: row.delivered_at,
+      // Facture Dolibarr portant les encaissements (null tant que rien n'est encaissé).
+      invoice: row.dolibarr_invoice_id
+        ? { id: Number(row.dolibarr_invoice_id), ref: row.invoice_ref }
+        : null,
       overdue: !!(row.expected_date && OVERDUE_OPEN.includes(row.status)
-        && String(row.expected_date) < new Date().toISOString().slice(0, 10)),
+        && String(row.expected_date) < todayIso()),
     };
+    // Alertes : fournies par l'appelant s'il a déjà bâti la carte (liste), sinon calculées.
+    const list = alerts || buildAlertMap(db).get(row.id) || [];
+    dto.alerts = list;
+    dto.alertLevel = alertLevelOf(list);
+    dto.needsAction = needsAction(list);
     if (withChildren) {
       dto.lines = db.prepare('SELECT * FROM special_order_lines WHERE order_id = ? ORDER BY id ASC').all(row.id);
       dto.payments = db.prepare('SELECT * FROM special_order_payments WHERE order_id = ? ORDER BY created_at ASC, id ASC').all(row.id);
@@ -244,12 +432,170 @@ export function createSpecialOrdersRouter({
     return db.prepare('SELECT * FROM special_orders WHERE id = ?').get(parseInt(id, 10));
   }
 
-  // ── Dispatcher de notifications (email réel ; SMS / WhatsApp pluggables) ──
-  function logNotif(orderId, channel, event, recipient, status, detail) {
+  // ═══════════════════════════════════════════════════════════
+  // COMPTABILISATION (Dolibarr)
+  // ═══════════════════════════════════════════════════════════
+  // Doctrine du projet : jamais d'INSERT SQL dans les tables comptables — on passe
+  // par l'API REST avec la clé admin, pour hériter de la numérotation légale, des
+  // triggers et des règles métier.
+
+  // Le client d'une commande spéciale a payé de l'argent : il lui faut une fiche
+  // tiers. On déduplique par téléphone/email (JAMAIS par nom : les patronymes se
+  // répètent trop au Sénégal pour servir de clé — cf. l'incident des 1493 faux
+  // fournisseurs).
+  async function ensureOrderTier(row) {
+    if (row.fk_soc) return Number(row.fk_soc);
+
+    const existing = await findExistingTier(dolibarrPool, {
+      email: row.customer_email, phone: row.customer_phone,
+    });
+    let socid = existing?.rowid || existing?.id || null;
+
+    if (!socid) {
+      const res = await adminApi.post('/thirdparties', {
+        name: String(row.customer_name || '').trim().slice(0, 128),
+        email: String(row.customer_email || '').trim(),
+        phone: String(row.customer_phone || '').trim(),
+        address: String(row.customer_address || '').trim(),
+        client: 1,
+        code_client: -1,            // référence client auto-générée par Dolibarr
+        typent_id: TYPENT_PARTICULIER,
+      });
+      socid = Number(res.data);
+    }
+
+    db.prepare('UPDATE special_orders SET fk_soc = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(socid, row.id);
+    return socid;
+  }
+
+  // Facture client portant la commande. Créée à la PREMIÈRE somme reçue (ou à la
+  // livraison si rien n'a été encaissé : la vente est alors une créance).
+  // Idempotente : une commande n'a qu'une facture, les tranches s'y imputent.
+  //
+  // Lignes en SERVICE (product_type: 1, sans fk_product) et validation SANS
+  // idwarehouse : par définition le livre n'est pas en stock. Un fk_product ferait
+  // d'ailleurs échouer la création (STOCK_MUST_BE_ENOUGH_FOR_INVOICE=1 sur cette
+  // instance rejette toute facture dont un produit manque en stock).
+  // TVA = 0 : L'Harmattan Sénégal ne facture pas la TVA, le prix affiché EST le prix.
+  async function ensureOrderInvoice(row) {
+    if (row.dolibarr_invoice_id) {
+      return { invoiceId: Number(row.dolibarr_invoice_id), invoiceRef: row.invoice_ref, created: false };
+    }
+    const socid = await ensureOrderTier(row);
+    const lines = db.prepare('SELECT * FROM special_order_lines WHERE order_id = ? ORDER BY id ASC').all(row.id);
+    if (lines.length === 0) throw new Error('Commande sans ligne — facturation impossible');
+
+    const createRes = await adminApi.post('/invoices', {
+      socid,
+      date: todayIso(),
+      type: 0,
+      note_public: `Commande spéciale ${row.ref}`,
+      note_private: `Commande spéciale ${row.ref} — ${row.customer_name}${row.customer_phone ? ` (${row.customer_phone})` : ''}`,
+      lines: lines.map((l) => ({
+        desc: [l.title, l.author, l.isbn].filter(Boolean).join(' — ').slice(0, 250),
+        subprice: Math.round(Number(l.unit_price) || 0),
+        qty: Number(l.quantity) || 1,
+        tva_tx: 0,
+        product_type: 1,
+      })),
+    });
+    const invoiceId = Number(createRes.data);   // le POST renvoie l'ID brut, pas un objet
+    await adminApi.post(`/invoices/${invoiceId}/validate`);
+
+    let invoiceRef = null;
+    try { invoiceRef = (await adminApi.get(`/invoices/${invoiceId}`)).data?.ref || null; } catch (e) { void e; }
+
+    db.prepare('UPDATE special_orders SET dolibarr_invoice_id = ?, invoice_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(invoiceId, invoiceRef, row.id);
+    return { invoiceId, invoiceRef, created: true };
+  }
+
+  // Impute un règlement sur la facture de la commande. Renvoie l'id du paiement
+  // Dolibarr. Passe par recordInvoicePayment (/invoices/paymentsdistributed), seul
+  // endpoint qui respecte le montant : /invoices/{id}/payments IGNORE `amount` et
+  // impute tout le reste-à-payer (bug du double encaissement, déjà régressé une fois).
+  async function pushPaymentToDolibarr(row, { amount, method, reference, isLast }) {
+    const map = DOLIBARR_PAYMENT[method] || DOLIBARR_PAYMENT.cash;
+    const { invoiceId } = await ensureOrderInvoice(getRow(row.id));
+
+    const paymentId = await resolvePaymentId(dolibarrPool, map.code);
+    if (!paymentId) throw new Error(`Mode de règlement inconnu dans Dolibarr : ${map.code}`);
+
+    const dolibarrPaymentId = await recordInvoicePayment(adminApi, {
+      invoiceId,
+      amount: Math.round(Number(amount) || 0),
+      paymentId,
+      accountId: map.accountId,
+      datepaye: Math.floor(new Date(`${todayIso()}T12:00:00Z`).getTime() / 1000), // midi UTC : pas de dérive de fuseau
+      isLast: !!isLast,                        // ne solde la facture que sur le dernier règlement
+      numPayment: reference || undefined,
+      comment: `Commande spéciale ${row.ref}`,
+      // Dolibarr refuse un chèque sans émetteur (400 « Emetteur is mandatory »).
+      ...(map.code === 'CHQ' ? { chqemetteur: String(row.customer_name || 'Client').slice(0, 100) } : {}),
+    });
+
+    if (isLast) {
+      // L'API ne bascule pas toujours la facture en « payée » d'elle-même.
+      try { await adminApi.post(`/invoices/${invoiceId}/settopaid`); } catch (e) { void e; }
+    }
+    return Number(dolibarrPaymentId);
+  }
+
+  // Comptabilise un règlement déjà enregistré en SQLite. On n'échoue JAMAIS
+  // l'encaissement pour un problème Dolibarr : l'argent est déjà dans la caisse, le
+  // nier serait pire. On trace l'échec, l'alerte « Hors livre comptable » s'allume,
+  // et l'écriture est rejouable d'un clic.
+  async function accountPayment(orderId, paymentRowId) {
+    const row = getRow(orderId);
+    const pay = db.prepare('SELECT * FROM special_order_payments WHERE id = ?').get(paymentRowId);
+    if (!row || !pay || pay.dolibarr_payment_id) return { ok: true, skipped: true };
+
+    const { balance } = computeTotals(row.id, row.total_amount);
     try {
-      db.prepare('INSERT INTO special_order_notifications (order_id, channel, event, recipient, status, detail) VALUES (?,?,?,?,?,?)')
-        .run(orderId, channel, event, recipient || null, status, detail || null);
+      const dolibarrPaymentId = await pushPaymentToDolibarr(row, {
+        amount: pay.amount, method: pay.method, reference: pay.reference,
+        isLast: balance <= 0.01,               // ce règlement solde la commande
+      });
+      db.prepare('UPDATE special_order_payments SET dolibarr_payment_id = ?, sync_error = NULL WHERE id = ?')
+        .run(dolibarrPaymentId, pay.id);
+      return { ok: true, dolibarrPaymentId };
+    } catch (err) {
+      const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 400) : err.message;
+      console.error(`[SPECIAL-ORDERS] comptabilisation ${row.ref} échouée:`, detail);
+      db.prepare('UPDATE special_order_payments SET sync_error = ? WHERE id = ?').run(detail, pay.id);
+      return { ok: false, error: detail };
+    }
+  }
+
+  // ── Dispatcher de notifications (email réel ; SMS / WhatsApp pluggables) ──
+  function logNotif(orderId, channel, event, recipient, status, detail, actor) {
+    try {
+      db.prepare(`INSERT INTO special_order_notifications
+        (order_id, channel, event, recipient, status, detail, actor_username) VALUES (?,?,?,?,?,?,?)`)
+        .run(orderId, channel, event, recipient || null, status, detail || null, actor || null);
     } catch (e) { void e; }
+  }
+
+  // Aucun canal automatique n'a atteint le client alors qu'il attend une action de sa
+  // part : ce n'est pas un échec silencieux, c'est une tâche pour l'équipe. On la lui
+  // envoie par email interne, et la commande reste en alerte tant que l'appel n'est
+  // pas tracé.
+  async function alertStaffContactRequired(orderRow, event) {
+    try {
+      if (!transporter || !emailService?.sendSpecialOrderStaffAlert) return;
+      const staff = db.prepare(
+        `SELECT email FROM admin_users WHERE is_active = 1 AND email IS NOT NULL AND email != ''
+           AND role IN ('super_admin','admin','librarian','gestionnaire_stock')`
+      ).all().map((r) => r.email).filter(Boolean);
+      if (!staff.length) return;
+      const ok = await emailService.sendSpecialOrderStaffAlert({
+        transporter, to: staff, order: orderToDto(orderRow, { withChildren: true }), event, siteUrl,
+      });
+      logNotif(orderRow.id, 'internal', event, staff.join(', '), ok ? 'sent' : 'failed',
+        ok ? "Équipe alertée : le client doit être contacté à la main" : "Échec de l'alerte interne", 'système');
+    } catch (e) {
+      console.error('[SPECIAL-ORDERS] alerte interne:', e.message);
+    }
   }
 
   async function notifyOrder(orderRow, event, { channels } = {}) {
@@ -273,12 +619,16 @@ export function createSpecialOrdersRouter({
         ...(smsService?.isSmsEnabled?.() ? ['sms'] : []),
         ...(whatsapp?.isWhatsAppEnabled?.() ? ['whatsapp'] : [])];
 
+    // Le client a-t-il vraiment été atteint par au moins un canal ?
+    let reached = false;
+
     // EMAIL
     if (wanted.includes('email')) {
       if (orderRow.customer_email && transporter && emailService?.sendSpecialOrderNotification) {
         let ok = false;
         try { ok = await emailService.sendSpecialOrderNotification({ transporter, order: payload, event, siteUrl }); }
         catch (e) { ok = false; console.error('[SPECIAL-ORDERS] email failed:', e.message); }
+        if (ok) reached = true;
         logNotif(orderRow.id, 'email', event, orderRow.customer_email, ok ? 'sent' : 'failed', ok ? null : 'Échec envoi SMTP');
       } else {
         logNotif(orderRow.id, 'email', event, orderRow.customer_email || '', 'skipped',
@@ -292,6 +642,7 @@ export function createSpecialOrdersRouter({
         let r = { ok: false, skipped: true };
         try { r = await smsService.sendSpecialOrderSms({ phone: orderRow.customer_phone, event, order: payload }); }
         catch (e) { r = { ok: false, error: e.message }; }
+        if (r.ok) reached = true;
         logNotif(orderRow.id, 'sms', event, orderRow.customer_phone,
           r.skipped ? 'skipped' : (r.ok ? 'sent' : 'failed'), r.error || (r.skipped ? 'SMS non configuré' : null));
       } else {
@@ -306,6 +657,7 @@ export function createSpecialOrdersRouter({
         let r = { ok: false, skipped: true };
         try { r = await whatsapp.sendSpecialOrderUpdate({ phone: orderRow.customer_phone, firstname, event, orderRef: orderRow.ref }); }
         catch (e) { r = { ok: false, error: e.message }; }
+        if (r.ok) reached = true;
         logNotif(orderRow.id, 'whatsapp', event, orderRow.customer_phone,
           r.skipped ? 'skipped' : (r.ok ? 'sent' : 'failed'), r.error || (r.skipped ? 'WhatsApp non configuré' : null));
       } else {
@@ -313,6 +665,9 @@ export function createSpecialOrdersRouter({
           orderRow.customer_phone ? 'WhatsApp non configuré' : 'Aucun téléphone');
       }
     }
+
+    // Le client attend une action de sa part et personne n'a pu le joindre : à l'équipe de jouer.
+    if (!reached && STAFF_ALERT_EVENTS.includes(event)) await alertStaffContactRequired(orderRow, event);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -359,11 +714,20 @@ export function createSpecialOrdersRouter({
     }
   });
 
-  // Constantes UI (statuts, méthodes de paiement) pour le frontend.
+  // Constantes UI (statuts, méthodes de paiement, alertes) pour le frontend.
   router.get('/meta', auth, (req, res) => {
     res.json({
       statuses: STATUS_ORDER.map(statusDto).concat([statusDto('cancelled')]),
       paymentMethods: PAYMENT_METHODS,
+      alerts: ALERT_KEYS.map((key) => ({ key, ...ALERT_DEFS[key] })),
+      manualChannels: MANUAL_CHANNELS,
+      // Canaux automatiques réellement opérationnels : le frontend prévient l'équipe
+      // que le reste ne partira pas (l'équipe devra contacter le client à la main).
+      channelsEnabled: {
+        email: !!transporter,
+        sms: !!smsService?.isSmsEnabled?.(),
+        whatsapp: !!whatsapp?.isWhatsAppEnabled?.(),
+      },
     });
   });
 
@@ -391,6 +755,24 @@ export function createSpecialOrdersRouter({
         where.push(`o.expected_date IS NOT NULL AND o.expected_date < date('now') AND o.status IN (${OVERDUE_OPEN.map(() => '?').join(',')})`);
         params.push(...OVERDUE_OPEN);
       }
+
+      // Les alertes se calculent en JS : on filtre donc sur les identifiants retenus.
+      // `alert=any` = toutes les commandes réclamant une action.
+      const alertMap = buildAlertMap(db);
+      const alertFilter = String(req.query.alert || '').trim();
+      if (alertFilter && (alertFilter === 'any' || ALERT_KEYS.includes(alertFilter))) {
+        const ids = [];
+        for (const [id, alerts] of alertMap) {
+          const hit = alertFilter === 'any' ? needsAction(alerts) : alerts.some((a) => a.key === alertFilter);
+          if (hit) ids.push(id);
+        }
+        if (ids.length === 0) {
+          return res.json({ orders: [], total: 0, page: 1, pages: 1, kpis: computeDashboardKpis(alertMap) });
+        }
+        where.push(`o.id IN (${ids.map(() => '?').join(',')})`);
+        params.push(...ids);
+      }
+
       const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
       const total = db.prepare(`SELECT COUNT(*) AS n FROM special_orders o ${whereSql}`).get(...params).n;
@@ -403,14 +785,14 @@ export function createSpecialOrdersRouter({
 
       res.json({
         orders: rows.map((r) => {
-          const dto = orderToDto(r);
+          const dto = orderToDto(r, { alerts: alertMap.get(r.id) || [] });
           const sum = summaryStmt.get(r.id);
           const first = firstTitleStmt.get(r.id);
           dto.books = { count: sum ? Number(sum.n) : 0, qty: sum ? Number(sum.q) : 0, firstTitle: first ? first.title : null };
           return dto;
         }),
         total, page, pages: Math.max(1, Math.ceil(total / limit)),
-        kpis: computeDashboardKpis(),
+        kpis: computeDashboardKpis(alertMap),
       });
     } catch (err) {
       console.error('[SPECIAL-ORDERS] list error:', err.message);
@@ -419,7 +801,7 @@ export function createSpecialOrdersRouter({
   });
 
   // KPI globaux (non filtrés) pour le tableau de bord.
-  function computeDashboardKpis() {
+  function computeDashboardKpis(alertMap = buildAlertMap(db)) {
     const byStatusRows = db.prepare('SELECT status, COUNT(*) AS n FROM special_orders GROUP BY status').all();
     const byStatus = {};
     for (const r of byStatusRows) byStatus[r.status] = Number(r.n);
@@ -439,6 +821,14 @@ export function createSpecialOrdersRouter({
       WHERE expected_date IS NOT NULL AND expected_date < date('now')
       AND status IN (${OVERDUE_OPEN.map(() => '?').join(',')})`).get(...OVERDUE_OPEN).n;
 
+    // Alertes : combien de commandes portent chaque type, et combien réclament une action.
+    const alerts = Object.fromEntries(ALERT_KEYS.map((k) => [k, 0]));
+    let actionRequired = 0;
+    for (const list of alertMap.values()) {
+      for (const a of list) alerts[a.key] += 1;
+      if (needsAction(list)) actionRequired += 1;
+    }
+
     return {
       total: Number(total),
       pending: count(IN_PROGRESS),          // « en cours de traitement »
@@ -451,6 +841,8 @@ export function createSpecialOrdersRouter({
       collected: Number(collected),
       balanceDue,
       byStatus,
+      alerts,
+      actionRequired,
     };
   }
 
@@ -497,22 +889,32 @@ export function createSpecialOrdersRouter({
         for (const l of lines) insLine.run(orderId, l.product_id, l.isbn, l.title, l.author, l.quantity, l.unit_price, l.line_total);
         db.prepare('INSERT INTO special_order_status_history (order_id, from_status, to_status, actor_username, comment) VALUES (?,?,?,?,?)')
           .run(orderId, null, 'registered', username, 'Commande spéciale enregistrée');
+        let paymentRowId = null;
         if (initialPayment > 0) {
-          db.prepare(`INSERT INTO special_order_payments (order_id, amount, method, reference, note, received_by) VALUES (?,?,?,?,?,?)`)
+          const p = db.prepare(`INSERT INTO special_order_payments (order_id, amount, method, reference, note, received_by) VALUES (?,?,?,?,?,?)`)
             .run(orderId, initialPayment, PAYMENT_METHODS.includes(b.payment_method) ? b.payment_method : 'cash',
               String(b.payment_reference || '').trim().slice(0, 120) || null, 'Règlement à la commande', username);
+          paymentRowId = p.lastInsertRowid;
         }
-        return { orderId, ref };
+        return { orderId, ref, paymentRowId };
       });
 
-      const { orderId, ref } = create();
+      const { orderId, ref, paymentRowId } = create();
       logActivity(username, 'special_order_created', { id: orderId, ref, total: totalAmount, lines: lines.length });
+
+      // Le règlement à la commande (acompte) entre au livre comptable : c'est là que
+      // naissent le tiers et la facture de la commande.
+      let warning;
+      if (paymentRowId) {
+        const acc = await accountPayment(orderId, paymentRowId);
+        if (!acc.ok) warning = "Commande créée et acompte encaissé, mais son écriture comptable a échoué. Le règlement est signalé « Hors livre comptable » et peut être rejoué depuis la fiche.";
+      }
 
       // Confirmation client (best-effort) — ne bloque pas la réponse.
       const row = getRow(orderId);
       notifyOrder(row, 'order_confirmation').catch((e) => console.error('[SPECIAL-ORDERS] notify create:', e.message));
 
-      res.status(201).json({ id: orderId, ref });
+      res.status(201).json({ id: orderId, ref, warning });
     } catch (err) {
       console.error('[SPECIAL-ORDERS] create error:', err.message);
       res.status(500).json({ error: 'Erreur création commande spéciale' });
@@ -626,9 +1028,77 @@ export function createSpecialOrdersRouter({
   });
 
   // ═══════════════════════════════════════════════════════════
+  // CONFIRMATION DE LIVRAISON
+  // ═══════════════════════════════════════════════════════════
+  // Consigne Direction (2026-07-14) : quand l'argent est encaissé mais que le livre
+  // n'est ni disponible ni sorti d'impression, l'équipe doit pouvoir constater la
+  // remise au client dès qu'elle a lieu — sans dérouler le workflow étape par étape
+  // (dans les faits, personne ne le déroule : l'audit montre que les statuts
+  // intermédiaires ne sont jamais utilisés).
+  //
+  // La livraison est un FAIT : on l'autorise même avec un solde impayé, mais jamais
+  // par accident — le client doit confirmer explicitement (force: true), et la
+  // commande reste alors signalée « Solde impayé » jusqu'à l'encaissement.
+  //
+  // Livrer, c'est aussi réaliser la vente : la facture est créée si elle ne l'est pas
+  // encore (commande remise sans le moindre acompte), de sorte qu'aucun livre ne sorte
+  // du magasin sans exister au livre comptable — même en créance.
+  router.post('/:id/deliver', auth, noCsrf, async (req, res) => {
+    try {
+      const row = getRow(req.params.id);
+      if (!row) return res.status(404).json({ error: 'Commande introuvable' });
+      if (row.status === 'cancelled') return res.status(409).json({ error: 'Commande annulée — livraison impossible' });
+      if (['picked_up', 'closed'].includes(row.status)) {
+        return res.status(409).json({ error: 'Cette commande est déjà livrée' });
+      }
+
+      const { balance } = computeTotals(row.id, row.total_amount);
+      if (balance > 0.01 && !req.body?.force) {
+        return res.status(409).json({
+          error: `Il reste ${fmtMoney(balance)} à payer sur cette commande.`,
+          requiresConfirmation: true,
+          balance,
+        });
+      }
+
+      const username = req.admin?.username || 'admin';
+      const comment = String(req.body?.comment || '').trim().slice(0, 1000)
+        || (balance > 0.01 ? `Livraison confirmée avec ${fmtMoney(balance)} restant dus` : 'Livraison confirmée');
+
+      // La vente doit exister en comptabilité, même si le client n'a rien versé.
+      let warning;
+      try {
+        await ensureOrderInvoice(getRow(row.id));
+      } catch (err) {
+        const detail = err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message;
+        console.error(`[SPECIAL-ORDERS] facture à la livraison ${row.ref} échouée:`, detail);
+        warning = "Livraison confirmée, mais la facture n'a pas pu être créée dans la comptabilité.";
+      }
+
+      db.transaction(() => {
+        db.prepare(`UPDATE special_orders SET status = 'picked_up', delivered_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(row.id);
+        db.prepare('INSERT INTO special_order_status_history (order_id, from_status, to_status, actor_username, comment) VALUES (?,?,?,?,?)')
+          .run(row.id, row.status, 'picked_up', username, comment);
+      })();
+      logActivity(username, 'special_order_delivered', { id: row.id, ref: row.ref, from: row.status, balance });
+
+      const updated = getRow(row.id);
+      await notifyOrder(updated, 'pickup_confirmation').catch((e) => console.error('[SPECIAL-ORDERS] notify deliver:', e.message));
+
+      const dto = orderToDto(getRow(row.id), { withChildren: true });
+      if (warning) dto.warning = warning;
+      res.json(dto);
+    } catch (err) {
+      console.error('[SPECIAL-ORDERS] deliver error:', err.message);
+      res.status(500).json({ error: 'Erreur confirmation de livraison' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // PAIEMENTS (acompte / tranches)
   // ═══════════════════════════════════════════════════════════
-  router.post('/:id/payments', auth, noCsrf, (req, res) => {
+  router.post('/:id/payments', auth, noCsrf, async (req, res) => {
     try {
       const row = getRow(req.params.id);
       if (!row) return res.status(404).json({ error: 'Commande introuvable' });
@@ -641,21 +1111,52 @@ export function createSpecialOrdersRouter({
       }
       const method = PAYMENT_METHODS.includes(req.body?.method) ? req.body.method : 'cash';
       const username = req.admin?.username || 'admin';
-      db.prepare(`INSERT INTO special_order_payments (order_id, amount, method, reference, note, received_by) VALUES (?,?,?,?,?,?)`)
+      const ins = db.prepare(`INSERT INTO special_order_payments (order_id, amount, method, reference, note, received_by) VALUES (?,?,?,?,?,?)`)
         .run(row.id, amount, method,
           String(req.body?.reference || '').trim().slice(0, 120) || null,
           String(req.body?.note || '').trim().slice(0, 300) || null,
           username);
       db.prepare('UPDATE special_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(row.id);
       logActivity(username, 'special_order_payment', { id: row.id, ref: row.ref, amount, method });
-      res.status(201).json(orderToDto(getRow(row.id), { withChildren: true }));
+
+      // Consigne Direction : l'encaissement doit entrer au livre comptable.
+      const acc = await accountPayment(row.id, ins.lastInsertRowid);
+
+      const dto = orderToDto(getRow(row.id), { withChildren: true });
+      if (!acc.ok) {
+        dto.warning = "Règlement encaissé, mais son écriture comptable a échoué. Il est signalé « Hors livre comptable » et peut être rejoué.";
+      }
+      res.status(201).json(dto);
     } catch (err) {
       console.error('[SPECIAL-ORDERS] payment error:', err.message);
       res.status(500).json({ error: 'Erreur enregistrement paiement' });
     }
   });
 
-  // Suppression d'un paiement (correction de saisie).
+  // Rejeu de l'écriture comptable d'un règlement resté hors du livre.
+  router.post('/:id/payments/:paymentId/account', auth, noCsrf, async (req, res) => {
+    try {
+      const row = getRow(req.params.id);
+      if (!row) return res.status(404).json({ error: 'Commande introuvable' });
+      const pay = db.prepare('SELECT * FROM special_order_payments WHERE id = ? AND order_id = ?')
+        .get(parseInt(req.params.paymentId, 10), row.id);
+      if (!pay) return res.status(404).json({ error: 'Paiement introuvable' });
+      if (pay.dolibarr_payment_id) return res.status(409).json({ error: 'Ce règlement est déjà au livre comptable' });
+
+      const acc = await accountPayment(row.id, pay.id);
+      if (!acc.ok) return res.status(502).json({ error: `Comptabilisation impossible : ${acc.error}` });
+      logActivity(req.admin?.username || 'admin', 'special_order_payment_accounted', { id: row.id, ref: row.ref, amount: pay.amount });
+      res.json(orderToDto(getRow(row.id), { withChildren: true }));
+    } catch (err) {
+      console.error('[SPECIAL-ORDERS] account payment error:', err.message);
+      res.status(500).json({ error: 'Erreur comptabilisation' });
+    }
+  });
+
+  // Suppression d'un paiement (correction de saisie). Un règlement déjà porté au
+  // livre comptable ne s'efface pas d'un clic : le supprimer ici le laisserait vivant
+  // dans Dolibarr et ferait diverger la caisse de la compta. La correction passe par
+  // le module Factures, qui sait défaire proprement un paiement Dolibarr.
   router.delete('/:id/payments/:paymentId', auth, noCsrf, (req, res) => {
     try {
       const row = getRow(req.params.id);
@@ -663,6 +1164,11 @@ export function createSpecialOrdersRouter({
       const pay = db.prepare('SELECT * FROM special_order_payments WHERE id = ? AND order_id = ?')
         .get(parseInt(req.params.paymentId, 10), row.id);
       if (!pay) return res.status(404).json({ error: 'Paiement introuvable' });
+      if (pay.dolibarr_payment_id) {
+        return res.status(409).json({
+          error: `Ce règlement est enregistré au livre comptable${row.invoice_ref ? ` (facture ${row.invoice_ref})` : ''}. Corrigez-le depuis le module Factures pour que caisse et comptabilité restent d'accord.`,
+        });
+      }
       db.prepare('DELETE FROM special_order_payments WHERE id = ?').run(pay.id);
       db.prepare('UPDATE special_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(row.id);
       logActivity(req.admin?.username || 'admin', 'special_order_payment_deleted', { id: row.id, ref: row.ref, amount: pay.amount });
@@ -691,6 +1197,42 @@ export function createSpecialOrdersRouter({
     } catch (err) {
       console.error('[SPECIAL-ORDERS] notify error:', err.message);
       res.status(500).json({ error: 'Erreur envoi notification' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // CONTACT MANUEL — l'équipe a joint le client de vive voix
+  // ═══════════════════════════════════════════════════════════
+  // Tant que le SMS et WhatsApp ne sont pas branchés, le client est prévenu par
+  // téléphone. Sans trace, ce travail est invisible : le module croit le client
+  // jamais joint et l'alerte « Client à prévenir » ne s'éteint jamais. Tracer
+  // l'appel vaut donc notification aboutie.
+  router.post('/:id/contacts', auth, noCsrf, (req, res) => {
+    try {
+      const row = getRow(req.params.id);
+      if (!row) return res.status(404).json({ error: 'Commande introuvable' });
+
+      const channel = MANUAL_CHANNELS.includes(req.body?.channel) ? req.body.channel : 'phone';
+      const ALLOWED_EVENTS = ['order_confirmation', 'validated', 'in_processing', 'available', 'balance_reminder', 'pickup_confirmation'];
+      const event = ALLOWED_EVENTS.includes(req.body?.event) ? req.body.event : 'available';
+      const outcome = ['reached', 'no_answer'].includes(req.body?.outcome) ? req.body.outcome : 'reached';
+      const note = String(req.body?.note || '').trim().slice(0, 300) || null;
+      const username = req.admin?.username || 'admin';
+
+      // Un appel sans réponse est tracé mais ne vaut pas contact : l'alerte reste allumée.
+      const status = outcome === 'reached' ? 'sent' : 'failed';
+      const detail = outcome === 'reached'
+        ? (note || 'Client joint et informé')
+        : `Sans réponse${note ? ` — ${note}` : ''}`;
+
+      logNotif(row.id, channel, event, row.customer_phone || row.customer_email || null, status, detail, username);
+      db.prepare('UPDATE special_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(row.id);
+      logActivity(username, 'special_order_contact', { id: row.id, ref: row.ref, channel, event, outcome });
+
+      res.status(201).json(orderToDto(getRow(row.id), { withChildren: true }));
+    } catch (err) {
+      console.error('[SPECIAL-ORDERS] contact error:', err.message);
+      res.status(500).json({ error: 'Erreur enregistrement du contact' });
     }
   });
 

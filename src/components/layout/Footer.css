@@ -180,3 +180,12 @@
 .footer-copyright strong {
   color: rgba(255, 255, 255, 0.7);
 }
+
+.footer-copyright a {
+  text-decoration: none;
+}
+
+.footer-copyright a:hover strong {
+  color: #fff;
+  text-decoration: underline;
+}

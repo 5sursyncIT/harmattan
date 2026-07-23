@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync } from 'fs';
-import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS, logManuscriptEvent } from './manuscript-workflow.js';
-import { notifyTransition, sendAssignmentEmail } from './manuscript-emails.js';
+import { existsSync, unlinkSync } from 'fs';
+import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS, logManuscriptEvent, promoteLatestCorrectionAsAuthorFinal } from './manuscript-workflow.js';
+import { notifyTransition, sendAssignmentEmail, sendAuthorRevisionRequestEmail } from './manuscript-emails.js';
 import { revokeFileTokens } from './manuscript-file-tokens.js';
+import { addManuscriptVersion, getFinalVersion, createDepositToken, getActiveDepositToken, revokeDepositTokens } from './manuscript-versions.js';
 import { createManuscriptMulter } from './author-routes.js';
 import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS } from './intervenants.js';
 
@@ -12,6 +13,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
 
 const UPLOAD_CFG = {
+  // Texte du manuscrit (chaîne de versions) : mêmes formats que le dépôt auteur.
+  original: { sizeMB: 20, pattern: /\.(pdf|doc|docx|odt|rtf)$/i },
   evaluation_report: { sizeMB: 20, pattern: /\.(pdf|doc|docx|odt)$/i },
   correction: { sizeMB: 20, pattern: /\.(pdf|doc|docx|odt)$/i },
   cover_artwork: { sizeMB: 50, pattern: /\.(pdf|ai|psd|indd|jpg|jpeg|png)$/i },
@@ -22,6 +25,55 @@ const UPLOAD_CFG = {
 function multerFor(kind) {
   const cfg = UPLOAD_CFG[kind];
   return createManuscriptMulter(kind, cfg.sizeMB, cfg.pattern);
+}
+
+// ─── DOSSIER DE PRODUCTION ÉDITORIALE ─────────────────────────
+// Une fois la correction terminée, l'administration constitue le dossier que
+// l'équipe de production reprendra : texte définitif mis en page, éléments de
+// couverture, illustrations intérieures, annexes. Le seul upload disponible
+// jusqu'ici était le document corrigé (kind 'correction'), en un exemplaire et
+// limité au traitement de texte — impossible d'y joindre une maquette InDesign
+// ou des visuels HD.
+const PRODUCTION_FILE_KINDS = {
+  production_text: {
+    label: 'Texte définitif / mise en page',
+    sizeMB: 100,
+    ext: ['pdf', 'doc', 'docx', 'odt', 'rtf', 'indd', 'idml', 'zip'],
+  },
+  production_cover: {
+    label: 'Éléments de couverture',
+    sizeMB: 100,
+    ext: ['pdf', 'ai', 'psd', 'indd', 'idml', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'svg', 'zip'],
+  },
+  production_illustration: {
+    label: 'Illustrations & images intérieures',
+    sizeMB: 100,
+    ext: ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'pdf', 'eps', 'svg', 'zip'],
+  },
+  production_annex: {
+    label: 'Annexes (préface, 4e de couverture, biographie…)',
+    sizeMB: 50,
+    ext: ['pdf', 'doc', 'docx', 'odt', 'rtf', 'txt'],
+  },
+  production_other: {
+    label: 'Autre document de production',
+    sizeMB: 100,
+    ext: ['pdf', 'doc', 'docx', 'odt', 'rtf', 'txt', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'zip'],
+  },
+};
+
+// Nombre de fichiers acceptés en une fois (un dossier de production complet tient
+// largement dedans ; au-delà, l'admin envoie une archive zip ou un second lot).
+const PRODUCTION_UPLOAD_MAX_FILES = 15;
+
+function extPattern(ext) {
+  return new RegExp(`\\.(${ext.join('|')})$`, 'i');
+}
+
+// Libellé lisible d'un type de fichier, pour la frise et les listes.
+function fileKindLabel(kind) {
+  if (PRODUCTION_FILE_KINDS[kind]) return PRODUCTION_FILE_KINDS[kind].label;
+  return { correction: 'Document corrigé', original: 'Manuscrit original' }[kind] || kind;
 }
 
 function describeManuscript(row) {
@@ -226,7 +278,8 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
 
     res.json({
       manuscript: describeManuscript(manuscript),
-      files,
+      // kind_label : la fiche affichait le code brut (« production_cover »).
+      files: files.map((f) => ({ ...f, kind_label: fileKindLabel(f.kind) })),
       stages: stages.map((s) => ({
         ...s,
         stage_label: s.event
@@ -237,6 +290,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       validations,
       series,
       contract,
+      // Lien de dépôt auteur encore actif (demande de révision en cours), pour
+      // l'affichage sur la carte « Fichier manuscrit ».
+      deposit_request: getActiveDepositToken(db, manuscript.id) || null,
     });
   });
 
@@ -302,6 +358,11 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
     // Dépôt par lien externe (> 20 Mo) : pas de fichier local, on redirige.
     if (file.external_url) return res.redirect(file.external_url);
+    // Version intermédiaire dont le binaire a été purgé par la rétention :
+    // la ligne (métadonnées + empreinte) reste, le fichier n'existe plus.
+    if (file.binary_purged) {
+      return res.status(410).json({ error: 'Version archivée : le fichier a été purgé par la rétention (seules la première version, les plus récentes et les jalons restent téléchargeables).' });
+    }
     if (!existsSync(file.file_path)) return res.status(404).json({ error: 'Fichier introuvable sur le serveur' });
     res.download(file.file_path, file.file_name);
   });
@@ -486,6 +547,181 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     }
   });
 
+  // Micro-corrections de la fiche (titre, sous-titre, genre, synopsis) —
+  // typiquement une faute de frappe de l'auteur. Ne touche PAS au fichier du
+  // manuscrit ni au stage : on corrige la forme, pas le fond. Chaque champ
+  // modifié est tracé dans la frise (ancienne → nouvelle valeur), aucun email.
+  router.put('/manuscripts/v2/:id/details', auth, editorOnly, csrfProtection, (req, res) => {
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+
+    const EDITABLE = { title: 'Titre', subtitle: 'Sous-titre', genre: 'Genre', synopsis: 'Synopsis' };
+    const clip = (v) => {
+      const s = String(v ?? '').trim();
+      return s.length > 120 ? s.slice(0, 117) + '…' : (s || '—');
+    };
+    const cols = [];
+    const values = [];
+    const changes = [];
+    for (const [col, label] of Object.entries(EDITABLE)) {
+      if (!(col in (req.body || {}))) continue; // champ non soumis = inchangé
+      const next = String(req.body[col] ?? '').trim() || null;
+      if (col === 'title' && !next) return res.status(400).json({ error: 'Le titre ne peut pas être vide' });
+      if ((manuscript[col] || null) === next) continue;
+      cols.push(`${col} = ?`);
+      values.push(next);
+      changes.push(`${label} : « ${clip(manuscript[col])} » → « ${clip(next)} »`);
+    }
+    if (!cols.length) return res.status(400).json({ error: 'Aucune modification' });
+
+    db.prepare(`UPDATE manuscripts SET ${cols.join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .run(...values, manuscript.id);
+    logManuscriptEvent(db, manuscript.id, 'details_updated',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      changes.join(' · '));
+
+    const updated = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(manuscript.id);
+    res.json({ success: true, manuscript: describeManuscript(updated) });
+  });
+
+  // ─── VERSIONNAGE DU FICHIER MANUSCRIT ─────────────────────
+  // Dépôt d'une nouvelle version du texte par l'administration — possible à
+  // N'IMPORTE QUELLE étape du workflow : les allers-retours direction ↔ auteur
+  // ne sont pas alignés sur la machine à états (une version révisée peut
+  // arriver par email pendant l'évaluation comme pendant la correction).
+  // Seul verrou : la version définitive arrêtée (à déverrouiller d'abord).
+  router.post('/manuscripts/v2/:id/manuscript-version',
+    auth, editorOnly, csrfProtection,
+    multerFor('original').single('file'),
+    (req, res) => {
+      if (!req.file) return res.status(400).json({ error: 'Fichier requis (PDF, DOC, DOCX, ODT ou RTF — max 20 Mo)' });
+      const cleanup = () => { try { unlinkSync(req.file.path); } catch (e) { void e; } };
+      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+      if (!manuscript) { cleanup(); return res.status(404).json({ error: 'Manuscrit introuvable' }); }
+      const final = getFinalVersion(db, manuscript.id, 'original');
+      if (final) {
+        cleanup();
+        return res.status(409).json({ error: `La version définitive (v${final.version}) est arrêtée : déverrouillez-la avant de déposer une nouvelle version.` });
+      }
+      const note = String(req.body?.note || '').trim().slice(0, 1000) || null;
+      try {
+        const result = addManuscriptVersion(db, {
+          manuscriptId: manuscript.id,
+          file: req.file,
+          actor: { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+          uploadedByRole: req.admin.role,
+          uploadedById: req.admin.id,
+          note,
+          eventNote: (v) => `Manuscrit v${v} déposé par l'administration — ${req.file.originalname}${note ? ` · ${note}` : ''}`,
+        });
+        res.json({ success: true, version: result.version });
+      } catch (err) {
+        if (err.code === 'DUPLICATE_VERSION') return res.status(409).json({ error: err.message });
+        console.error('[VERSIONS] admin upload error:', err.message);
+        cleanup();
+        res.status(500).json({ error: 'Erreur lors du dépôt de la version' });
+      }
+    });
+
+  // Demande de révision à l'auteur : envoie un lien de dépôt tokenisé (sans
+  // connexion) où l'auteur télécharge la version courante et dépose la révisée.
+  // Un seul lien vivant à la fois (le nouveau révoque l'ancien).
+  router.post('/manuscripts/v2/:id/request-author-revision', auth, editorOnly, csrfProtection, (req, res) => {
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    const final = getFinalVersion(db, manuscript.id, 'original');
+    if (final) {
+      return res.status(409).json({ error: `La version définitive (v${final.version}) est arrêtée : plus de révision possible sans déverrouillage.` });
+    }
+    const author = db.prepare('SELECT id, email, firstname, lastname FROM authors WHERE id = ?').get(manuscript.author_id);
+    if (!author?.email) return res.status(400).json({ error: 'L\'auteur n\'a pas d\'adresse email' });
+    const message = String(req.body?.message || '').trim().slice(0, 2000) || null;
+    const ttlDays = 14;
+    const token = createDepositToken(db, {
+      manuscriptId: manuscript.id, createdById: req.admin.id, message, ttlDays,
+    });
+    const depositUrl = `${siteUrl || ''}/manuscrit/depot/${token}`;
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    logManuscriptEvent(db, manuscript.id, 'revision_requested', actor,
+      message ? `Message à l'auteur : ${message.length > 180 ? message.slice(0, 177) + '…' : message}` : 'Lien de dépôt envoyé à l\'auteur');
+    // Frise « e-mail envoyé » écrite après confirmation SMTP (même règle que
+    // notifyTransition : pas de trace d'envoi si le SMTP a échoué).
+    sendAuthorRevisionRequestEmail(transporter, manuscript, author, { depositUrl, message, ttlDays })
+      .then((info) => {
+        if (!info) return;
+        try {
+          logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+            `Demande de révision → auteur (${author.email})`);
+        } catch (e) { console.warn('[VERSIONS] log email_sent warning:', e.message); }
+      });
+    res.json({ success: true, expires_days: ttlDays, deposit_request: getActiveDepositToken(db, manuscript.id) });
+  });
+
+  // Marque une version du texte comme DÉFINITIVE : la chaîne est verrouillée
+  // (plus aucun dépôt admin ou auteur), les liens de dépôt actifs sont révoqués.
+  // C'est ce fichier qui part en production. Admins uniquement.
+  router.post('/manuscripts/v2/:id/files/:fileId/final', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Marquage de la version définitive réservé aux administrateurs' });
+    }
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ?')
+      .get(req.params.fileId, manuscript.id);
+    if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
+    if (file.kind !== 'original') {
+      return res.status(400).json({ error: 'Seule une version du texte du manuscrit peut être marquée définitive' });
+    }
+    if (file.binary_purged) {
+      return res.status(400).json({ error: 'Cette version a été purgée par la rétention : son fichier n\'existe plus' });
+    }
+    db.transaction(() => {
+      db.prepare(`UPDATE manuscript_files SET is_final = 0 WHERE manuscript_id = ? AND kind = 'original'`).run(manuscript.id);
+      db.prepare('UPDATE manuscript_files SET is_final = 1 WHERE id = ?').run(file.id);
+    })();
+    const revoked = revokeDepositTokens(db, manuscript.id);
+    if (revoked) console.log(`[VERSIONS] ${revoked} lien(s) de dépôt révoqué(s) (version définitive, manuscrit #${manuscript.id})`);
+    logManuscriptEvent(db, manuscript.id, 'file_final_marked',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      `v${file.version} — ${file.file_name}`);
+    res.json({ success: true });
+  });
+
+  // Déverrouille la version définitive (motif obligatoire, tracé) pour rouvrir
+  // les dépôts — ex. une coquille découverte après l'arrêt du texte.
+  router.delete('/manuscripts/v2/:id/files/:fileId/final', auth, csrfProtection, (req, res) => {
+    if (!['super_admin', 'admin'].includes(req.admin.role)) {
+      return res.status(403).json({ error: 'Déverrouillage réservé aux administrateurs' });
+    }
+    const reason = String(req.body?.reason || '').trim();
+    if (reason.length < 3) return res.status(400).json({ error: 'Motif du déverrouillage requis' });
+    const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ? AND is_final = 1')
+      .get(req.params.fileId, req.params.id);
+    if (!file) return res.status(404).json({ error: 'Version définitive introuvable' });
+    db.prepare('UPDATE manuscript_files SET is_final = 0 WHERE id = ?').run(file.id);
+    logManuscriptEvent(db, file.manuscript_id, 'file_final_unlocked',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      `v${file.version} — motif : ${reason}`);
+    res.json({ success: true });
+  });
+
+  // Marque/démarque une version comme JALON : protégée de la purge de rétention
+  // (ex. la version évaluée par le comité, la version corrigée validée).
+  router.post('/manuscripts/v2/:id/files/:fileId/milestone', auth, editorOnly, csrfProtection, (req, res) => {
+    const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ?')
+      .get(req.params.fileId, req.params.id);
+    if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
+    const flag = req.body?.is_milestone ? 1 : 0;
+    if (flag && file.binary_purged) {
+      return res.status(400).json({ error: 'Cette version a déjà été purgée : impossible de la marquer jalon' });
+    }
+    db.prepare('UPDATE manuscript_files SET is_milestone = ? WHERE id = ?').run(flag, file.id);
+    logManuscriptEvent(db, file.manuscript_id, 'file_milestone',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      `v${file.version} ${flag ? 'marquée jalon (protégée de la purge)' : 'retirée des jalons'} — ${file.file_name}`);
+    res.json({ success: true });
+  });
+
   // ─── ÉVALUATIONS ─────────────────────────────────────────
   router.get('/evaluations', auth, (req, res) => {
     let sql = `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name
@@ -537,9 +773,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         note: `Verdict : ${verdict}${recommendation ? ' — ' + recommendation : ''}`,
       });
       // Option : joindre le rapport de lecture qui vient d'être déposé à l'email
-      // d'acceptation envoyé à l'auteur (uniquement si verdict favorable + fichier fourni).
-      const attachEvaluationReport = verdict === 'positive'
-        && !!req.file
+      // envoyé à l'auteur, quel que soit le verdict (favorable, à retravailler ou
+      // défavorable) — dès lors qu'un fichier est fourni et la case cochée.
+      const attachEvaluationReport = !!req.file
         && ['1', 'true', 'on', 'yes'].includes(String(req.body.attach_report || '').toLowerCase());
       notifyTransition(db, transporter, updated, nextStage, actor, siteUrl, { attachEvaluationReport });
 
@@ -588,6 +824,134 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         `Document corrigé v${version} — ${req.file.originalname}`);
       res.json({ success: true, version });
     });
+
+  // Types de documents acceptés dans le dossier de production — servis au front
+  // pour que la liste ne soit jamais dupliquée des deux côtés.
+  router.get('/corrections/production-file-kinds', auth, (req, res) => {
+    res.json(Object.entries(PRODUCTION_FILE_KINDS).map(([value, cfg]) => ({
+      value,
+      label: cfg.label,
+      max_mb: cfg.sizeMB,
+      accept: cfg.ext.map(e => `.${e}`).join(','),
+    })));
+  });
+
+  // Fichiers déjà déposés sur le manuscrit (dossier en cours de constitution).
+  router.get('/corrections/:manuscriptId/files', auth, (req, res) => {
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    const files = db.prepare(
+      `SELECT id, kind, version, file_name, file_size, external_url, uploaded_at, uploaded_by_role
+       FROM manuscript_files WHERE manuscript_id = ? ORDER BY uploaded_at DESC, id DESC`
+    ).all(manuscript.id);
+    res.json(files.map(f => ({ ...f, kind_label: fileKindLabel(f.kind) })));
+  });
+
+  // Dépôt de plusieurs fichiers d'un même type. Le type voyage dans l'URL et non
+  // dans le corps : multer doit connaître ses limites AVANT de parser le
+  // multipart, or req.body n'existe pas encore à ce moment-là.
+  router.post('/corrections/:manuscriptId/production-files/:kind',
+    auth,
+    csrfProtection,
+    (req, res, next) => {
+      const cfg = PRODUCTION_FILE_KINDS[req.params.kind];
+      if (!cfg) return res.status(400).json({ error: 'Type de document inconnu' });
+      const upload = createManuscriptMulter(req.params.kind, cfg.sizeMB, extPattern(cfg.ext))
+        .array('files', PRODUCTION_UPLOAD_MAX_FILES);
+      upload(req, res, (err) => {
+        if (!err) return next();
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: `Fichier trop volumineux (max ${cfg.sizeMB} Mo)` });
+        }
+        if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+          return res.status(400).json({ error: `Maximum ${PRODUCTION_UPLOAD_MAX_FILES} fichiers par envoi` });
+        }
+        return res.status(400).json({ error: err.message || 'Fichier invalide' });
+      });
+    },
+    (req, res) => {
+      const cfg = PRODUCTION_FILE_KINDS[req.params.kind];
+      const files = req.files || [];
+      if (!files.length) return res.status(400).json({ error: 'Aucun fichier reçu' });
+      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+      if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+
+      const last = db.prepare(
+        'SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = ?'
+      ).get(manuscript.id, req.params.kind);
+      let version = last?.v || 0;
+
+      const insert = db.prepare(
+        `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const saved = db.transaction(() => files.map((f) => {
+        version += 1;
+        insert.run(manuscript.id, req.params.kind, version, f.path, f.originalname,
+          f.size || null, f.mimetype || null, req.admin.role, req.admin.id);
+        return { file_name: f.originalname, version };
+      }))();
+
+      logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+        { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+        `Dossier de production — ${cfg.label} : ${saved.map(s => s.file_name).join(', ')}`);
+      res.json({ success: true, uploaded: saved.length, files: saved });
+    });
+
+  // Dépôt par lien externe : une maquette InDesign packagée ou un lot d'images HD
+  // dépasse vite la limite d'upload. Même mécanisme que les manuscrits > 20 Mo —
+  // file_path porte l'URL, external_url signale au téléchargement de rediriger.
+  router.post('/corrections/:manuscriptId/production-link', auth, csrfProtection, (req, res) => {
+    const kind = String(req.body?.kind || '');
+    const url = String(req.body?.url || '').trim();
+    const label = String(req.body?.label || '').trim();
+    if (!PRODUCTION_FILE_KINDS[kind]) return res.status(400).json({ error: 'Type de document inconnu' });
+    if (!/^https?:\/\/.+/i.test(url)) return res.status(400).json({ error: 'Lien invalide (http:// ou https://)' });
+    if (url.length > 2000) return res.status(400).json({ error: 'Lien trop long' });
+
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+
+    const last = db.prepare(
+      'SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = ?'
+    ).get(manuscript.id, kind);
+    const version = (last?.v || 0) + 1;
+    const name = label || `Lien externe — ${PRODUCTION_FILE_KINDS[kind].label}`;
+    db.prepare(
+      `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, uploaded_by_role, uploaded_by_id, external_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(manuscript.id, kind, version, url, name, req.admin.role, req.admin.id, url);
+
+    logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      `Dossier de production — ${PRODUCTION_FILE_KINDS[kind].label} (lien externe) : ${name}`);
+    res.json({ success: true });
+  });
+
+  // Retrait d'une pièce déposée par erreur. Le fichier corrigé validé
+  // (kind 'correction'/'author_final') n'est pas concerné : il conditionne le
+  // passage en production et se remplace par une nouvelle version.
+  router.delete('/corrections/:manuscriptId/production-files/:fileId', auth, csrfProtection, (req, res) => {
+    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ?')
+      .get(req.params.fileId, manuscript.id);
+    if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
+    if (!PRODUCTION_FILE_KINDS[file.kind]) {
+      return res.status(400).json({ error: 'Seules les pièces du dossier de production peuvent être retirées' });
+    }
+    db.prepare('DELETE FROM manuscript_files WHERE id = ?').run(file.id);
+    // Le fichier sur disque est conservé : la frise référence le dépôt, et une
+    // suppression physique rendrait l'historique inexploitable.
+    logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      `Dossier de production — pièce retirée : ${file.file_name}`);
+    res.json({ success: true });
+  });
 
   router.post('/corrections/:manuscriptId/submit-to-author', auth, csrfProtection, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
@@ -648,6 +1012,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     );
     const nextStage = decision === 'approved' ? 'in_editorial' : 'in_correction';
     const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    if (decision === 'approved') {
+      promoteLatestCorrectionAsAuthorFinal(db, manuscript.id, actor);
+    }
     const note = `Validation correction par l'administration : ${decision}${comment ? ' — ' + comment : ''}`;
     const updated = transition(db, manuscript.id, nextStage, actor, { note });
     // Quand la correction est validée (→ Production éditoriale), l'auteur n'est PAS
@@ -696,6 +1063,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     }
 
     const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    promoteLatestCorrectionAsAuthorFinal(db, manuscript.id, actor);
     const updated = transition(db, manuscript.id, 'in_editorial', actor, {
       note: 'Document corrigé transmis à la Production éditoriale',
       updates,
@@ -717,6 +1085,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   const CORRECTION_VALIDATED_STAGES = [
     'in_editorial', 'editorial_validated', 'cover_design',
     'bat_author_review', 'print_preparation', 'printing', 'printed',
+    'in_communication', 'published',
   ];
   router.post('/corrections/:manuscriptId/notify-author', auth, csrfProtection, (req, res) => {
     if (!['super_admin', 'admin', 'editor', 'production'].includes(req.admin.role)) {
@@ -740,8 +1109,13 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
 
   // ─── ÉDITORIAL ───────────────────────────────────────────
   router.get('/editorial', auth, (req, res) => {
+    // production_files : nombre de pièces du dossier de production constitué en
+    // amont par l'administration. Sans ce compteur, l'équipe ne sait pas, depuis
+    // la liste, si la maquette et les visuels ont été joints.
     const rows = db.prepare(
-      `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name
+      `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name,
+              (SELECT COUNT(*) FROM manuscript_files f
+                WHERE f.manuscript_id = m.id AND f.kind LIKE 'production_%') AS production_files
        FROM manuscripts m JOIN authors a ON a.id = m.author_id
        WHERE m.current_stage IN ('in_editorial', 'editorial_validated')
        ORDER BY m.updated_at DESC`
@@ -856,6 +1230,53 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     sql += ' ORDER BY m.updated_at DESC';
     res.json(db.prepare(sql).all(...params).map(describeManuscript));
   });
+
+  // Upload du PDF prêt à imprimer (kind print_ready) — avant ou pendant la
+  // préparation MO. Sans ce dépôt, l'imprimeur ne reçoit que le BAT/couverture.
+  router.post(
+    '/printing/:manuscriptId/upload-print-ready',
+    auth,
+    csrfProtection,
+    multerFor('print_ready').single('file'),
+    (req, res) => {
+      if (!req.file) return res.status(400).json({ error: 'Fichier PDF prêt à imprimer requis' });
+      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
+      if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!['print_preparation', 'printing'].includes(manuscript.current_stage)) {
+        return res.status(400).json({
+          error: `Upload impossible au stade ${STAGE_LABELS[manuscript.current_stage] || manuscript.current_stage}`,
+        });
+      }
+      const last = db.prepare(
+        `SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = 'print_ready'`
+      ).get(manuscript.id);
+      const version = (last?.v || 0) + 1;
+      db.prepare(
+        `INSERT INTO manuscript_files
+           (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id)
+         VALUES (?, 'print_ready', ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        manuscript.id,
+        version,
+        req.file.path,
+        req.file.originalname || req.file.filename,
+        req.file.size || null,
+        req.file.mimetype || null,
+        req.admin.role,
+        req.admin.id,
+      );
+      const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+      logManuscriptEvent(
+        db,
+        manuscript.id,
+        'file_uploaded',
+        actor,
+        `PDF prêt à imprimer v${version} — ${req.file.originalname || req.file.filename}`,
+      );
+      res.json({ success: true, version });
+    },
+  );
 
   router.post('/printing/:manuscriptId/prepare', auth, csrfProtection, async (req, res) => {
     const { print_qty, isbn } = req.body;

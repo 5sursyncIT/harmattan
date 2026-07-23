@@ -5,7 +5,7 @@ import {
   FiUser, FiShield, FiActivity, FiBookOpen, FiMonitor, FiPackage, FiTruck,
   FiDollarSign, FiBriefcase, FiClipboard, FiEdit3, FiLayers,
   FiPrinter, FiShoppingBag, FiPenTool, FiTag, FiChevronDown, FiRss, FiArchive,
-  FiTrendingDown, FiBookmark, FiInbox,
+  FiTrendingDown, FiBookmark, FiInbox, FiSend,
 } from 'react-icons/fi';
 import { adminLogout, adminMe, getNotificationCounts, adminChangePassword } from '../../api/admin';
 import AdminLogin from './AdminLogin';
@@ -48,6 +48,7 @@ const NAV_GROUPS = [
       { path: 'production', label: 'Production éditoriale', icon: <FiLayers />, roles: ['super_admin', 'admin', 'editor', 'production'] },
       { path: 'printing', label: 'Impression', icon: <FiPrinter />, roles: ['super_admin', 'admin', 'editor'] },
       { path: 'legal-deposits', label: 'Dépôt légal', icon: <FiBookmark />, roles: ['super_admin', 'admin', 'editor', 'gestionnaire_stock'] },
+      { path: 'parutions', label: 'Parutions', icon: <FiSend />, roles: ['super_admin', 'admin', 'editor', 'librarian'] },
       { path: 'contracts', label: 'Contrats', icon: <FiBookOpen />, roles: ['super_admin', 'admin', 'editor', 'comptable'] },
     ],
   },
@@ -123,6 +124,8 @@ const BADGE_KEYS = {
   corrections: 'corrections',
   production: 'production',  // somme éditorial + couvertures (calculée côté client)
   printing: 'printing',
+  'special-orders': 'special_orders',
+  parutions: 'parutions',
 };
 
 const COLLAPSED_KEY = 'admin.nav.collapsed';

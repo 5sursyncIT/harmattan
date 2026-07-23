@@ -57,7 +57,7 @@ export default function EditorialPanel() {
       ) : (
         <table className="ms-table">
           <thead>
-            <tr><th>Réf.</th><th>Titre</th><th>Auteur</th><th>Étape</th><th>Actions</th></tr>
+            <tr><th>Réf.</th><th>Titre</th><th>Auteur</th><th>Dossier</th><th>Étape</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {rows.map((m) => (
@@ -65,6 +65,12 @@ export default function EditorialPanel() {
                 <td>{m.ref}</td>
                 <td>{m.title}</td>
                 <td>{m.author_name}</td>
+                {/* Pièces de production jointes par l'administration après correction. */}
+                <td>
+                  {m.production_files > 0
+                    ? <span className="ms-file-kind">{m.production_files} pièce{m.production_files > 1 ? 's' : ''}</span>
+                    : <span style={{ color: '#9ca3af' }}>—</span>}
+                </td>
                 <td><span className={`ms-stage-badge ms-stage-${m.current_stage}`}>{m.stage_label}</span></td>
                 <td>
                   <button className="ms-btn" onClick={() => navigate(`/admin/manuscripts/${m.id}`)}>Détail</button>

@@ -10,6 +10,8 @@ import rateLimit from 'express-rate-limit';
 import { generateManuscriptRef } from './manuscript-workflow.js';
 import { notifyTransition, notifySeriesSubmission } from './manuscript-emails.js';
 import { ensureAuthorTier } from './author-tier.js';
+import { countSpecialOrderActionsRequired } from './special-orders-routes.js';
+import { countParutionsTodo } from './parutions-routes.js';
 import {
   ROLES,
   validRoles,
@@ -1875,6 +1877,15 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       // Badge dépenses : visible pour admins + comptable uniquement.
       const expenses = ['super_admin', 'admin', 'comptable'].includes(role) ? unackExpenses : 0;
 
+      // Commandes spéciales à traiter (client jamais joint, livre non retiré, solde impayé…).
+      // Le client n'étant pas joignable automatiquement, c'est ce compteur qui porte l'alerte.
+      const specialOrders = ['super_admin', 'admin', 'librarian', 'comptable', 'gestionnaire_stock'].includes(role)
+        ? countSpecialOrderActionsRequired(db) : 0;
+
+      // Parutions dont la checklist commerciale n'est pas complète (relais comm).
+      const parutions = ['super_admin', 'admin', 'editor', 'librarian'].includes(role)
+        ? countParutionsTodo(db) : 0;
+
       res.json({
         messages: unreadMessages,
         payments: pendingPayments,
@@ -1886,10 +1897,12 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         covers,
         printing,
         expenses,
+        special_orders: specialOrders,
+        parutions,
       });
     } catch (err) {
       console.error('Notification counts error:', err.message);
-      res.json({ messages: 0, payments: 0, stock_alerts: 0, manuscripts: 0, evaluations: 0, corrections: 0, editorial: 0, covers: 0, printing: 0, expenses: 0 });
+      res.json({ messages: 0, payments: 0, stock_alerts: 0, manuscripts: 0, evaluations: 0, corrections: 0, editorial: 0, covers: 0, printing: 0, expenses: 0, special_orders: 0, parutions: 0 });
     }
   });
 

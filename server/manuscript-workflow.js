@@ -1,6 +1,7 @@
 /**
  * Moteur du workflow éditorial.
- * Machine à états pour les manuscrits, de la soumission à l'impression.
+ * Machine à états pour les manuscrits, de la soumission à la parution
+ * (impression puis relais commercial : in_communication → published).
  *
  * Exports :
  *  - MANUSCRIPT_STAGES     : liste canonique des stages (ordre d'affichage)
@@ -30,6 +31,8 @@ export const MANUSCRIPT_STAGES = [
   'print_preparation',
   'printing',
   'printed',
+  'in_communication',
+  'published',
 ];
 
 export const STAGE_LABELS = {
@@ -50,6 +53,8 @@ export const STAGE_LABELS = {
   print_preparation: 'Préparation impression',
   printing: 'En impression',
   printed: 'Imprimé',
+  in_communication: 'En communication',
+  published: 'Paru',
 };
 
 /**
@@ -76,10 +81,26 @@ export const MANUSCRIPT_EVENTS = {
   isbn_assigned:     { label: 'ISBN attribué',                  authorVisible: false },
   // Interventions humaines & documents — traçabilité complète demandée par la
   // direction (qui/quand). Réservés à l'admin (authorVisible:false).
+  // Micro-correction de la fiche (titre, sous-titre, genre, synopsis) par un
+  // admin/éditeur — ex. faute de frappe de l'auteur. Ne touche ni au fichier du
+  // manuscrit ni au stage ; l'ancienne et la nouvelle valeur sont dans la note.
+  details_updated:   { label: 'Fiche corrigée',                 authorVisible: false },
   intervenant_assigned:   { label: 'Intervenant affecté', authorVisible: false },
   intervenant_unassigned: { label: 'Intervenant retiré',  authorVisible: false },
   file_uploaded:          { label: 'Document déposé',     authorVisible: false },
   email_sent:             { label: 'E-mail envoyé',       authorVisible: false },
+  // Versionnage du fichier manuscrit : demande de révision envoyée à l'auteur
+  // (lien de dépôt tokenisé), marquage/déverrouillage de la version définitive,
+  // marquage jalon (version protégée de la purge de rétention).
+  revision_requested:     { label: "Révision demandée à l'auteur", authorVisible: true },
+  file_final_marked:      { label: 'Version définitive arrêtée',   authorVisible: false },
+  file_final_unlocked:    { label: 'Version définitive déverrouillée', authorVisible: false },
+  file_milestone:         { label: 'Version jalon',                authorVisible: false },
+  // Relais commercial (module Parutions) : chaque case cochée/décochée de la
+  // checklist de lancement + jalons quand le brief puis la checklist sont complets.
+  comm_checklist:         { label: 'Checklist parution',  authorVisible: false },
+  communication_brief_ready: { label: 'Brief communication prêt', authorVisible: false },
+  launch_prepared:        { label: 'Lancement commercial préparé', authorVisible: false },
 };
 
 export const STAGE_ACTORS = {
@@ -101,7 +122,12 @@ export const STAGE_ACTORS = {
   bat_author_review: 'author',
   print_preparation: 'imprimeur',
   printing: 'imprimeur',
-  printed: 'terminal',
+  // Prolongement demandé par la direction (23/07/2026) : la frise ne s'arrête
+  // plus à l'impression — elle couvre le relais commercial (module Parutions)
+  // jusqu'à la parution effective.
+  printed: 'librarian',
+  in_communication: 'librarian',
+  published: 'terminal',
 };
 
 export const ALLOWED_TRANSITIONS = {
@@ -117,7 +143,9 @@ export const ALLOWED_TRANSITIONS = {
   // retravaillée, on relance l'évaluation ; l'équipe peut aussi trancher
   // directement (accepter ou rejeter) sans nouveau cycle.
   evaluation_rework: [
-    { to: 'in_evaluation', roles: ['evaluateur', 'editor', 'super_admin', 'admin'] },
+    // L'auteur peut relancer le cycle en déposant une version retravaillée
+    // (POST /api/author/manuscripts/:id/submit-rework).
+    { to: 'in_evaluation', roles: ['author', 'evaluateur', 'editor', 'super_admin', 'admin'] },
     { to: 'evaluation_positive', roles: ['editor', 'super_admin', 'admin'] },
     { to: 'evaluation_negative', roles: ['editor', 'super_admin', 'admin'] },
   ],
@@ -174,7 +202,16 @@ export const ALLOWED_TRANSITIONS = {
   printing: [
     { to: 'printed', roles: ['imprimeur', 'editor', 'super_admin', 'admin'] },
   ],
-  printed: [],
+  // Relais commercial : passage manuel (équipe éditoriale/comm) ou automatique
+  // ('system') via la checklist du module Parutions — première action de
+  // lancement cochée → in_communication ; checklist 17/17 → published.
+  printed: [
+    { to: 'in_communication', roles: ['librarian', 'editor', 'production', 'super_admin', 'admin', 'system'] },
+  ],
+  in_communication: [
+    { to: 'published', roles: ['librarian', 'editor', 'production', 'super_admin', 'admin', 'system'] },
+  ],
+  published: [],
 };
 
 export const STAGE_KIND_MAP = {
@@ -191,6 +228,8 @@ export const STAGE_KIND_MAP = {
   print_preparation: 'print_ready',
   printing: 'print_ready',
   printed: 'print_ready',
+  in_communication: 'print_ready',
+  published: 'print_ready',
 };
 
 /**
@@ -303,4 +342,55 @@ export function logManuscriptEvent(db, manuscriptId, eventKey, actor = {}, note 
     note, eventKey,
   );
   return true;
+}
+
+/**
+ * Promouvoir le dernier fichier `correction` en `author_final` (même chemin disque,
+ * nouvelle ligne manuscript_files). Appelé à l'entrée en production éditoriale
+ * pour que STAGE_KIND_MAP / tokens intervenants trouvent le kind attendu.
+ * Idempotent si le même fichier est déjà promu.
+ * @returns {number|null} id du fichier author_final
+ */
+export function promoteLatestCorrectionAsAuthorFinal(db, manuscriptId, actor = {}) {
+  if (!manuscriptId) return null;
+  const src = db.prepare(
+    `SELECT * FROM manuscript_files WHERE manuscript_id = ? AND kind = 'correction'
+     ORDER BY version DESC, uploaded_at DESC LIMIT 1`
+  ).get(manuscriptId);
+  if (!src) return null;
+  const already = db.prepare(
+    `SELECT id FROM manuscript_files
+     WHERE manuscript_id = ? AND kind = 'author_final'
+       AND ((file_path IS NOT NULL AND file_path = ?) OR (external_url IS NOT NULL AND external_url = ?))
+     LIMIT 1`
+  ).get(manuscriptId, src.file_path || '', src.external_url || '');
+  if (already) return already.id;
+
+  const last = db.prepare(
+    `SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = 'author_final'`
+  ).get(manuscriptId);
+  const version = (last?.v || 0) + 1;
+  const info = db.prepare(
+    `INSERT INTO manuscript_files
+       (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id, external_url)
+     VALUES (?, 'author_final', ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    manuscriptId,
+    version,
+    src.file_path || null,
+    src.file_name || null,
+    src.file_size || null,
+    src.mime_type || null,
+    actor.role || 'system',
+    actor.id || null,
+    src.external_url || null,
+  );
+  logManuscriptEvent(
+    db,
+    manuscriptId,
+    'file_uploaded',
+    actor,
+    `Version finale auteur (promue depuis correction v${src.version})`,
+  );
+  return info.lastInsertRowid;
 }

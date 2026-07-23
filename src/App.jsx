@@ -49,6 +49,8 @@ const CGVPage = lazy(() => import('./pages/CGVPage'));
 const MentionsLegalesPage = lazy(() => import('./pages/MentionsLegalesPage'));
 const OrderTrackingPage = lazy(() => import('./pages/OrderTrackingPage'));
 const SeFaireEditerPage = lazy(() => import('./pages/SeFaireEditerPage'));
+// Dépôt public d'une version révisée du manuscrit (lien tokenisé envoyé à l'auteur).
+const ManuscriptDepositPage = lazy(() => import('./pages/ManuscriptDepositPage'));
 const EvenementsPage = lazy(() => import('./pages/EvenementsPage'));
 const ActualitesPage = lazy(() => import('./pages/ActualitesPage'));
 const ActualiteDetailPage = lazy(() => import('./pages/ActualiteDetailPage'));
@@ -104,6 +106,7 @@ const OrdersPanel = lazy(() => import('./pages/admin/panels/OrdersPanel'));
 const SpecialOrdersPanel = lazy(() => import('./pages/admin/panels/SpecialOrdersPanel'));
 const DevisPanel = lazy(() => import('./pages/admin/panels/DevisPanel'));
 const LegalDepositPanel = lazy(() => import('./pages/admin/panels/LegalDepositPanel'));
+const ParutionsPanel = lazy(() => import('./pages/admin/panels/ParutionsPanel'));
 const StockDashboardPanel = lazy(() => import('./pages/admin/panels/StockDashboardPanel'));
 const StockAlertsPanel = lazy(() => import('./pages/admin/panels/StockAlertsPanel'));
 const StockProductsPanel = lazy(() => import('./pages/admin/panels/StockProductsPanel'));
@@ -206,6 +209,7 @@ export default function App() {
             <Route path="special-orders" element={<SpecialOrdersPanel />} />
             <Route path="devis" element={<DevisPanel />} />
             <Route path="legal-deposits" element={<LegalDepositPanel />} />
+            <Route path="parutions" element={<ParutionsPanel />} />
             <Route path="stock" element={<StockDashboardPanel />} />
             <Route path="stock/alerts" element={<StockAlertsPanel />} />
             <Route path="stock/products" element={<StockProductsPanel />} />
@@ -250,6 +254,7 @@ export default function App() {
             <Route path="auteur/preferences" element={<AuthorProtectedRoute><AuthorPreferencesPage /></AuthorProtectedRoute>} />
             <Route path="catalogue" element={<CatalogPage />} />
             <Route path="se-faire-editer" element={<SeFaireEditerPage />} />
+            <Route path="manuscrit/depot/:token" element={<ManuscriptDepositPage />} />
             <Route path="evenements" element={<EvenementsPage />} />
             <Route path="actualites" element={<ActualitesPage />} />
             <Route path="actualites/:slug" element={<ActualiteDetailPage />} />

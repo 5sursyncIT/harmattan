@@ -16,6 +16,9 @@ import { existsSync } from 'fs';
 // préférence (on prend le dernier fichier disponible du premier kind trouvé).
 const ACTOR_FILE_KINDS = {
   in_evaluation: ['original'],
+  // Le comptable élabore le contrat et le devis dès l'évaluation favorable : il
+  // lui faut le texte soumis (pagination, volume) pour chiffrer.
+  evaluation_positive: ['original'],
   in_correction: ['correction', 'original'],
   cover_design: ['author_final', 'correction', 'original'],
   // L'imprimeur est prévenu dès le BAT validé (print_preparation) : mêmes
@@ -51,8 +54,11 @@ export function pickFileForActor(db, manuscriptId, toStage) {
   const kinds = ACTOR_FILE_KINDS[toStage];
   if (!kinds) return null;
   for (const kind of kinds) {
+    // binary_purged : versions intermédiaires dont le binaire a été supprimé
+    // par la rétention (manuscript-versions.js) — plus téléchargeables.
     const file = db.prepare(
       `SELECT * FROM manuscript_files WHERE manuscript_id = ? AND kind = ?
+         AND (binary_purged IS NULL OR binary_purged = 0)
        ORDER BY version DESC, uploaded_at DESC LIMIT 1`
     ).get(manuscriptId, kind);
     if (file) return file;

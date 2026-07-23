@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   FiFileText, FiDollarSign, FiRefreshCw, FiEdit, FiTrash2, FiUser,
   FiCornerUpLeft, FiX, FiAlertTriangle, FiList, FiCalendar, FiPrinter,
-  FiDownload, FiSearch, FiPlusCircle, FiPlus, FiGift, FiLock,
+  FiDownload, FiSearch, FiPlusCircle, FiPlus, FiGift, FiLock, FiSlash,
+  FiCheckCircle,
 } from 'react-icons/fi';
 import {
   listInvoices, getInvoice, getInvoicePdf, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
   payInvoice, createCreditNote, setInvoiceToDraft,
-  reassignInvoiceCustomer, deleteInvoiceDraft,
+  reassignInvoiceCustomer, deleteInvoiceDraft, abandonInvoice,
+  validateInvoice, renegotiateInvoice,
   getCustomerCredits, createDeposit, applyCredit, correctPaymentMethod,
 } from '../../../api/invoices';
 import useAdminRole from '../../../hooks/useAdminRole.js';
@@ -87,6 +89,23 @@ export default function InvoicesPanel() {
     try { const r = await getInvoice(id); setSelected(r.data); }
     catch { toast.error('Erreur chargement facture'); setSelected(null); }
   };
+
+  // Ouverture directe d'une facture depuis une autre page (fiche tiers) :
+  // /admin/invoices?invoice=123. Le détail s'ouvre même si la facture est hors
+  // de la période filtrée par défaut.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkId = searchParams.get('invoice');
+  useEffect(() => {
+    if (!deepLinkId) return;
+    openDetail(parseInt(deepLinkId, 10));
+    // Le paramètre est consommé : un refresh ne rouvre pas la modale.
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.delete('invoice');
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkId]);
 
   const onActionDone = () => { setActionModal(null); reload(); if (selected?.invoice?.id) openDetail(selected.invoice.id); };
 
@@ -360,24 +379,39 @@ function ReportModal({ kind, onClose }) {
 
 // ─── Actions menu par ligne ─────────────────────────────────
 function InvoiceActions({ invoice, onAction }) {
+  const role = useAdminRole();
+  // Réécrire les montants d'une facture émise est un acte de direction (le
+  // backend applique la même règle).
+  const isAdmin = role === 'super_admin' || role === 'admin';
   const actions = useMemo(() => {
     const list = [];
     const isCredit = invoice.type === 2;
+    // Une facture déjà validée garde son numéro même repassée en brouillon : la
+    // supprimer trouerait la séquence, Dolibarr le refuse. On propose l'abandon.
+    const isNumbered = String(invoice.ref || '').slice(1, 5) !== 'PROV';
     if (invoice.status === 0) {
+      list.push({ key: 'validate', label: 'Valider la facture', icon: <FiCheckCircle /> });
       list.push({ key: 'reassign', label: 'Réassigner client', icon: <FiUser /> });
-      list.push({ key: 'delete',   label: 'Supprimer brouillon', icon: <FiTrash2 />, danger: true });
+      if (isNumbered) list.push({ key: 'abandon', label: 'Abandonner', icon: <FiSlash />, danger: true });
+      else list.push({ key: 'delete', label: 'Supprimer brouillon', icon: <FiTrash2 />, danger: true });
     }
     if (invoice.status === 1 && !invoice.paid && !isCredit) {
       list.push({ key: 'pay',          label: 'Encaisser', icon: <FiDollarSign /> });
+      // Renégociation possible tant qu'aucun règlement n'est imputé : au-delà,
+      // réécrire le montant fausserait le lettrage, la voie est l'avoir.
+      if (isAdmin && !(Number(invoice.paid_amount) > 0)) {
+        list.push({ key: 'renegotiate', label: 'Renégocier les montants', icon: <FiEdit /> });
+      }
       list.push({ key: 'apply-credit', label: 'Imputer un acompte / avoir', icon: <FiGift /> });
       list.push({ key: 'settodraft',   label: 'Repasser en brouillon', icon: <FiCornerUpLeft />, danger: true });
       list.push({ key: 'credit-note',  label: 'Créer un avoir', icon: <FiRefreshCw />, danger: true });
+      list.push({ key: 'abandon',      label: 'Abandonner', icon: <FiSlash />, danger: true });
     }
     if ((invoice.status === 2 || invoice.paid) && !isCredit) {
       list.push({ key: 'credit-note', label: 'Créer un avoir', icon: <FiRefreshCw />, danger: true });
     }
     return list;
-  }, [invoice]);
+  }, [invoice, isAdmin]);
 
   if (!actions.length) return <span style={{ color: '#94a3b8', fontSize: '0.75rem' }}>—</span>;
 
@@ -593,7 +627,7 @@ function ActionModal({ type, invoice, onClose, onDone }) {
   };
 
   return (
-    <ModalShell onClose={onClose} title={meta.title}>
+    <ModalShell onClose={onClose} title={meta.title} wide={meta.wide}>
       <form onSubmit={handleSubmit}>
         <div className="ac-modal-warning">
           <FiAlertTriangle /> {meta.warning(invoice)}
@@ -602,6 +636,7 @@ function ActionModal({ type, invoice, onClose, onDone }) {
         {type === 'pay' && <PayFields invoice={invoice} extra={extra} setExtra={setExtra} />}
         {type === 'reassign' && <ReassignFields extra={extra} setExtra={setExtra} />}
         {type === 'apply-credit' && <ApplyCreditFields invoice={invoice} extra={extra} setExtra={setExtra} />}
+        {type === 'renegotiate' && <RenegotiateFields invoice={invoice} setExtra={setExtra} />}
 
         <label className="ac-form-label">Motif de la régularisation <span style={{ color: '#dc2626' }}>*</span></label>
         <textarea
@@ -868,6 +903,134 @@ function ApplyCreditFields({ invoice, extra, setExtra }) {
 }
 
 // ─── Champs réassignation client (autocomplete) ─────────────
+// ─── Éditeur de lignes pour la renégociation ────────────────
+// Charge les lignes réelles de la facture (la ligne de liste ne les porte pas),
+// laisse réviser quantité / prix unitaire / remise, ou retirer un article, et
+// affiche en direct le nouveau total face à l'ancien.
+function RenegotiateFields({ invoice, setExtra }) {
+  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState([]);
+
+  useEffect(() => {
+    let alive = true;
+    getInvoice(invoice.id)
+      .then(r => {
+        if (!alive) return;
+        setRows((r.data.lines || []).map((l, i) => ({
+          key: l.id ?? i,
+          fk_product: l.fk_product || null,
+          product_ref: l.product_ref || null,
+          label: l.product_label || l.description || 'Ligne libre',
+          description: l.description || '',
+          tva_tx: Number(l.tva_tx) || 0,
+          product_type: l.fk_product ? 0 : 1,
+          qty: Number(l.qty),
+          subprice: Number(l.subprice),
+          remise_percent: Number(l.remise_percent) || 0,
+          removed: false,
+        })));
+      })
+      .catch(() => toast.error('Erreur chargement des lignes'))
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [invoice.id]);
+
+  const lineTotal = (l) =>
+    l.qty * l.subprice * (1 - (l.remise_percent || 0) / 100) * (1 + (l.tva_tx || 0) / 100);
+
+  const kept = rows.filter(l => !l.removed);
+  const newTotal = kept.reduce((s, l) => s + (Number.isFinite(lineTotal(l)) ? lineTotal(l) : 0), 0);
+  const delta = newTotal - Number(invoice.total_ttc || 0);
+
+  // Le payload remonte dans `extra` à chaque frappe : ACTION_META.renegotiate
+  // n'a plus qu'à le transmettre.
+  useEffect(() => {
+    setExtra(e => ({
+      ...e,
+      lines: kept.map(l => ({
+        fk_product: l.fk_product,
+        description: l.description,
+        qty: l.qty,
+        subprice: l.subprice,
+        remise_percent: l.remise_percent,
+        tva_tx: l.tva_tx,
+        product_type: l.product_type,
+      })),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
+
+  const patch = (key, field, value) =>
+    setRows(rs => rs.map(l => l.key === key ? { ...l, [field]: value } : l));
+
+  if (loading) return <div style={{ padding: 16, color: '#64748b' }}>Chargement des lignes…</div>;
+  if (!rows.length) return <div style={{ padding: 16, color: '#9a3412' }}>Aucune ligne à renégocier.</div>;
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div className="ac-table-wrap">
+        <table className="ac-table">
+          <thead>
+            <tr>
+              <th>Article</th>
+              <th style={{ width: 80 }}>Qté</th>
+              <th style={{ width: 130 }}>Prix unitaire</th>
+              <th style={{ width: 90 }}>Remise %</th>
+              <th className="ac-amount" style={{ width: 120 }}>Total</th>
+              <th style={{ width: 40 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(l => (
+              <tr key={l.key} style={l.removed ? { opacity: 0.4, textDecoration: 'line-through' } : undefined}>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{l.label}</div>
+                  {l.product_ref && <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>{l.product_ref}</div>}
+                </td>
+                <td>
+                  <input type="number" className="ac-form-input" min="1" step="1" disabled={l.removed}
+                    value={l.qty} onChange={e => patch(l.key, 'qty', Number(e.target.value))} />
+                </td>
+                <td>
+                  <input type="number" className="ac-form-input" min="0" step="1" disabled={l.removed}
+                    value={l.subprice} onChange={e => patch(l.key, 'subprice', Number(e.target.value))} />
+                </td>
+                <td>
+                  <input type="number" className="ac-form-input" min="0" max="100" step="1" disabled={l.removed}
+                    value={l.remise_percent} onChange={e => patch(l.key, 'remise_percent', Number(e.target.value))} />
+                </td>
+                <td className="ac-amount" style={{ fontWeight: 700 }}>{formatPrice(lineTotal(l) || 0)}</td>
+                <td>
+                  <button type="button" className="ac-mini-btn" title={l.removed ? 'Rétablir la ligne' : 'Retirer la ligne'}
+                    onClick={() => patch(l.key, 'removed', !l.removed)}>
+                    {l.removed ? <FiCornerUpLeft /> : <FiTrash2 />}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{
+        display: 'flex', justifyContent: 'flex-end', gap: 20, marginTop: 10,
+        padding: '10px 12px', background: '#f8fafc', borderRadius: 8, flexWrap: 'wrap',
+      }}>
+        <span style={{ color: '#64748b' }}>Ancien total : <strong>{formatPrice(invoice.total_ttc)}</strong></span>
+        <span>Nouveau total : <strong style={{ fontSize: '1.05rem' }}>{formatPrice(newTotal)}</strong></span>
+        <span style={{ color: delta < 0 ? '#10531a' : delta > 0 ? '#9a3412' : '#64748b', fontWeight: 700 }}>
+          {delta > 0 ? '+' : ''}{formatPrice(delta)}
+        </span>
+      </div>
+      {!kept.length && (
+        <div style={{ color: '#dc2626', fontSize: '0.8rem', marginTop: 6 }}>
+          Au moins une ligne doit rester. Pour annuler la facture entière, utilisez « Abandonner ».
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReassignFields({ extra, setExtra }) {
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
@@ -1068,6 +1231,30 @@ const ACTION_META = {
     successMessage: 'Avoir créé',
     run: (inv, reason) => createCreditNote(inv.id, reason),
   },
+  renegotiate: {
+    title: 'Renégocier les montants de la facture',
+    confirmLabel: 'Appliquer la renégociation',
+    wide: true,
+    warning: (inv) => `La facture ${inv.ref} sera dévalidée, corrigée aux nouveaux montants, puis réémise `
+      + 'sous le même numéro. Le stock suit automatiquement les quantités retenues. '
+      + 'Possible uniquement tant qu\'aucun règlement n\'est imputé.',
+    danger: false,
+    successMessage: 'Facture renégociée et réémise',
+    run: (inv, reason, extra) => {
+      const lines = extra.lines || [];
+      if (!lines.length) throw new Error('Au moins une ligne doit rester sur la facture');
+      return renegotiateInvoice(inv.id, lines, reason);
+    },
+  },
+  validate: {
+    title: 'Valider la facture',
+    confirmLabel: 'Valider',
+    warning: (inv) => `Le brouillon ${inv.ref} sera émis : il sort du stock les exemplaires facturés `
+      + 'et entre dans les créances clients.',
+    danger: false,
+    successMessage: 'Facture validée',
+    run: (inv, reason) => validateInvoice(inv.id, reason),
+  },
   settodraft: {
     title: 'Repasser en brouillon',
     confirmLabel: 'Repasser en brouillon',
@@ -1095,6 +1282,16 @@ const ACTION_META = {
     successMessage: 'Brouillon supprimé',
     run: (inv, reason) => deleteInvoiceDraft(inv.id, reason),
   },
+  abandon: {
+    title: 'Abandonner la facture',
+    confirmLabel: 'Abandonner',
+    warning: (inv) => `La facture ${inv.ref} porte un numéro définitif : elle ne peut pas être supprimée sans `
+      + 'trouer la numérotation. Elle sera classée « abandonnée », sortie des créances, et les exemplaires '
+      + 'qu\'elle avait sortis du stock seront restitués. Action irréversible.',
+    danger: true,
+    successMessage: 'Facture abandonnée, stock restitué',
+    run: (inv, reason) => abandonInvoice(inv.id, reason),
+  },
 };
 
 function actionLabel(action) {
@@ -1102,6 +1299,9 @@ function actionLabel(action) {
     pay: 'Encaissement',
     credit_note: 'Avoir créé',
     settodraft: 'Repassée en brouillon',
+    validate: 'Facture validée',
+    renegotiate: 'Montants renégociés',
+    renegotiate_failed: 'Renégociation interrompue',
     edit_lines: 'Lignes modifiées',
     reassign_customer: 'Client réassigné',
     delete: 'Brouillon supprimé',

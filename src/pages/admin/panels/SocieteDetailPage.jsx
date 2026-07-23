@@ -11,6 +11,7 @@ import InvoicePayModal from '../../../components/admin/InvoicePayModal';
 import TiersFormModal from '../../../components/admin/TiersFormModal';
 import { getAdminSociete, getAdminSocieteInvoices, deleteAdminSociete, promoteSocieteToAuthor } from '../../../api/admin';
 import { getPageItems } from '../../../utils/pagination';
+import useAdminRole from '../../../hooks/useAdminRole.js';
 
 const INV_PAGE_SIZE = 25;
 
@@ -78,6 +79,8 @@ export default function SocieteDetailPage() {
   const [invoices, setInvoices] = useState([]);
   const [invPage, setInvPage] = useState(0);
   const [invLoading, setInvLoading] = useState(false);
+  const role = useAdminRole();
+  const isAdmin = role === 'super_admin' || role === 'admin';
 
   const handlePromoteAuthor = async () => {
     if (!data?.societe || promoting) return;
@@ -251,16 +254,20 @@ export default function SocieteDetailPage() {
                 <table className="admin-table" style={{ opacity: invLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
                   <thead>
                     <tr>
-                      <th>Réf.</th><th>Date</th><th>Total HT</th><th>Total TTC</th>
+                      <th>Réf.</th><th>Date</th><th>Montant</th>
                       <th>Payée</th><th>Statut</th><th>Type</th><th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {invoices.map(inv => (
                       <tr key={inv.id}>
-                        <td><strong>{inv.ref}</strong></td>
+                        <td>
+                          <Link to={`/admin/invoices?invoice=${inv.id}`} style={{ color: '#10531a', fontWeight: 700 }}
+                            title="Ouvrir le détail et les actions de la facture">
+                            {inv.ref}
+                          </Link>
+                        </td>
                         <td>{formatDate(inv.date)}</td>
-                        <td>{formatMoney(inv.total_ht)}</td>
                         <td>{formatMoney(inv.total_ttc)}</td>
                         <td style={{ textAlign: 'center' }}>{inv.paye ? '✓' : '—'}</td>
                         <td><StatusBadge status={inv.fk_statut} map={INVOICE_STATUS} /></td>
@@ -279,6 +286,15 @@ export default function SocieteDetailPage() {
                             >
                               <FiDollarSign />
                             </button>
+                          )}
+                          {/* Renégociation : direction seule, et tant qu'aucun règlement
+                              n'est imputé — au-delà, la voie est l'avoir. */}
+                          {isAdmin && !inv.paye && inv.fk_statut === 1 && inv.type !== 2
+                            && !(Number(inv.paid_amount) > 0) && (
+                            <Link className="btn-ghost" to={`/admin/invoices?invoice=${inv.id}`}
+                              title="Renégocier les montants" style={{ color: '#b45309' }}>
+                              <FiEdit3 />
+                            </Link>
                           )}
                         </td>
                       </tr>
@@ -315,19 +331,18 @@ export default function SocieteDetailPage() {
             quotes?.length ? (
               <>
                 <div style={{ marginBottom: 12, color: '#6b7280', fontSize: 13 }}>
-                  Total : <strong>{formatMoney(quoteTotals?.total_ttc)}</strong> TTC
-                  ({quoteTotals?.count} devis)
+                  Total : <strong>{formatMoney(quoteTotals?.total_ttc)}</strong>
+                  {' '}({quoteTotals?.count} devis)
                 </div>
                 <table className="admin-table">
                   <thead>
-                    <tr><th>Réf.</th><th>Date</th><th>Total HT</th><th>Total TTC</th><th>Statut</th><th>PDF</th></tr>
+                    <tr><th>Réf.</th><th>Date</th><th>Montant</th><th>Statut</th><th>PDF</th></tr>
                   </thead>
                   <tbody>
                     {quotes.map(q => (
                       <tr key={q.id}>
                         <td><strong>{q.ref}</strong></td>
                         <td>{formatDate(q.date)}</td>
-                        <td>{formatMoney(q.total_ht)}</td>
                         <td>{formatMoney(q.total_ttc)}</td>
                         <td><StatusBadge status={q.fk_statut} map={PROPAL_STATUS} /></td>
                         <td>

@@ -1,0 +1,117 @@
+/* Frise résumé horizontale du parcours manuscrit (9 phases).
+   États : done (vert), current (vert plein + halo), danger (rejet, rouge),
+   upcoming (gris), off (grisé après un rejet). */
+
+.mpb-card {
+  background: var(--color-white, #fff);
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 10px;
+  padding: 16px 10px 10px;
+  margin-bottom: 18px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mpb {
+  list-style: none;
+  display: flex;
+  margin: 0;
+  padding: 0;
+  min-width: 760px; /* garde les 9 phases lisibles ; scroll horizontal en dessous */
+}
+
+.mpb-phase {
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+/* Connecteur : segment entre la phase et la précédente */
+.mpb-phase:not(:first-child)::before {
+  content: '';
+  position: absolute;
+  top: 16px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--color-border, #e5e7eb);
+  z-index: 0;
+}
+.mpb-done:not(:first-child)::before,
+.mpb-current:not(:first-child)::before,
+.mpb-danger:not(:first-child)::before { background: #a7d3ae; }
+.mpb-danger:not(:first-child)::before { background: #f1b8b8; }
+
+.mpb-node {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--color-white, #fff);
+  border: 2px solid var(--color-border, #e5e7eb);
+  color: var(--color-text-muted, #9ca3af);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  z-index: 1;
+}
+
+.mpb-done .mpb-node {
+  border-color: #a7d3ae;
+  background: #f0f9f1;
+  color: var(--color-green-deep, #10531a);
+}
+.mpb-current .mpb-node {
+  border-color: var(--color-green-deep, #10531a);
+  background: var(--color-green-deep, #10531a);
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.14);
+}
+.mpb-done.mpb-here .mpb-node { /* parcours terminé (Paru) */
+  border-color: var(--color-green-deep, #10531a);
+  background: var(--color-green-deep, #10531a);
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.14);
+}
+.mpb-danger .mpb-node {
+  border-color: #b91c1c;
+  background: #b91c1c;
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(185, 28, 28, 0.12);
+}
+.mpb-off .mpb-node { opacity: 0.45; }
+
+.mpb-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--color-text-light, #6b7280);
+  line-height: 1.2;
+}
+.mpb-done .mpb-label { color: var(--color-text, #374151); }
+.mpb-current .mpb-label,
+.mpb-done.mpb-here .mpb-label { color: var(--color-green-deep, #10531a); }
+.mpb-danger .mpb-label { color: #b91c1c; }
+.mpb-off .mpb-label { opacity: 0.5; }
+
+/* Sous-libellé : date d'entrée (phases passées) ou stage précis (phase active).
+   Hauteur réservée pour éviter tout décalage vertical entre phases. */
+.mpb-sub {
+  font-size: 0.68rem;
+  color: var(--color-text-muted, #9ca3af);
+  line-height: 1.25;
+  min-height: 1.7em;
+  max-width: 110px;
+  overflow-wrap: break-word;
+}
+.mpb-current .mpb-sub { color: var(--color-green-deep, #10531a); font-weight: 600; }
+.mpb-danger .mpb-sub { color: #b91c1c; font-weight: 600; }
+
+@media (max-width: 640px) {
+  .mpb-card { padding: 12px 6px 8px; }
+}

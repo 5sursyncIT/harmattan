@@ -26,6 +26,7 @@ const SKIP_AUTHOR_NOTIFICATION = new Set([]);
 // Stages où l'auteur DOIT agir (validation) — on les marque comme "action requise"
 // pour pouvoir afficher un badge spécifique dans la cloche.
 const ACTION_REQUIRED_STAGES = new Set([
+  'evaluation_rework',
   'correction_author_review',
   'bat_author_review',
 ]);
@@ -69,6 +70,7 @@ const STAGE_CATEGORY = {
   contract_pending: 'critical', contract_signed: 'critical', payment_pending: 'critical',
   cover_design: 'cover', bat_author_review: 'cover',
   print_preparation: 'print', printing: 'print', printed: 'print',
+  in_communication: 'print', published: 'print',
 };
 
 /**
@@ -119,7 +121,7 @@ function buildNotificationCopy(manuscript, toStage) {
     case 'evaluation_positive':
       return { title: 'Évaluation favorable', message: `Bonne nouvelle : « ${title} » a reçu une évaluation favorable.` };
     case 'evaluation_rework':
-      return { title: 'Manuscrit à retravailler', message: `Le comité vous invite à retravailler « ${title} » avant une nouvelle évaluation.` };
+      return { title: 'Manuscrit à retravailler', message: `Le comité vous invite à retravailler « ${title} » — déposez la nouvelle version depuis votre espace.` };
     case 'evaluation_negative':
       return { title: 'Décision éditoriale', message: `Le comité n'a pas retenu « ${title} » pour publication.` };
     case 'contract_pending':
@@ -146,6 +148,10 @@ function buildNotificationCopy(manuscript, toStage) {
       return { title: 'En impression', message: `« ${title} » est désormais en impression.` };
     case 'printed':
       return { title: 'Votre livre est prêt !', message: `L'impression de « ${title} » est terminée. Nous vous recontactons pour la suite.` };
+    case 'in_communication':
+      return { title: 'Campagne de communication lancée', message: `Le lancement commercial de « ${title} » est en cours (catalogue, annonce, newsletter).` };
+    case 'published':
+      return { title: 'Votre livre est paru !', message: `« ${title} » est paru et mis en avant : disponible au catalogue et relayé auprès de nos lecteurs.` };
     default:
       return { title: stageLabel, message: `Nouvelle étape pour « ${title} » : ${stageLabel}.` };
   }
@@ -301,8 +307,11 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         body = header('Votre manuscrit mérite d\'être retravaillé')
           + greeting
           + `<p>Après examen, notre comité éditorial estime que votre manuscrit <strong>« ${msTitle} »</strong> présente un réel potentiel, mais qu'il doit être <strong>retravaillé</strong> avant de pouvoir être publié.</p>`
-          + `<p>Vous pouvez consulter l'avis du comité depuis votre espace auteur, puis nous renvoyer votre version retravaillée : elle fera l'objet d'une nouvelle évaluation.</p>`
-          + btn('Consulter l\'avis', authorUrl);
+          + `<p>Consultez l'avis du comité depuis votre espace auteur, puis <strong>déposez-y votre version retravaillée</strong> : elle relancera automatiquement une nouvelle évaluation.</p>`
+          + (attachments && attachments.length
+            ? `<p>Vous trouverez <strong>ci-joint le rapport de lecture</strong> détaillant les points à retravailler.</p>`
+            : '')
+          + btn('Déposer ma version', authorUrl);
         break;
       case 'evaluation_negative':
         subject = `${msTitle} — Décision éditoriale`;
@@ -310,6 +319,9 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
           + greeting
           + `<p>Après examen attentif, notre comité n'a pas retenu votre manuscrit <strong>« ${msTitle} »</strong> pour publication.</p>`
           + `<p>Vous pouvez consulter l'avis détaillé du comité depuis votre espace auteur.</p>`
+          + (attachments && attachments.length
+            ? `<p>Vous trouverez <strong>ci-joint le rapport de lecture</strong> de votre manuscrit.</p>`
+            : '')
           + `<p>Nous vous remercions de votre confiance et vous encourageons à persévérer.</p>`
           + btn('Consulter l\'avis', authorUrl);
         break;
@@ -395,6 +407,18 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
           + greeting
           + `<p>L'impression de <strong>« ${msTitle} »</strong> est terminée. Nous vous contacterons pour la suite.</p>`;
         break;
+      case 'in_communication':
+        subject = `${msTitle} — Lancement commercial en cours`;
+        body = header('Campagne de communication lancée')
+          + greeting
+          + `<p>Bonne nouvelle : le <strong>lancement commercial</strong> de <strong>« ${msTitle} »</strong> a démarré. Notre équipe déroule la campagne de parution (mise au catalogue, annonce, newsletter, mise en avant).</p>`;
+        break;
+      case 'published':
+        subject = `${msTitle} — Votre livre est paru !`;
+        body = header('Votre livre est paru !')
+          + greeting
+          + `<p>Félicitations : <strong>« ${msTitle} »</strong> est <strong>paru</strong>. Il est disponible au catalogue et mis en avant auprès de nos lecteurs (librairie, site, newsletter).</p>`;
+        break;
       default:
         subject = `${msTitle} — Mise à jour : ${stageLabel}`;
         body = header('Mise à jour')
@@ -461,15 +485,25 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
         body = header('Prêt pour impression')
           + greeting
           + `<p>Le BAT du manuscrit <strong>« ${msTitle} »</strong> a été validé par l'auteur. Préparez l'ordre d'impression (MO).</p>`
-          + btn('Préparer l\'impression', adminUrl('printing'));
+          + btn('Préparer l\'impression', adminUrl('printing'))
+          + `<p>C'est aussi le bon moment pour lancer le <strong>teasing commercial</strong> (fiche produit, « à paraître », précommandes) — checklist dans le panneau Parutions.</p>`
+          + btn('Préparer la parution', adminUrl('parutions'));
         break;
       case 'printed':
         subject = `[Impression] ${msTitle} — Impression terminée`;
         body = header('Impression terminée')
           + greeting
           + `<p>L'impression de <strong>« ${msTitle} »</strong> (réf. ${msRef}) est terminée.</p>`
-          + `<p><strong>Prochaine étape : enregistrer le dépôt légal</strong> (BNS / IFAN) et intégrer l'ouvrage au catalogue.</p>`
+          + `<p><strong>Prochaines étapes :</strong> enregistrer le dépôt légal (BNS / IFAN) et dérouler le <strong>lancement commercial</strong> (catalogue, bannière, newsletter) depuis le panneau Parutions.</p>`
+          + btn('Lancer la parution', adminUrl('parutions'))
           + btn('Registre du dépôt légal', adminUrl('legal-deposits'));
+        break;
+      case 'published':
+        subject = `[Parution] ${msTitle} — Ouvrage paru`;
+        body = header('Ouvrage paru')
+          + greeting
+          + `<p><strong>« ${msTitle} »</strong> (réf. ${msRef}) est <strong>paru</strong> : le lancement commercial est déroulé, l'ouvrage est au catalogue et mis en avant.</p>`
+          + btn('Voir le panneau Parutions', adminUrl('parutions'));
         break;
       default:
         subject = `[${STAGE_LABELS[toStage] || toStage}] ${msTitle}`;
@@ -493,29 +527,48 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
 /**
  * Notifie le comptable (par défaut Issa NDIAYE) lorsqu'un manuscrit reçoit une
  * évaluation favorable, afin qu'il élabore le contrat d'édition et le devis.
- * opts = { manuscript, authorName, accountantEmail, accountantName, siteUrl }
+ * Le manuscrit lui-même accompagne l'email (pièce jointe si le fichier tient
+ * sous le plafond SMTP, et/ou lien de téléchargement sécurisé) : sans le texte,
+ * le comptable ne peut pas chiffrer le devis.
+ * opts = { manuscript, authorName, accountantEmail, accountantName, siteUrl,
+ *          downloadUrl, downloadTtlDays, attachments }
  */
-export function sendAccountantEvaluationEmail(transporter, { manuscript, authorName, accountantEmail, accountantName, siteUrl }) {
+export function sendAccountantEvaluationEmail(transporter, { manuscript, authorName, accountantEmail, accountantName, siteUrl, downloadUrl = null, downloadTtlDays = 30, attachments = null }) {
   if (!transporter || !accountantEmail) return Promise.resolve();
 
   const msTitle = escapeHtml(manuscript.title || 'le manuscrit');
   const msRef = escapeHtml(manuscript.ref || '');
   const author = escapeHtml(authorName || '');
   const contractsUrl = `${siteUrl || ''}/admin/contracts`;
+  const hasAttachment = !!(attachments && attachments.length);
 
   const subject = `[Contrat & Devis] ${msTitle} — Évaluation favorable`;
-  const body = header('Évaluation favorable — contrat & devis à élaborer')
+  let body = header('Évaluation favorable — contrat & devis à élaborer')
     + `<p>Bonjour ${escapeHtml(accountantName || 'cher collègue')},</p>`
     + `<p>Le manuscrit <strong>« ${msTitle} »</strong>${msRef ? ` (réf. ${msRef})` : ''}${author ? `, de <strong>${author}</strong>,` : ''} vient de recevoir une <strong>évaluation favorable</strong>.</p>`
-    + `<p>Merci de bien vouloir procéder à l'<strong>élaboration du contrat d'édition et du devis</strong> correspondants.</p>`
-    + btn('Élaborer le contrat', contractsUrl);
+    + `<p>Merci de bien vouloir procéder à l'<strong>élaboration du contrat d'édition et du devis</strong> correspondants.</p>`;
 
-  return transporter.sendMail({
+  if (hasAttachment) {
+    body += `<p>Vous trouverez <strong>le manuscrit en pièce jointe</strong> de cet email.</p>`;
+    if (downloadUrl) {
+      body += `<p>Il reste également téléchargeable via ce lien sécurisé (valable ${downloadTtlDays} jours) :</p>`
+        + btn('Télécharger le manuscrit', downloadUrl);
+    }
+  } else if (downloadUrl) {
+    body += `<p>Le manuscrit est disponible via ce lien sécurisé (valable ${downloadTtlDays} jours) :</p>`
+      + btn('Télécharger le manuscrit', downloadUrl);
+  }
+  body += btn('Élaborer le contrat', contractsUrl);
+
+  const mail = {
     from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
     to: accountantEmail,
     subject,
     html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
-  }).catch((err) => console.error('[WORKFLOW] Accountant email error:', err.message));
+  };
+  if (hasAttachment) mail.attachments = attachments;
+  return transporter.sendMail(mail)
+    .catch((err) => console.error('[WORKFLOW] Accountant email error:', err.message));
 }
 
 const ROLE_LABELS = {
@@ -558,6 +611,61 @@ export function sendAssignmentEmail(transporter, manuscript, role, recipient, si
     subject,
     html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
   }).catch((err) => console.error('[WORKFLOW] Assignment email error:', err.message));
+}
+
+/**
+ * Demande de révision du manuscrit à l'auteur : lien de dépôt tokenisé (sans
+ * connexion) où il télécharge la version courante et dépose sa version révisée.
+ * Remplace l'aller-retour de pièces jointes par email — le fichier entre
+ * directement dans la chaîne de versions du système.
+ * author = { email, firstname } ; opts = { depositUrl, message, ttlDays }
+ */
+export function sendAuthorRevisionRequestEmail(transporter, manuscript, author, { depositUrl, message = null, ttlDays = 14 }) {
+  if (!transporter || !author?.email) return Promise.resolve();
+  const msTitle = escapeHtml(manuscript?.title || 'votre manuscrit');
+  const msRef = escapeHtml(manuscript?.ref || '');
+  const body = header('Nouvelle version de votre manuscrit demandée')
+    + `<p>Bonjour ${escapeHtml(author.firstname || '')},</p>`
+    + `<p>Dans le cadre du travail éditorial sur votre manuscrit <strong>« ${msTitle} »</strong> (référence ${msRef}), nous vous invitons à déposer une <strong>version révisée</strong> de votre texte.</p>`
+    + (message
+      ? `<p style="background:#f3f6f3;border-left:4px solid #10531a;padding:10px 14px;border-radius:4px;white-space:pre-wrap">${escapeHtml(message)}</p>`
+      : '')
+    + `<p>Depuis la page ci-dessous, vous pouvez <strong>télécharger la version actuelle</strong> (pour travailler sur la bonne base) puis <strong>déposer votre version révisée</strong> — inutile de renvoyer le fichier par email.</p>`
+    + btn('Déposer ma version révisée', depositUrl)
+    + `<p style="color:#666;font-size:0.9em">Ce lien est personnel et valable ${ttlDays} jours. Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :<br>${escapeHtml(depositUrl)}</p>`;
+  return transporter.sendMail({
+    from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+    to: author.email,
+    subject: `${manuscript?.title || 'Votre manuscrit'} — dépôt de votre version révisée`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+  }).catch((err) => console.error('[VERSIONS] Revision request email error:', err.message));
+}
+
+/**
+ * Notifie la direction qu'une nouvelle version du manuscrit a été déposée
+ * (par l'auteur via le lien de révision, ou par un admin).
+ * info = { by, version, fileName, note }
+ */
+export function sendManuscriptDepositEmail(transporter, manuscript, info, recipientEmail, siteUrl) {
+  if (!transporter || !recipientEmail) return Promise.resolve();
+  const msTitle = escapeHtml(manuscript?.title || 'un manuscrit');
+  const msRef = escapeHtml(manuscript?.ref || '');
+  const body = header('Nouvelle version du manuscrit déposée')
+    + `<p>Une nouvelle version du manuscrit <strong>« ${msTitle} »</strong> (${msRef}) vient d'être déposée.</p>`
+    + `<ul>`
+    + `<li>Version : <strong>v${Number(info?.version) || '?'}</strong></li>`
+    + `<li>Déposée par : <strong>${escapeHtml(info?.by || '—')}</strong></li>`
+    + `<li>Fichier : ${escapeHtml(info?.fileName || '—')}</li>`
+    + (info?.note ? `<li>Commentaire : ${escapeHtml(info.note)}</li>` : '')
+    + `</ul>`
+    + `<p>C'est désormais la <strong>version courante</strong> du manuscrit dans le système (les anciennes versions restent tracées dans l'historique).</p>`
+    + btn('Ouvrir la fiche manuscrit', `${siteUrl || ''}/admin/manuscripts/${manuscript?.id}`);
+  return transporter.sendMail({
+    from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+    to: recipientEmail,
+    subject: `[Manuscrit] ${manuscript?.title || ''} — nouvelle version v${Number(info?.version) || '?'} déposée`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+  }).catch((err) => console.error('[VERSIONS] Deposit email error:', err.message));
 }
 
 /**
@@ -677,6 +785,70 @@ export function notifySeriesSubmission(db, transporter, manuscripts, author, ser
  * Résout la liste des destinataires pour une transition, envoie les mails
  * et crée une notification in-app pour l'auteur.
  */
+/**
+ * Relais vers l'équipe communication (module Parutions).
+ * Envoyé à COMM_EMAIL (si configurée) aux trois jalons commerciaux :
+ *  - editorial_validated : préparer le brief de campagne pendant la couverture ;
+ *  - print_preparation   : lancer le teasing + précommandes pendant l'impression ;
+ *  - printed             : dérouler le lancement officiel (catalogue, newsletter…).
+ * Ne remplace pas l'email admin générique — c'est un email de tâche dédié,
+ * pointant vers la checklist du panneau /admin/parutions.
+ */
+export function sendCommLaunchEmail(transporter, manuscript, toStage, commEmail, siteUrl) {
+  if (!transporter || !commEmail) return Promise.resolve();
+  const msTitle = escapeHtml(manuscript.title || 'Ouvrage');
+  const msRef = escapeHtml(manuscript.ref || '');
+  const parutionsUrl = `${siteUrl}/admin/parutions`;
+
+  let subject, body;
+  if (toStage === 'editorial_validated') {
+    subject = `[Parution] ${msTitle} — préparer le brief de campagne`;
+    body = header('Brief de campagne à préparer')
+      + `<p>Bonjour,</p>`
+      + `<p>Le manuscrit <strong>« ${msTitle} »</strong> (réf. ${msRef}) vient d'être validé éditorialement — la conception de la couverture commence.</p>`
+      + `<p>Profitez de cette phase pour préparer le <strong>brief interne</strong> (rien de public à ce stade) :</p>`
+      + `<ul style="color:#334155;line-height:1.7">`
+      + `<li>angle éditorial : pourquoi ce livre, pour qui</li>`
+      + `<li>bio et photo de l'auteur</li>`
+      + `<li>date de parution cible (même provisoire)</li>`
+      + `<li>dossier de campagne (argumentaire, visuels pressentis)</li>`
+      + `</ul>`
+      + `<p>La checklist du brief et la fiche de l'ouvrage (synopsis, bio) sont dans le panneau Parutions.</p>`
+      + btn('Préparer le brief', parutionsUrl);
+  } else if (toStage === 'print_preparation') {
+    subject = `[Parution] ${msTitle} — préparer le teasing & la précommande`;
+    body = header('Nouvelle parution à préparer')
+      + `<p>Bonjour,</p>`
+      + `<p>Le BAT de <strong>« ${msTitle} »</strong> (réf. ${msRef}) vient d'être validé — l'ouvrage entre en préparation d'impression.</p>`
+      + `<p>C'est le meilleur moment pour lancer la machine commerciale <strong>avant</strong> la sortie :</p>`
+      + `<ul style="color:#334155;line-height:1.7">`
+      + `<li>compléter la fiche produit (couverture, 4e de couverture, prix)</li>`
+      + `<li>activer « Ouvrage à paraître » avec la date de parution (précommandes)</li>`
+      + `<li>tag « Nouveautés », bannière d'annonce, article « Prochainement »</li>`
+      + `</ul>`
+      + `<p>La checklist complète et le kit de lancement (fiche + couverture) sont dans le panneau Parutions.</p>`
+      + btn('Ouvrir le panneau Parutions', parutionsUrl);
+  } else {
+    subject = `[Parution] ${msTitle} — lancement commercial`;
+    body = header('Ouvrage imprimé — lancement à dérouler')
+      + `<p>Bonjour,</p>`
+      + `<p>L'impression de <strong>« ${msTitle} »</strong> (réf. ${msRef}) est terminée : l'ouvrage passe de « à paraître » à <strong>disponible</strong>.</p>`
+      + `<ul style="color:#334155;line-height:1.7">`
+      + `<li>retirer le flag « à paraître » et activer le livre au catalogue</li>`
+      + `<li>bannière « Vient de paraître », tag « Livre du mois » / « Notre sélection »</li>`
+      + `<li>newsletter de parution + mise à jour de la fiche auteur</li>`
+      + `<li>coordination auteur (photos, citation, événement de lancement)</li>`
+      + `</ul>`
+      + btn('Dérouler la checklist de lancement', parutionsUrl);
+  }
+  return transporter.sendMail({
+    from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+    to: commEmail,
+    subject,
+    html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">${body}${SIGNATURE}</div>`,
+  }).catch((err) => console.error('[WORKFLOW] Comm email error:', err.message));
+}
+
 export function notifyTransition(db, transporter, manuscript, toStage, actor, siteUrl, opts = {}) {
   // 1. Auteur : notification in-app + email (selon préférences).
   //    opts.skipAuthorNotification : ne PAS prévenir l'auteur à cette transition.
@@ -692,9 +864,11 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
     // catégorie. opts.forceAuthorEmail force l'envoi (notification « sur demande » de l'auteur).
     if (transporter && author.email && (opts.forceAuthorEmail || shouldEmailAuthor(db, author.id, toStage))) {
       // Pièce jointe optionnelle : le rapport de lecture, joint à l'email
-      // d'acceptation lorsque l'évaluateur l'a explicitement demandé.
+      // d'évaluation (favorable, à retravailler ou défavorable) lorsque
+      // l'évaluateur l'a explicitement demandé.
       let authorAttachments = null;
-      if (opts.attachEvaluationReport && toStage === 'evaluation_positive') {
+      if (opts.attachEvaluationReport
+        && ['evaluation_positive', 'evaluation_rework', 'evaluation_negative'].includes(toStage)) {
         try {
           const report = db.prepare(
             `SELECT file_path, file_name FROM manuscript_files
@@ -709,10 +883,10 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
             if (reportSize > 0 && reportSize <= MAX_EMAIL_ATTACHMENT_BYTES) {
               authorAttachments = [{ filename: report.file_name || 'rapport-de-lecture', path: report.file_path }];
             } else {
-              console.warn('[WORKFLOW] Rapport de lecture trop volumineux pour pièce jointe (', reportSize, 'octets) — email d\'acceptation envoyé sans PJ (manuscrit', manuscript.id, ')');
+              console.warn('[WORKFLOW] Rapport de lecture trop volumineux pour pièce jointe (', reportSize, 'octets) — email d\'évaluation envoyé sans PJ (manuscrit', manuscript.id, ')');
             }
           } else {
-            console.warn('[WORKFLOW] Rapport de lecture introuvable — email d\'acceptation envoyé sans pièce jointe (manuscrit', manuscript.id, ')');
+            console.warn('[WORKFLOW] Rapport de lecture introuvable — email d\'évaluation envoyé sans pièce jointe (manuscrit', manuscript.id, ')');
           }
         } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe rapport de lecture:', err.message); }
       }
@@ -842,7 +1016,7 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
   //    + print_preparation (BAT validé : préparer le MO — sinon personne n'était
   //      prévenu et l'ouvrage restait en attente) et printed (impression terminée :
   //      relais vers le dépôt légal, module autrement déconnecté du pipeline).
-  const adminEmailStages = ['submitted', 'evaluation_positive', 'payment_pending', 'editorial_validated', 'contract_signed', 'print_preparation', 'printed'];
+  const adminEmailStages = ['submitted', 'evaluation_positive', 'payment_pending', 'editorial_validated', 'contract_signed', 'print_preparation', 'printed', 'published'];
   if (adminEmailStages.includes(toStage)) {
     try {
       const fs = global.__siteConfigFallback;
@@ -865,6 +1039,25 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
     } catch (err) { /* fallback silencieux */ void err; }
   }
 
+  // 3b. Équipe communication : relais commercial dédié aux trois jalons de
+  //     parution (brief à editorial_validated, teasing à print_preparation,
+  //     lancement à printed). Adresse configurable via COMM_EMAIL ; sans elle,
+  //     on ne double PAS l'email admin du bloc 3 (qui pointe déjà vers Parutions).
+  if (['editorial_validated', 'print_preparation', 'printed'].includes(toStage)) {
+    const commEmail = (process.env.COMM_EMAIL || '').trim();
+    if (commEmail) {
+      try {
+        sendCommLaunchEmail(transporter, manuscript, toStage, commEmail, siteUrl).then((info) => {
+          if (!info) return;
+          try {
+            logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+              `Relais parution « ${STAGE_LABELS[toStage] || toStage} » → équipe communication (${commEmail})`);
+          } catch (e) { console.warn('[WORKFLOW] log email_sent (comm) warning:', e.message); }
+        });
+      } catch (err) { console.warn('[WORKFLOW] comm notify error:', err.message); }
+    }
+  }
+
   // 4. Comptable : élaboration du contrat et du devis dès l'évaluation favorable.
   //    Destinataire configurable, par défaut Issa NDIAYE (demande direction).
   if (toStage === 'evaluation_positive') {
@@ -873,14 +1066,48 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
     if (accountantEmail) {
       try {
         const authorName = author ? `${author.firstname || ''} ${author.lastname || ''}`.trim() : '';
+        // Le comptable reçoit le manuscrit avec la notification : en pièce jointe
+        // s'il tient sous le plafond SMTP, et dans tous les cas via un lien
+        // sécurisé. TTL 30 jours (vs 7 pour les intervenants) : l'élaboration du
+        // contrat et du devis s'étale souvent sur plusieurs semaines.
+        const ACCOUNTANT_LINK_TTL_DAYS = 30;
+        let downloadUrl = null;
+        let attachments = null;
+        const file = pickFileForActor(db, manuscript.id, toStage);
+        if (file) {
+          const token = createFileToken(db, {
+            manuscriptId: manuscript.id,
+            fileId: file.id,
+            ttlHours: ACCOUNTANT_LINK_TTL_DAYS * 24,
+            maxUses: 10,
+          });
+          downloadUrl = `${siteUrl || ''}/api/files/manuscript/${token}/download`;
+          try {
+            if (file.file_path && existsSync(file.file_path)) {
+              const size = statSync(file.file_path).size;
+              if (size > 0 && size <= MAX_EMAIL_ATTACHMENT_BYTES) {
+                attachments = [{ filename: file.file_name || 'manuscrit', path: file.file_path }];
+              } else {
+                console.warn('[WORKFLOW] Manuscrit trop volumineux pour pièce jointe comptable — lien seul (manuscrit', manuscript.id, ',', size, 'octets)');
+              }
+            }
+          } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe comptable:', err.message); }
+        } else {
+          console.warn('[WORKFLOW] Aucun fichier original trouvé — email comptable envoyé sans manuscrit (manuscrit', manuscript.id, ')');
+        }
         // Frise écrite après confirmation SMTP (cf. commentaire côté auteur).
         sendAccountantEvaluationEmail(transporter, {
           manuscript, authorName, accountantEmail, accountantName, siteUrl,
+          downloadUrl, downloadTtlDays: ACCOUNTANT_LINK_TTL_DAYS, attachments,
         }).then((info) => {
           if (!info) return;
           try {
+            // La frise sert d'audit : on y trace SOUS QUELLE FORME le manuscrit a
+            // été transmis au comptable (PJ, lien seul, ou rien).
+            const joint = attachments ? 'manuscrit joint'
+              : (downloadUrl ? 'lien de téléchargement' : 'sans manuscrit');
             logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-              `Élaboration contrat & devis → comptable (${accountantEmail})`);
+              `Élaboration contrat & devis → comptable (${accountantEmail}) — ${joint}`);
           } catch (e) { console.warn('[WORKFLOW] log email_sent (accountant) warning:', e.message); }
         });
       } catch (err) { console.warn('[WORKFLOW] accountant notify error:', err.message); }

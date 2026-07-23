@@ -29,6 +29,8 @@ function stageBadge(stage) {
     print_preparation: '#854d0e',
     printing: '#854d0e',
     printed: '#10531a',
+    in_communication: '#0b4f6c',
+    published: '#10531a',
   };
   return colorMap[stage] || '#6b7280';
 }

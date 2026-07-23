@@ -75,6 +75,7 @@ const usePosCartStore = create(persist((set, get) => ({
             product_id: product.id,
             ref: product.ref,
             label: product.label,
+            soustitre: product.soustitre || null,
             price_ttc: parseFloat(product.price_ttc),
             qty: 1,
             discount: 0,

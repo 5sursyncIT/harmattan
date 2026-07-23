@@ -1,3 +1,9 @@
+/* Frise « Historique » du manuscrit — partagée admin + espace auteur.
+   Tonalités sémantiques : vert = jalon franchi, ambre = attente/action,
+   rouge = rejet, bleu = travail en cours, gris = évènement informatif. */
+
+.mt-wrap { position: relative; }
+
 .mt-list {
   list-style: none;
   padding: 0;
@@ -8,16 +14,41 @@
   content: '';
   position: absolute;
   left: 17px;
-  top: 12px;
-  bottom: 12px;
+  top: 14px;
+  bottom: 14px;
   width: 2px;
-  background: #e5e7eb;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--color-border, #e5e7eb), #d6e3d9);
 }
+
+.mt-row { position: relative; }
+
+/* ─── Séparateur de jour ─── */
+.mt-day {
+  position: relative;
+  z-index: 1;
+  padding: 14px 0 6px;
+}
+.mt-row:first-child .mt-day { padding-top: 0; }
+.mt-day-label {
+  display: inline-block;
+  background: var(--color-white, #fff);
+  border: 1px solid var(--color-border, #e5e7eb);
+  color: var(--color-text-light, #6b7280);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+/* ─── Ligne d'évènement ─── */
 .mt-item {
   position: relative;
   display: flex;
   gap: 14px;
-  padding: 10px 0;
+  padding: 8px 0;
   align-items: flex-start;
 }
 .mt-icon {
@@ -25,89 +56,203 @@
   height: 36px;
   min-width: 36px;
   border-radius: 50%;
-  background: #fff;
-  border: 2px solid #e5e7eb;
+  background: var(--color-white, #fff);
+  border: 2px solid var(--color-border, #e5e7eb);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #6b7280;
+  color: var(--color-text-light, #6b7280);
   z-index: 1;
+  transition: transform 0.15s ease-out;
 }
+.mt-item:hover .mt-icon { transform: scale(1.06); }
+
+/* Tonalités des nœuds (étapes) */
+.mt-tone-success .mt-icon { border-color: #a7d3ae; color: var(--color-green-deep, #10531a); background: #f0f9f1; }
+.mt-tone-warn .mt-icon { border-color: #f0d09a; color: #b45309; background: #fffbeb; }
+.mt-tone-danger .mt-icon { border-color: #f1b8b8; color: #b91c1c; background: #fef2f2; }
+.mt-tone-progress .mt-icon { border-color: #b3cfdd; color: #0b4f6c; background: #f0f7fa; }
+.mt-tone-info .mt-icon { border-color: var(--color-border, #e5e7eb); color: var(--color-text-light, #6b7280); }
+
+/* Étape courante : nœud plein + halo doux */
 .mt-item-current .mt-icon {
-  background: #10531a;
+  background: var(--color-green-deep, #10531a);
   color: #fff;
-  border-color: #10531a;
-  box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.12);
+  border-color: var(--color-green-deep, #10531a);
+  box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.14);
+  animation: mt-pulse 2.4s ease-out infinite;
 }
+.mt-item-current.mt-tone-danger .mt-icon {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  box-shadow: 0 0 0 4px rgba(185, 28, 28, 0.14);
+  animation: none;
+}
+@keyframes mt-pulse {
+  0% { box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.18); }
+  55% { box-shadow: 0 0 0 8px rgba(16, 83, 26, 0.06); }
+  100% { box-shadow: 0 0 0 4px rgba(16, 83, 26, 0.18); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mt-item-current .mt-icon { animation: none; }
+  .mt-icon, .mt-item:hover .mt-icon { transition: none; transform: none; }
+}
+
 .mt-body {
   flex: 1;
-  padding-top: 4px;
+  min-width: 0;
+  padding-top: 2px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed #eef1ee;
+}
+.mt-row:last-child .mt-body { border-bottom: none; }
+
+.mt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .mt-stage {
   font-weight: 600;
   font-size: 0.95rem;
-  color: #111827;
+  color: var(--color-dark, #1f2937);
 }
-.mt-item-current .mt-stage {
-  color: #10531a;
+.mt-item-current .mt-stage { color: var(--color-green-deep, #10531a); }
+.mt-item-current.mt-tone-danger .mt-stage { color: #b91c1c; }
+
+.mt-current-badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-green-deep, #10531a);
+  background: #eaf3ec;
+  border: 1px solid #cfe3d4;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
 }
+.mt-item-current.mt-tone-danger .mt-current-badge {
+  color: #b91c1c;
+  background: #fef2f2;
+  border-color: #f1b8b8;
+}
+
+/* ─── Méta : acteur, rôle, heure ─── */
 .mt-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
   margin-top: 4px;
   font-size: 0.8rem;
-  color: #6b7280;
+  color: var(--color-text-light, #6b7280);
+}
+.mt-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  color: var(--color-text, #374151);
+}
+.mt-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #eef2ee;
+  border: 1px solid #dbe4dc;
+  color: #45604b;
+  font-size: 0.58rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0.3px;
 }
 .mt-role {
-  background: #f3f4f6;
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 0.7rem;
+  background: var(--color-light-bg, #f3f4f6);
+  border: 1px solid var(--color-border, #e5e7eb);
+  color: var(--color-text-light, #6b7280);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+.mt-date { color: var(--color-text-muted, #9ca3af); font-variant-numeric: tabular-nums; }
 .mt-date::before { content: '·'; margin-right: 8px; color: #d1d5db; }
+
 .mt-note {
   margin-top: 6px;
   font-size: 0.85rem;
-  color: #4b5563;
-  background: #f9fafb;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border-left: 3px solid #10531a;
+  line-height: 1.5;
+  color: var(--color-text, #4b5563);
+  background: var(--color-light-bg, #f9fafb);
+  padding: 8px 12px;
+  border-radius: 0 8px 8px 8px;
+  border-left: 3px solid #cfe3d4;
+  overflow-wrap: anywhere;
 }
-/* Évènements informatifs (devis, contrat envoyé…) : marqueur plus discret,
-   pour les distinguer visuellement des étapes du workflow. */
+.mt-tone-danger .mt-note { border-left-color: #f1b8b8; }
+.mt-tone-warn .mt-note { border-left-color: #f0d09a; }
+
+/* ─── Évènements informatifs : plus discrets et compacts ─── */
+.mt-item-event { padding: 5px 0; }
 .mt-item-event .mt-icon {
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
-  margin-left: 4px;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  margin-left: 5px;
+  border-width: 1px;
   border-style: dashed;
-  border-color: #cbd5e1;
-  color: #94a3b8;
+  font-size: 0.78rem;
 }
+.mt-tone-muted .mt-icon { border-color: #cbd5e1; color: #94a3b8; }
 .mt-item-event .mt-stage {
   font-weight: 500;
-  font-size: 0.88rem;
+  font-size: 0.86rem;
   color: #475569;
 }
+.mt-item-event .mt-body { padding-top: 1px; padding-bottom: 3px; }
+.mt-item-event .mt-meta { margin-top: 2px; }
+/* Jalons d'évènement colorés : libellé assorti */
+.mt-item-event.mt-tone-success .mt-stage { color: var(--color-green-deep, #10531a); }
+.mt-item-event.mt-tone-danger .mt-stage { color: #b91c1c; }
 
-.mt-empty { color: #6b7280; font-style: italic; }
+.mt-empty { color: var(--color-text-light, #6b7280); font-style: italic; }
 
 /* Bouton « journal complet » : révèle les évènements techniques masqués par
    défaut (réservé à l'admin via la prop showFullJournalToggle). */
 .mt-toggle {
-  margin-top: 10px;
-  margin-left: 4px;
-  background: none;
-  border: none;
-  padding: 4px 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  background: var(--color-white, #fff);
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 999px;
+  padding: 6px 14px;
+  min-height: 32px;
   font-size: 0.8rem;
-  color: #6b7280;
+  font-weight: 500;
+  color: var(--color-text-light, #6b7280);
   cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out, background 0.15s ease-out;
 }
-.mt-toggle:hover { color: #10531a; }
+.mt-toggle:hover {
+  color: var(--color-green-deep, #10531a);
+  border-color: #cfe3d4;
+  background: #f7faf7;
+}
+.mt-toggle:focus-visible {
+  outline: 2px solid var(--color-green-deep, #10531a);
+  outline-offset: 2px;
+}
+
+/* Mobile : resserre légèrement sans casser l'alignement de la ligne */
+@media (max-width: 480px) {
+  .mt-item { gap: 10px; }
+  .mt-meta { gap: 6px; }
+  .mt-note { padding: 7px 10px; }
+}

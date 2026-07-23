@@ -9,8 +9,9 @@ import Loader from '../../../components/common/Loader';
 import {
   getConsignmentStats, getConsignmentWarehouses, searchConsignmentProducts,
   listConsignors, createConsignor, updateConsignor, searchConsignorTiers,
-  listDeposits, getDeposit, createDeposit, validateDeposit, deleteDeposit, returnDeposit,
+  listDeposits, getDeposit, createDeposit, validateDeposit, deleteDeposit, returnDeposit, openDepositPdf,
   previewSettlement, listSettlements, getSettlement, createSettlement, paySettlement, deleteSettlement, openSettlementPdf,
+  createSettlementInvoice, openSettlementInvoicePdf,
 } from '../../../api/consignments';
 import './Consignment.css';
 
@@ -377,6 +378,7 @@ function DepositDetailModal({ id, onClose, onChanged }) {
               {confirmDelete && (
                 <button className="cv-btn cv-btn-danger" onClick={doDelete} disabled={busy}>{busy ? '…' : 'Confirmer la suppression'}</button>
               )}
+              <button className="cv-btn cv-btn-outline" onClick={() => openDepositPdf(dto.id)}><FiDownload size={14} /> Bon de dépôt</button>
               {dto.status === 'validated' && !showReturns && (
                 <button className="cv-btn cv-btn-outline" onClick={() => setShowReturns(true)} disabled={busy}><FiCornerUpLeft size={14} /> Retour d'invendus</button>
               )}
@@ -499,6 +501,7 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [payRef, setPayRef] = useState('');
+  const [payMode, setPayMode] = useState('LIQ');
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const load = useCallback(() => {
@@ -511,11 +514,23 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
     if (busy) return;
     setBusy(true);
     try {
-      await paySettlement(id, payRef);
-      toast.success('Reversement marqué payé');
+      const { data } = await paySettlement(id, payRef, payMode);
+      toast.success(data.paymentId ? 'Reversement payé — règlement enregistré en comptabilité' : 'Reversement marqué payé');
       onChanged(); load();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur');
+    } finally { setBusy(false); }
+  };
+
+  const doCreateInvoice = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { data } = await createSettlementInvoice(id);
+      toast.success(`Facture fournisseur ${data.ref} créée`);
+      onChanged(); load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur création facture');
     } finally { setBusy(false); }
   };
 
@@ -546,7 +561,8 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
             <div className="cv-info-row"><span className="lbl">Déposant</span><span className="val">{dto.consignorName}</span></div>
             <div className="cv-info-row"><span className="lbl">Période</span><span className="val">{fmtDate(dto.periodFrom)} → {fmtDate(dto.periodTo)}</span></div>
             <div className="cv-info-row"><span className="lbl">Créé le</span><span className="val">{fmtDate(dto.createdAt)} · {dto.createdBy}</span></div>
-            {dto.status === 'paid' && <div className="cv-info-row"><span className="lbl">Payé le</span><span className="val">{fmtDate(dto.paidAt)} · {dto.paidBy}{dto.paymentRef ? ` · ${dto.paymentRef}` : ''}</span></div>}
+            {dto.status === 'paid' && <div className="cv-info-row"><span className="lbl">Payé le</span><span className="val">{fmtDate(dto.paidAt)} · {dto.paidBy}{dto.paymentModeLabel ? ` · ${dto.paymentModeLabel}` : ''}{dto.paymentRef ? ` · ${dto.paymentRef}` : ''}</span></div>}
+            {dto.invoice && <div className="cv-info-row"><span className="lbl">Facture fournisseur</span><span className="val">{dto.invoice.ref}{dto.invoice.paymentId ? ' · réglée' : ' · en attente de règlement'}</span></div>}
 
             <div className="cv-table-wrap" style={{ marginTop: 12 }}>
               <table className="cv-table" style={{ minWidth: 0 }}>
@@ -570,23 +586,49 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
               <div className="cv-total-item net"><div className="lbl">Net à reverser</div><div className="val">{fmtFcfa(dto.totalNetDue)}</div></div>
             </div>
 
+            {dto.status === 'draft' && !dto.invoice && dto.totalNetDue > 0 && (
+              <div className="cv-callout"><FiAlertTriangle size={16} /> La vente de ces livres est déjà comptée en totalité dans votre chiffre d'affaires. Créez la facture fournisseur du net à reverser avant de régler : elle équilibre vos comptes (sans elle, le CA reste gonflé de {fmtFcfa(dto.totalNetDue)}) et c'est elle que le règlement vient solder.</div>
+            )}
+
             {dto.status === 'draft' && (
-              <div className="cv-field" style={{ marginTop: 12 }}>
-                <label>Référence du paiement (facultatif)</label>
-                <input value={payRef} onChange={e => setPayRef(e.target.value)} placeholder="Wave, OM, virement, espèces…" maxLength={120} />
+              <div className="cv-grid-2" style={{ marginTop: 12 }}>
+                <div className="cv-field">
+                  <label>Mode de règlement{dto.invoice ? ' *' : ''}</label>
+                  <select className="cv-select" style={{ width: '100%' }} value={payMode} onChange={e => setPayMode(e.target.value)}>
+                    <option value="LIQ">Espèces</option>
+                    <option value="WAVE">Wave</option>
+                    <option value="OM">Orange Money</option>
+                    <option value="VIR">Virement bancaire</option>
+                    <option value="CHQ">Chèque</option>
+                  </select>
+                  {dto.invoice && <span className="cv-line-sub">Solde la facture {dto.invoice.ref} et enregistre la sortie d'argent.</span>}
+                </div>
+                <div className="cv-field">
+                  <label>Référence du paiement (facultatif)</label>
+                  <input value={payRef} onChange={e => setPayRef(e.target.value)} placeholder="N° de transaction, bordereau…" maxLength={120} />
+                </div>
               </div>
             )}
 
             <div className="cv-modal-actions">
-              {dto.status === 'draft' && !confirmDelete && (
+              {dto.status === 'draft' && !dto.invoice && !confirmDelete && (
                 <button className="cv-btn cv-btn-danger" onClick={() => setConfirmDelete(true)} disabled={busy}><FiTrash2 size={14} /> Supprimer</button>
               )}
               {confirmDelete && (
                 <button className="cv-btn cv-btn-danger" onClick={doDelete} disabled={busy}>{busy ? '…' : 'Confirmer'}</button>
               )}
               <button className="cv-btn cv-btn-outline" onClick={() => openSettlementPdf(dto.id)}><FiDownload size={14} /> Relevé PDF</button>
+              {dto.invoice ? (
+                <button className="cv-btn cv-btn-outline" onClick={() => openSettlementInvoicePdf(dto.id)}><FiDownload size={14} /> Facture {dto.invoice.ref}</button>
+              ) : dto.status === 'draft' && (
+                <button className="cv-btn cv-btn-outline" onClick={doCreateInvoice} disabled={busy}><FiFileText size={14} /> {busy ? '…' : 'Créer la facture fournisseur'}</button>
+              )}
               {dto.status === 'draft' && (
-                <button className="cv-btn cv-btn-success" onClick={doPay} disabled={busy}><FiCheckCircle size={14} /> {busy ? '…' : 'Marquer payé'}</button>
+                <button className="cv-btn cv-btn-success" onClick={doPay}
+                  disabled={busy || (!dto.invoice && dto.totalNetDue > 0)}
+                  title={!dto.invoice && dto.totalNetDue > 0 ? "Créez d'abord la facture fournisseur" : undefined}>
+                  <FiCheckCircle size={14} /> {busy ? '…' : 'Marquer payé'}
+                </button>
               )}
             </div>
           </>
@@ -689,7 +731,7 @@ export default function ConsignmentPanel() {
           ) : (
             <div className="cv-table-wrap">
               <table className="cv-table">
-                <thead><tr><th>N°</th><th>Déposant</th><th className="cv-num">Exempl.</th><th className="cv-num">Valeur</th><th>Statut</th><th>Date</th></tr></thead>
+                <thead><tr><th>N°</th><th>Déposant</th><th className="cv-num">Exempl.</th><th className="cv-num">Valeur</th><th>Statut</th><th>Date</th><th></th></tr></thead>
                 <tbody>
                   {deposits.deposits.map(d => (
                     <tr key={d.id} className="cv-row" onClick={() => setDepositId(d.id)}>
@@ -699,6 +741,7 @@ export default function ConsignmentPanel() {
                       <td className="cv-num">{fmtFcfa(d.totalValue)}</td>
                       <td><span className={`cv-badge cv-badge-${d.status}`}>{d.statusLabel}</span></td>
                       <td>{fmtDate(d.depositDate || d.createdAt)}</td>
+                      <td onClick={e => e.stopPropagation()}><button className="cv-icon-btn" onClick={() => openDepositPdf(d.id)} title="Bon de dépôt PDF"><FiDownload size={16} /></button></td>
                     </tr>
                   ))}
                 </tbody>

@@ -331,3 +331,74 @@ export async function sendSpecialOrderNotification({ transporter, order, event, 
     return false;
   }
 }
+
+const STAFF_ALERT_TEXT = {
+  available: {
+    subject: 'à prévenir : son livre est arrivé',
+    title: '📞 Client à appeler — son livre est disponible',
+    line: "Son livre est arrivé, mais aucun canal automatique n'a pu le joindre. Il faut l'appeler.",
+  },
+  balance_reminder: {
+    subject: 'à relancer : solde impayé',
+    title: '📞 Client à appeler — solde impayé',
+    line: "Le rappel de solde n'a pu être envoyé par aucun canal. Il faut le relancer de vive voix.",
+  },
+};
+
+/**
+ * Alerte INTERNE à l'équipe : le client attend une action de sa part, mais aucun
+ * canal automatique n'a abouti (pas d'email au dossier, SMS et WhatsApp non branchés).
+ * L'email dit qui appeler, à quel numéro, et pourquoi. Best-effort (ne throw pas).
+ *
+ * @param {Object} deps
+ * @param {Object} deps.transporter
+ * @param {string[]} deps.to - emails des agents à prévenir
+ * @param {Object} deps.order - DTO commande (ref, customer, totals, lines, statusInfo)
+ * @param {string} deps.event - available | balance_reminder
+ * @param {string} [deps.siteUrl]
+ */
+export async function sendSpecialOrderStaffAlert({ transporter, to, order, event, siteUrl }) {
+  if (!transporter || !to?.length || !order) return false;
+  const txt = STAFF_ALERT_TEXT[event];
+  if (!txt) return false;
+
+  const c = order.customer || {};
+  const t = order.totals || {};
+  const phone = c.phone ? String(c.phone) : null;
+  const books = (order.lines || []).map((l) => `${escapeHtml(l.title)}${l.quantity > 1 ? ` × ${l.quantity}` : ''}`).join('<br>') || '—';
+  const link = `${siteUrl || ''}/admin/special-orders`;
+
+  const body = `
+    <p>${escapeHtml(txt.line)}</p>
+    <p style="margin:16px 0 6px;padding:14px 16px;background:#fff7ed;border-left:4px solid #b45309;border-radius:8px">
+      <span style="font-size:17px;font-weight:800;color:#0f172a">${escapeHtml(c.name || 'Client')}</span><br>
+      ${phone
+        ? `<a href="tel:${escapeHtml(phone.replace(/\s/g, ''))}" style="font-size:20px;font-weight:800;color:#b45309;text-decoration:none">${escapeHtml(phone)}</a>`
+        : '<span style="color:#991b1b;font-weight:700">Aucun téléphone au dossier — client injoignable</span>'}
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:12px">
+      <tr><td style="padding:6px 0;color:#6b7280">Commande</td><td style="padding:6px 0;text-align:right;font-weight:700">${escapeHtml(order.ref || '')}</td></tr>
+      <tr><td style="padding:6px 0;color:#6b7280">Ouvrage(s)</td><td style="padding:6px 0;text-align:right">${books}</td></tr>
+      <tr><td style="padding:6px 0;color:#6b7280">Total</td><td style="padding:6px 0;text-align:right">${fmtPrice(t.total || 0)}</td></tr>
+      ${t.balance > 0
+        ? `<tr><td style="padding:6px 0;color:#6b7280">Reste à payer</td><td style="padding:6px 0;text-align:right;font-weight:800;color:#b45309">${fmtPrice(t.balance)}</td></tr>`
+        : '<tr><td style="padding:6px 0;color:#6b7280">Règlement</td><td style="padding:6px 0;text-align:right;color:#166534;font-weight:700">Soldée</td></tr>'}
+    </table>
+    <p style="margin-top:16px;color:#6b7280;font-size:13px">
+      Après l'appel, enregistrez-le dans la fiche (« Contact client » → <strong>Client appelé</strong>) :
+      sans cette trace, la commande restera signalée comme « client jamais joint ».
+    </p>`;
+
+  try {
+    await transporter.sendMail({
+      from: `"${SITE_NAME}" <commandes@senharmattan.com>`,
+      to: to.join(','),
+      subject: `[Action requise] ${order.ref || 'Commande spéciale'} — ${c.name || 'Client'} ${txt.subject}`,
+      html: shellHtml({ title: txt.title, body, ctaUrl: link, ctaLabel: 'Ouvrir la commande' }),
+    });
+    return true;
+  } catch (err) {
+    console.error('[MAIL] sendSpecialOrderStaffAlert failed:', err.message);
+    return false;
+  }
+}

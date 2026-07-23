@@ -648,6 +648,18 @@ db.exec(`CREATE TABLE IF NOT EXISTS book_tag_products (
 db.exec(`CREATE INDEX IF NOT EXISTS idx_btp_tag ON book_tag_products(tag_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_btp_product ON book_tag_products(product_id)`);
 
+// Date de parution DURABLE par produit. book_upcoming est vidé au jour J (le
+// flag « à paraître » disparaît) : cette table conserve la date réelle de
+// sortie pour piloter automatiquement le tag « Nouveautés » (entrée au jour J,
+// sortie au bout de la fenêtre). Alimentée par la fiche livre (release_date)
+// et par le cron jour J.
+db.exec(`CREATE TABLE IF NOT EXISTS book_release_dates (
+  product_id  INTEGER PRIMARY KEY,
+  release_date TEXT NOT NULL,            -- ISO yyyy-mm-dd
+  source      TEXT,                      -- 'fiche' | 'jour_j'
+  updated_at  TEXT DEFAULT (datetime('now'))
+)`);
+
 // Junction livre ↔ auteur SQLite (Phase 1 du refactor auteur, 2026-05-24)
 // `pe.auteur` Dolibarr reste source de vérité lecture publique. Cette table est
 // remplie en dual-write par BookForm save quand le nom matche un author SQLite.
@@ -1045,6 +1057,7 @@ import { createManuscriptRouter } from './manuscript-routes.js';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
 import { sendTransitionEmail, ensureNotificationsSchema, createAuthorNotification, getAuthorPreferences, notifyTransition as wfNotifyTransition } from './manuscript-emails.js';
 import { ensureFileTokensSchema, createPublicFileRouter, purgeExpiredFileTokens } from './manuscript-file-tokens.js';
+import { ensureVersioningSchema, createDepositRouter } from './manuscript-versions.js';
 
 // Initialise la table author_notifications (cloche in-app auteur)
 try { ensureNotificationsSchema(db); console.log('[NOTIF] Schéma author_notifications OK'); }
@@ -1061,6 +1074,21 @@ try {
 }
 catch (err) { console.error('[FILES] Init schéma:', err.message); }
 app.use('/api/files', createPublicFileRouter({ db, limiter: fileDownloadLimiter }));
+
+// Versionnage du fichier manuscrit : colonnes sha256/note/jalon/définitive/purge
+// sur manuscript_files + table des liens de dépôt auteur. Le router public
+// /api/deposit permet à l'auteur (lien tokenisé, sans connexion) de télécharger
+// la version courante et de déposer sa version révisée.
+try { ensureVersioningSchema(db); console.log('[VERSIONS] Schéma versionnage manuscrits OK'); }
+catch (err) { console.error('[VERSIONS] Init schéma:', err.message); }
+app.use('/api/deposit', createDepositRouter({
+  db,
+  downloadLimiter: fileDownloadLimiter,
+  uploadLimiter: manuscriptSubmitLimiter,
+  csrfProtection,
+  transporter,
+  siteUrl: SITE_URL,
+}));
 
 // Expose la config site pour les emails admin (lecture seule, rafraîchie à chaque notif)
 // Utilisée par notifyTransition pour résoudre l'adresse admin de réception
@@ -1806,6 +1834,45 @@ try {
   console.error('[LEGAL_DEPOSIT] Failed to mount legal deposit routes:', err);
 }
 
+// ─── PARUTIONS (relais commercial post-impression) ──────────
+import { createParutionsRouter, runReleaseDaySwitch, refreshNouveautesTag } from './parutions-routes.js';
+try {
+  app.use('/api/admin/parutions', createParutionsRouter({
+    db, dolibarrPool, auth: adminAuth(db), csrfProtection, siteUrl: SITE_URL, transporter, cache,
+  }));
+  console.log('[PARUTIONS] Parutions routes mounted');
+} catch (err) {
+  console.error('[PARUTIONS] Failed to mount parutions routes:', err);
+}
+
+// Jour J de parution — quotidien à 7h10 Dakar (serveur CEST = 9h10) : les livres
+// « à paraître » dont la date est atteinte basculent en disponibles au catalogue.
+// (Les précommandes, elles, sont déjà basculées par le cron preorders horaire.)
+cron.schedule('10 9 * * *', () => {
+  try {
+    const n = runReleaseDaySwitch(db, { cache });
+    if (n > 0) console.log(`[CRON] ${n} parution(s) basculée(s) « à paraître » → disponible`);
+  } catch (err) {
+    console.error('[CRON] Release day switch error:', err.message);
+  }
+  // Puis synchronise les « Nouveautés » avec les dates de parution : entrée au
+  // jour J (dates conservées ci-dessus), sortie au bout de la fenêtre.
+  refreshNouveautesTag(db, { cache, dolibarrPool })
+    .then(({ added, removed }) => {
+      if (added || removed) console.log(`[CRON] Nouveautés synchronisées : +${added} / -${removed}`);
+    })
+    .catch((err) => console.error('[CRON] Refresh nouveautés error:', err.message));
+});
+
+// Cohérence immédiate au démarrage (sans attendre le cron du matin).
+setTimeout(() => {
+  refreshNouveautesTag(db, { cache, dolibarrPool })
+    .then(({ added, removed }) => {
+      if (added || removed) console.log(`[BOOT] Nouveautés synchronisées : +${added} / -${removed}`);
+    })
+    .catch((err) => console.error('[BOOT] Refresh nouveautés error:', err.message));
+}, 15000);
+
 // ─── YOUTUBE VIDEOS ─────────────────────────────────────────
 const siteConf = getSiteConfig();
 const YT_CHANNEL_ID = siteConf.youtube_channel_id || 'UCnXwbe8yIv7sBohERVNB-ZA';
@@ -1885,6 +1952,20 @@ app.get('/api/newsletter/confirm', (req, res) => {
     return res.status(400).send('Lien invalide ou expiré.');
   }
   res.send('<h1>Merci !</h1><p>Votre inscription à la newsletter est confirmée.</p><a href="/">Retour au site</a>');
+});
+
+// Désinscription en un clic (lien personnel inclus dans chaque newsletter de
+// parution — le token est (ré)généré à l'envoi par le module Parutions).
+app.get('/api/newsletter/unsubscribe', (req, res) => {
+  const token = String(req.query.token || '').trim();
+  if (token) {
+    const result = db.prepare('DELETE FROM newsletter WHERE token = ?').run(token);
+    if (result.changes > 0) {
+      return res.send('<h1>Désinscription confirmée</h1><p>Vous ne recevrez plus notre newsletter.</p><a href="/">Retour au site</a>');
+    }
+  }
+  // Lien générique (préview/test) ou token déjà consommé : on explique quoi faire.
+  res.status(400).send('<h1>Lien de désinscription invalide</h1><p>Ce lien a peut-être déjà été utilisé. Écrivez-nous à contact@senharmattan.com pour être retiré de la liste.</p><a href="/">Retour au site</a>');
 });
 
 function sendConfirmationEmail(email, token) {

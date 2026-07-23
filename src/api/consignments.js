@@ -23,14 +23,22 @@ export const updateDeposit = (id, data) => api.put(`/admin/consignments/deposits
 export const deleteDeposit = (id) => api.delete(`/admin/consignments/deposits/${id}`);
 export const validateDeposit = (id) => api.post(`/admin/consignments/deposits/${id}/validate`);
 export const returnDeposit = (id, lines) => api.post(`/admin/consignments/deposits/${id}/return`, { lines });
+// Bon de dépôt PDF : ouvre le document (cookie d'auth envoyé automatiquement).
+export const openDepositPdf = (id) => window.open(`/api/admin/consignments/deposits/${id}/pdf`, '_blank', 'noopener');
 
 // ─── Reversements ────────────────────────────────────────────
 export const previewSettlement = (params) => api.get('/admin/consignments/settlements/preview', { params });
 export const listSettlements = (params = {}) => api.get('/admin/consignments/settlements', { params });
 export const getSettlement = (id) => api.get(`/admin/consignments/settlements/${id}`);
 export const createSettlement = (data) => api.post('/admin/consignments/settlements', data);
-export const paySettlement = (id, payment_ref) => api.post(`/admin/consignments/settlements/${id}/pay`, { payment_ref });
+export const paySettlement = (id, payment_ref, payment_mode) =>
+  api.post(`/admin/consignments/settlements/${id}/pay`, { payment_ref, payment_mode });
 export const deleteSettlement = (id) => api.delete(`/admin/consignments/settlements/${id}`);
+
+// Facture fournisseur du net à reverser (contrepartie comptable de la vente).
+export const createSettlementInvoice = (id) => api.post(`/admin/consignments/settlements/${id}/supplier-invoice`);
+export const openSettlementInvoicePdf = (id) =>
+  window.open(`/api/admin/consignments/settlements/${id}/supplier-invoice/pdf`, '_blank', 'noopener');
 
 // PDF : ouvre le relevé (cookie d'auth envoyé automatiquement).
 export const openSettlementPdf = (id) => window.open(`/api/admin/consignments/settlements/${id}/pdf`, '_blank', 'noopener');

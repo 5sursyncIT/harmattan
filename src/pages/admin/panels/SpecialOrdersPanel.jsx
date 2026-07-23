@@ -1,9 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   FiBookOpen, FiSearch, FiPlus, FiChevronLeft, FiChevronRight, FiAlertCircle,
-  FiAlertTriangle, FiClock, FiInbox,
+  FiAlertTriangle, FiClock, FiInbox, FiPhoneCall, FiBellOff,
 } from 'react-icons/fi';
-import toast from 'react-hot-toast';
 import Loader from '../../../components/common/Loader';
 import { formatPrice } from '../../../utils/formatters';
 import { listSpecialOrders, getSpecialOrderMeta } from '../../../api/specialOrders';
@@ -13,12 +12,17 @@ import './SpecialOrders.css';
 
 const fmtDate = (s) => (s ? new Date(String(s).replace(' ', 'T')).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
 
+const EMPTY_FILTERS = { status: '', search: '', overdue: '', alert: '', date_from: '', date_to: '', page: 1 };
+
 export default function SpecialOrdersPanel() {
   const [data, setData] = useState({ orders: [], total: 0, pages: 1, kpis: {} });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
-  const [filters, setFilters] = useState({ status: '', search: '', overdue: '', date_from: '', date_to: '', page: 1 });
-  const [meta, setMeta] = useState({ statuses: [], paymentMethods: ['cash', 'wave', 'orange_money', 'virement', 'cb', 'cheque'] });
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [meta, setMeta] = useState({
+    statuses: [], paymentMethods: ['cash', 'wave', 'orange_money', 'virement', 'cb', 'cheque'],
+    alerts: [], channelsEnabled: {},
+  });
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState(null);
 
@@ -46,13 +50,23 @@ export default function SpecialOrdersPanel() {
 
   const statusInfoOf = (key) => meta.statuses.find((s) => s.key === key) || { label: key, bg: '#f1f5f9', color: '#475569' };
 
+  // Alertes : on n'affiche que celles qui existent vraiment aujourd'hui.
+  const alertCounts = k.alerts || {};
+  const liveAlerts = (meta.alerts || []).filter((a) => (alertCounts[a.key] || 0) > 0);
+  const actionRequired = k.actionRequired || 0;
+  const toggleAlert = (key) => update('alert', filters.alert === key ? '' : key);
+
+  // Aucun canal automatique vers le client : l'équipe doit appeler à la main.
+  const autoChannels = Object.entries(meta.channelsEnabled || {}).filter(([, on]) => on).map(([c]) => c);
+  const noAutoReach = autoChannels.length > 0 && !autoChannels.some((c) => c === 'sms' || c === 'whatsapp');
+
   const cards = [
     { v: k.total ?? 0, l: 'Commandes', c: '#0f172a' },
+    { v: actionRequired, l: 'À traiter', c: '#b91c1c', alertKey: 'any' },
     { v: enAttente, l: 'En attente', c: '#92400e' },
     { v: enCours, l: 'En cours', c: '#1e40af' },
     { v: k.ready ?? 0, l: 'Prêtes à retirer', c: '#166534' },
     { v: cloturees, l: 'Clôturées / retirées', c: '#334155' },
-    { v: k.overdue ?? 0, l: 'En retard', c: '#b45309', overdue: true },
     { v: formatPrice(k.collected ?? 0), l: 'Encaissé', c: '#166534', money: true },
     { v: formatPrice(k.balanceDue ?? 0), l: 'Solde dû', c: '#b45309', money: true },
   ];
@@ -69,14 +83,53 @@ export default function SpecialOrdersPanel() {
 
       {/* Dashboard KPIs */}
       <div className="so-kpis">
-        {cards.map((c, i) => (
-          <div key={i} className={`so-kpi${c.overdue ? ' clickable' : ''}${c.overdue && filters.overdue === '1' ? ' active' : ''}`}
-            onClick={c.overdue ? () => update('overdue', filters.overdue === '1' ? '' : '1') : undefined}>
-            <div className="so-kpi-value" style={{ color: c.c, fontSize: c.money ? '1.15rem' : undefined }}>{c.v}</div>
-            <div className="so-kpi-label">{c.overdue && <FiAlertTriangle size={11} style={{ verticalAlign: -1, marginRight: 3 }} />}{c.l}</div>
-          </div>
-        ))}
+        {cards.map((c, i) => {
+          const active = c.alertKey && filters.alert === c.alertKey;
+          return (
+            <div key={i} className={`so-kpi${c.alertKey ? ' clickable' : ''}${active ? ' active' : ''}${c.alertKey && c.v > 0 ? ' danger' : ''}`}
+              onClick={c.alertKey ? () => toggleAlert(c.alertKey) : undefined}>
+              <div className="so-kpi-value" style={{ color: c.c, fontSize: c.money ? '1.15rem' : undefined }}>{c.v}</div>
+              <div className="so-kpi-label">
+                {c.alertKey && c.v > 0 && <FiAlertTriangle size={11} style={{ verticalAlign: -1, marginRight: 3 }} />}{c.l}
+              </div>
+            </div>
+          );
+        })}
       </div>
+
+      {/* Bandeau « À traiter » — le client n'étant pas joignable automatiquement,
+          c'est ici que l'équipe voit ce qu'elle doit faire elle-même. */}
+      {liveAlerts.length > 0 && (
+        <div className="so-alertbar">
+          <div className="so-alertbar-head">
+            <span className="so-alertbar-title">
+              <FiPhoneCall size={14} />
+              {actionRequired > 0
+                ? <>{actionRequired} commande{actionRequired > 1 ? 's' : ''} à traiter</>
+                : <>Points de vigilance</>}
+            </span>
+            {noAutoReach && (
+              <span className="so-alertbar-hint">
+                <FiBellOff size={12} /> SMS et WhatsApp non branchés : les clients doivent être appelés, puis l'appel tracé dans la fiche.
+              </span>
+            )}
+          </div>
+          <div className="so-alertbar-chips">
+            {liveAlerts.map((a) => (
+              <button key={a.key} type="button"
+                className={`so-alert-chip ${a.severity}${filters.alert === a.key ? ' active' : ''}`}
+                onClick={() => toggleAlert(a.key)}>
+                <strong>{alertCounts[a.key]}</strong> {a.label}
+              </button>
+            ))}
+            {filters.alert && (
+              <button type="button" className="so-alert-chip clear" onClick={() => update('alert', '')}>
+                Tout afficher
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Filtres */}
       <div className="so-filters">
@@ -90,8 +143,8 @@ export default function SpecialOrdersPanel() {
         </select>
         <input type="date" value={filters.date_from} onChange={(e) => update('date_from', e.target.value)} title="Du" />
         <input type="date" value={filters.date_to} onChange={(e) => update('date_to', e.target.value)} title="Au" />
-        {(filters.search || filters.status || filters.overdue || filters.date_from || filters.date_to) && (
-          <button className="btn btn-outline btn-sm" onClick={() => setFilters({ status: '', search: '', overdue: '', date_from: '', date_to: '', page: 1 })}>Réinitialiser</button>
+        {(filters.search || filters.status || filters.overdue || filters.alert || filters.date_from || filters.date_to) && (
+          <button className="btn btn-outline btn-sm" onClick={() => setFilters(EMPTY_FILTERS)}>Réinitialiser</button>
         )}
       </div>
 
@@ -120,7 +173,8 @@ export default function SpecialOrdersPanel() {
                 {data.orders.map((o) => {
                   const si = o.statusInfo || statusInfoOf(o.status);
                   return (
-                    <tr key={o.id} style={{ cursor: 'pointer' }} onClick={() => setDetailId(o.id)}>
+                    <tr key={o.id} className={o.alertLevel ? `so-tr-${o.alertLevel}` : ''}
+                      style={{ cursor: 'pointer' }} onClick={() => setDetailId(o.id)}>
                       <td><strong style={{ color: '#10531a', textDecoration: 'underline', textUnderlineOffset: 3 }}>{o.ref}</strong></td>
                       <td>{o.customer.name}{o.customer.phone ? <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>{o.customer.phone}</div> : ''}</td>
                       <td style={{ fontSize: '0.84rem' }}>
@@ -133,7 +187,15 @@ export default function SpecialOrdersPanel() {
                       </td>
                       <td>
                         <span className="so-badge" style={{ background: si.bg, color: si.color }}>{si.label}</span>
-                        {o.overdue && <div className="so-overdue" style={{ marginTop: 3 }}><FiAlertTriangle size={11} /> retard</div>}
+                        {(o.alerts || []).length > 0 && (
+                          <div className="so-row-alerts">
+                            {o.alerts.map((a) => (
+                              <span key={a.key} className={`so-alert-tag ${a.severity}`} title={a.detail}>
+                                {a.severity === 'action' && <FiAlertTriangle size={9} />} {a.label}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </td>
                       <td style={{ fontSize: '0.82rem', color: '#64748b' }}>{o.expectedDate ? fmtDate(o.expectedDate) : (o.delayEstimate || '—')}</td>
                       <td style={{ fontSize: '0.82rem', color: '#64748b' }}><FiClock size={11} style={{ verticalAlign: -1, marginRight: 3 }} />{fmtDate(o.createdAt)}</td>

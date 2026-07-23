@@ -106,3 +106,130 @@
 .so-money-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.92rem; padding: 2px 0; }
 .so-money-line.total { font-size: 1.05rem; font-weight: 800; color: #10531a; }
 .so-money-line.due { font-weight: 700; color: #b45309; }
+
+/* ─── Alertes internes ────────────────────────────────────────────
+   Le client n'est pas joignable automatiquement (ni SMS ni WhatsApp) : c'est
+   l'équipe qui doit agir. Ces alertes rendent visible ce qu'il reste à faire.
+   Trois niveaux : action (rouge, à traiter tout de suite), warn (orange, ça
+   dérive), info (gris-bleu, à surveiller). */
+
+.so-kpi.danger { border-color: #fecaca; background: #fffbfb; }
+.so-kpi.danger.active { border-color: #b91c1c; box-shadow: 0 0 0 1px #b91c1c inset; }
+
+/* Bandeau « À traiter » */
+.so-alertbar {
+  background: #fff;
+  border: 1px solid #fed7aa;
+  border-left: 4px solid #b45309;
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+.so-alertbar-head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 10px;
+}
+.so-alertbar-title {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.9rem; font-weight: 800; color: #9a3412;
+}
+.so-alertbar-hint {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.76rem; color: #92400e; background: #fffbeb;
+  padding: 4px 9px; border-radius: 8px;
+}
+.so-alertbar-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+
+.so-alert-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 11px; border-radius: 999px; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600; font-family: inherit;
+  border: 1px solid transparent; transition: filter .15s, box-shadow .15s;
+}
+.so-alert-chip:hover { filter: brightness(0.96); }
+.so-alert-chip strong { font-weight: 800; }
+.so-alert-chip.action { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+.so-alert-chip.warn   { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.so-alert-chip.info   { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
+.so-alert-chip.clear  { background: #fff; color: #64748b; border-color: #cbd5e1; }
+.so-alert-chip.active { box-shadow: 0 0 0 2px currentColor inset; }
+
+/* Liseré de gravité sur les lignes du tableau */
+.admin-table tr.so-tr-action td:first-child { box-shadow: inset 3px 0 0 #dc2626; }
+.admin-table tr.so-tr-warn   td:first-child { box-shadow: inset 3px 0 0 #f59e0b; }
+.admin-table tr.so-tr-info   td:first-child { box-shadow: inset 3px 0 0 #cbd5e1; }
+
+/* Puces d'alerte sous le statut */
+.so-row-alerts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.so-alert-tag {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 0.68rem; font-weight: 700; white-space: nowrap; cursor: help;
+}
+.so-alert-tag.action { background: #fef2f2; color: #991b1b; }
+.so-alert-tag.warn   { background: #fffbeb; color: #92400e; }
+.so-alert-tag.info   { background: #f1f5f9; color: #64748b; }
+
+/* Encart d'alertes en tête de fiche */
+.so-alertbox {
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.so-alertbox.action { background: #fef2f2; border: 1px solid #fecaca; }
+.so-alertbox.warn   { background: #fffbeb; border: 1px solid #fde68a; }
+.so-alertbox.info   { background: #f8fafc; border: 1px solid #e2e8f0; }
+.so-alertbox-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: 0.84rem; line-height: 1.4;
+}
+.so-alertbox-item.action { color: #991b1b; }
+.so-alertbox-item.warn   { color: #92400e; }
+.so-alertbox-item.info   { color: #475569; }
+.so-alertbox-item svg { flex-shrink: 0; margin-top: 2px; }
+
+/* Bloc « Contact client » (l'appel tracé vaut notification) */
+.so-contact { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px; padding: 12px; }
+.so-contact-lead { font-size: 0.84rem; color: #0c4a6e; margin: 0 0 10px; }
+.so-contact-lead a { font-weight: 800; color: #0369a1; }
+.so-contact-lead.warn { color: #991b1b; }
+
+.so-pill.manual { background: #ecfeff; color: #0e7490; }
+.so-pill.failed.manual { background: #fffbeb; color: #92400e; }
+
+@media (max-width: 640px) {
+  .so-alertbar-head { flex-direction: column; align-items: flex-start; }
+  .so-alertbar-hint { font-size: 0.72rem; }
+}
+
+/* ─── Livraison & comptabilisation ────────────────────────────────
+   Consigne Direction 2026-07-14 : tout encaissement entre au livre comptable,
+   et la remise du livre se constate d'un bouton, à tout moment du cycle. */
+
+.so-deliver {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px;
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #10531a;
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 16px;
+}
+.so-deliver-text { display: flex; flex-direction: column; gap: 2px; }
+.so-deliver-text strong { font-size: 0.92rem; color: #0f172a; }
+.so-deliver-text span { font-size: 0.82rem; color: #475569; }
+
+/* Rattachement comptable des règlements */
+.so-invoice-line {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.8rem; color: #166534; margin: 0 0 10px;
+  background: #f0fdf4; border-radius: 8px; padding: 7px 10px;
+}
+.so-invoice-line.muted { color: #64748b; background: #f8fafc; }
+.so-invoice-line svg { flex-shrink: 0; }
+
+.so-unaccounted {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 3px;
+  font-size: 0.74rem; font-weight: 700; color: #991b1b;
+}
+
+@media (max-width: 640px) {
+  .so-deliver { flex-direction: column; align-items: stretch; }
+  .so-deliver .btn { width: 100%; justify-content: center; }
+}

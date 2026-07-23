@@ -16,6 +16,7 @@ const STAGE_LABELS = {
   editorial_validated: 'Validé', cover_design: 'Couverture',
   bat_author_review: 'BAT auteur', print_preparation: 'Préparation impression',
   printing: 'Impression', printed: 'Imprimé',
+  in_communication: 'En communication', published: 'Paru',
 };
 const STAGE_COLORS = {
   submitted: '#0284c7', in_evaluation: '#ea580c',
@@ -26,6 +27,7 @@ const STAGE_COLORS = {
   editorial_validated: '#10531a', cover_design: '#c026d3',
   bat_author_review: '#7c3aed', print_preparation: '#854d0e',
   printing: '#854d0e', printed: '#10531a',
+  in_communication: '#0b4f6c', published: '#10531a',
 };
 
 function formatDate(ts) {

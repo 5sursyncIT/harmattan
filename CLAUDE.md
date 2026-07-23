@@ -43,9 +43,13 @@ Le déploiement nécessite sudo (dossier Dolibarr appartenant à `www-data`). Le
 **Data flow:** React -> `/api/*` -> Express -> Dolibarr REST API (`DOLAPIKEY` auth)
 
 **Backend modules (server/):**
-- `index.js` — Main Express server: product API, orders, preorders, newsletter, sync crons, webhook handler
+- `index.js` — Main Express server: product API, orders, preorders, newsletter, sync crons, webhook handler, hooks contrat/MO manuscrits
+- `manuscript-workflow.js` — Machine à états manuscrits (stages, transitions, `promoteLatestCorrectionAsAuthorFinal`)
+- `manuscript-routes.js` — Workflow admin : évaluations, corrections, éditorial, couvertures, impression, intervenants
+- `manuscript-emails.js` / `manuscript-file-tokens.js` — Notifs email/cloche + liens tokenisés intervenants
+- `author-routes.js` — Portail auteur (auth, soumission, rework, validations correction/BAT)
 - `pos-routes.js` — POS system: staff PIN auth, sales (invoice + payment + stock), quotes/proforma, cash register, sessions
-- `admin-routes.js` — Admin dashboard: site config, slides, FAQs, manuscripts, newsletter, contact messages
+- `admin-routes.js` — Admin dashboard: site config, slides, FAQs, soumission publique manuscrits (legacy mirror), newsletter, contact messages
 - `admin-stats-routes.js` — Analytics: sales stats, top products, revenue reports
 - `admin-pos-routes.js` — POS management: staff CRUD, device management, PIN expiry
 - `auth-routes.js` — Customer authentication: login, register, password reset, sessions
@@ -105,8 +109,25 @@ ADMIN_DEFAULT_PASSWORD
 - Migration SQL des extrafields : `scripts/add-contract-subtitle-extrafield.sql` (idempotent — `ON DUPLICATE KEY` + `ADD COLUMN IF NOT EXISTS`).
 - **Templates ODT** générés par `scripts/build-contract-templates.mjs` (9 combinaisons + 6 alias legacy = 15 fichiers), déployés via `scripts/deploy-contract-templates.sh` dans `/var/www/html/dolibarr/documents/doctemplates/contracts/`. Wording Article 4 spécifique pour DLL (15 % sur 1000 premiers ex. subventionnés, puis 10 %). Placeholders `{object_options_*}` + `{__THIRDPARTY_NAME/PHONE/EMAIL__}` + `{__ONLINE_SIGN_URL__}`. **Dolibarr ne supporte pas les blocs conditionnels** → l'annexe d'achat auteur apparaît toujours (avec `qty=0` si non activée).
 - **Logo en-tête** : chaque ODT embarque `public/images/logo.png` sous `Pictures/logo.png` (entrée manifest + `draw:frame`/`draw:image` `as-char` en tête de l'ouverture, 4,5 × 2,29 cm). Le chemin source et les dimensions sont en constantes (`LOGO_SRC`, `LOGO_WIDTH_CM`, `LOGO_HEIGHT_CM`) en tête du script. Format ouvrage standard : `15,5 × 24 cm`.
-- Workflow manuscrit : la création auto de contrat (`server/index.js`) bascule sur `harmattan_2024_edition_simple` par défaut.
-- Signature en ligne : URL générée via `generateSignatureUrl(ref)` (HMAC bcrypt avec `DOLIBARR_INSTANCE_KEY` + `DOLIBARR_SIGN_TOKEN`).
+- Workflow manuscrit : la création auto de contrat (`server/index.js` `createContractDraft`) utilise `options_contract_type: 'harmattan_2024'` (brouillon classique — l'éditeur bascule vers DLL / Tamarinier / étendue de droits dans le brouillon). Format ouvrage auto : `15 × 21 cm`.
+- Signature en ligne : URL générée via `generateSignatureUrl(ref)` (HMAC bcrypt avec `DOLIBARR_INSTANCE_KEY` + `DOLIBARR_SIGN_TOKEN`). Le lien n'est **pas** envoyé à la création auto — l'éditeur envoie manuellement via `POST /api/admin/contracts/:id/send-signature`.
+
+## Workflow manuscrits
+
+Machine à états SQLite (`manuscripts.current_stage`) dans `server/manuscript-workflow.js`, routes admin dans `manuscript-routes.js`, portail auteur dans `author-routes.js`.
+
+**17 stages** : `submitted` → `in_evaluation` → (`evaluation_rework` | `evaluation_negative` | `evaluation_positive`) → `contract_pending` → `contract_signed` → `payment_pending` → `in_correction` → (`correction_author_review`) → `in_editorial` → `editorial_validated` → `cover_design` → `bat_author_review` → `print_preparation` → `printing` → `printed`.
+
+**Acteurs :**
+- Pilotage : `admin` / `editor` ; production éditoriale + couvertures : rôle `production`
+- Intervenants externes (évaluateur, correcteur, imprimeur) : carnet `intervenants` + emails + tokens fichier (`manuscript-file-tokens.js`) — **pas** de comptes dédiés (`evaluateur` / `infographiste` / `imprimeur` sont `deprecated` dans `roles-config.js`)
+- Auteur (portail) : dépôt rework (`POST /api/author/manuscripts/:id/submit-rework`), validations correction / BAT
+
+**Fichiers (`manuscript_files.kind`) :** `original`, `evaluation_report`, `correction`, `author_final` (promu depuis la dernière correction à l'entrée en éditorial), `cover_artwork`, `bat_cover`, `print_ready` (upload à la préparation impression).
+
+**Contrat auto** (évaluation favorable) : hook `onEvaluationPositive` → `createContractDraft` (non bloquant ; échec → log `contract_autocreate_failed`, réparation via create/link-contract sur la fiche). Signature détectée par cron 5 min (`signed_status` ∈ {2,9}) → `contract_signed` → `payment_pending`. Le paiement du devis n'est **pas** obligatoire pour démarrer la correction.
+
+**UI admin :** `/admin/manuscripts`, `/admin/evaluations`, `/admin/corrections`, `/admin/production`, `/admin/printing`, `/admin/intervenants`. Portail : `/auteur/*`. Public : `/se-faire-editer`.
 
 ## Auteurs & Tiers — invariant « un auteur est forcément un tiers »
 
@@ -158,11 +179,13 @@ In-memory cache (`server/sync.js` SimpleCache) with TTL. Cron jobs:
 
 ## Routes
 
-**Shop (French URLs):** `/catalogue`, `/produit/:id`, `/panier`, `/commande`, `/connexion`, `/inscription`, `/compte`, `/contact`, `/a-propos`, `/faq`, `/cgv`, `/mentions-legales`, `/suivi-commande`
+**Shop (French URLs):** `/catalogue`, `/produit/:id`, `/panier`, `/commande`, `/connexion`, `/inscription`, `/compte`, `/contact`, `/a-propos`, `/faq`, `/cgv`, `/mentions-legales`, `/suivi-commande`, `/se-faire-editer`, `/auteurs`, `/auteur/:slug`
+
+**Portail auteur :** `/auteur/connexion`, `/auteur/dashboard`, `/auteur/soumettre`, `/auteur/manuscrits/:id`
 
 **POS:** `/pos/connexion` (PIN login), `/pos` (main POS interface)
 
-**Admin:** `/admin` (login), `/admin/*` (stats, config, slides, faq, contacts, manuscripts, newsletter, books, pos, contracts, users, activity-log, profile)
+**Admin:** `/admin` (login), `/admin/*` (stats, config, slides, faq, contacts, manuscripts, evaluations, corrections, production, printing, intervenants, newsletter, books, pos, contracts, users, activity-log, profile)
 
 ## Admin Roles (RBAC)
 
@@ -173,11 +196,13 @@ Whitelist par rôle dans `server/admin-routes.js` (`ROLE_ALLOWED_PATHS`). `super
 | `super_admin` | Tout + gestion utilisateurs |
 | `admin` | Tout sauf gestion utilisateurs |
 | `editor` | Livres, manuscrits, contrats, bannières, tags de curation, stats |
+| `production` | Pipeline éditorial + conception couvertures (BAT) — pas le CRUD global manuscrits |
 | `support` | Messages, FAQ, newsletter, clients, stats |
 | `librarian` | **Livres CRUD complet** (création, édition, suppression, upload couverture, assignation des tags de curation aux livres) + Stock en lecture seule. Création/édition/suppression des tags globaux reste réservée aux éditeurs/admins (middleware `blockLibrarianWrite` conservé sur POST/PUT/DELETE `/admin/tags`). |
-| `comptable` | Comptabilité (lecture + écriture), paiements web, stats |
+| `comptable` | Comptabilité (lecture + écriture), paiements web, stats ; notifié à l'évaluation favorable d'un manuscrit |
 | `vendeur` | POS uniquement (via PIN dédié sur `/pos/connexion`) |
-| `evaluateur` / `correcteur` / `infographiste` / `imprimeur` | Workflow éditorial — accès limité à leur étape |
+| `correcteur` | Compte encore dans le RBAC ; pratique = intervenant email du carnet |
+| `evaluateur` / `infographiste` / `imprimeur` | **Dépréciés** — acteurs externes via carnet `intervenants` + tokens, pas de nouveaux comptes |
 
 ## Preorder System
 

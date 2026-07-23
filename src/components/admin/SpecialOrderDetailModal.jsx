@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   FiX, FiUser, FiMail, FiPhone, FiMapPin, FiClock, FiAlertTriangle, FiFileText,
   FiArrowRight, FiTrash2, FiSend, FiPlus, FiDownload, FiEdit2, FiCheckCircle,
+  FiPhoneCall, FiPhoneOff, FiPackage, FiBookOpen, FiRefreshCw,
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import Loader from '../common/Loader';
@@ -9,6 +10,7 @@ import { formatPrice } from '../../utils/formatters';
 import {
   getSpecialOrder, changeSpecialOrderStatus, addSpecialOrderPayment, deleteSpecialOrderPayment,
   notifySpecialOrder, updateSpecialOrder, deleteSpecialOrder, openSpecialOrderPdf,
+  logSpecialOrderContact, confirmSpecialOrderDelivery, accountSpecialOrderPayment,
 } from '../../api/specialOrders';
 
 const METHOD_LABELS = {
@@ -20,7 +22,19 @@ const EVENT_LABELS = {
   in_processing: 'En cours de traitement', available: 'Livre disponible',
   balance_reminder: 'Rappel de solde', pickup_confirmation: 'Confirmation de retrait',
 };
-const CHANNEL_LABELS = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
+const CHANNEL_LABELS = {
+  email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp',
+  phone: 'Appel téléphonique', whatsapp_manual: 'WhatsApp (manuel)',
+  sms_manual: 'SMS (manuel)', in_person: 'En personne',
+  internal: 'Alerte interne équipe',
+};
+// Ce que l'équipe vient dire au client quand elle l'appelle.
+const CONTACT_EVENTS = [
+  { key: 'available', label: 'Son livre est disponible' },
+  { key: 'balance_reminder', label: 'Rappel du solde à régler' },
+  { key: 'in_processing', label: 'Point d\'avancement' },
+  { key: 'order_confirmation', label: 'Confirmation de la commande' },
+];
 
 const fmtDateTime = (s) => (s ? new Date(String(s).replace(' ', 'T')).toLocaleString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
 const fmtDate = (s) => (s ? new Date(String(s).replace(' ', 'T')).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' }) : '—');
@@ -36,6 +50,7 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
   const [pay, setPay] = useState({ amount: '', method: 'cash', reference: '', note: '' });
   const [notifEvent, setNotifEvent] = useState('balance_reminder');
   const [notifChannels, setNotifChannels] = useState({ email: true, sms: false, whatsapp: false });
+  const [contact, setContact] = useState({ channel: 'phone', event: 'available', note: '' });
   const [editing, setEditing] = useState(false);
   const [edit, setEdit] = useState({ expected_date: '', delay_estimate: '', notes: '', customer_phone: '', customer_email: '', customer_address: '' });
 
@@ -96,7 +111,9 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
       const r = await addSpecialOrderPayment(orderId, { amount, method: pay.method, reference: pay.reference.trim() || null, note: pay.note.trim() || null });
       afterMutation(r);
       setPay({ amount: '', method: pay.method, reference: '', note: '' });
-      toast.success('Paiement enregistré');
+      // L'encaissement réussit toujours ; c'est son écriture comptable qui peut échouer.
+      if (r.data?.warning) toast.error(r.data.warning, { duration: 9000 });
+      else toast.success('Paiement encaissé et porté au livre comptable');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur paiement');
     } finally { setBusy(false); }
@@ -118,6 +135,52 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
       afterMutation(await notifySpecialOrder(orderId, { event: notifEvent, channels }));
       toast.success('Notification envoyée');
     } catch (err) { toast.error(err.response?.data?.error || 'Erreur envoi'); }
+    finally { setBusy(false); }
+  };
+
+  // Constate la remise du livre. Si un solde reste dû, on ne livre jamais par accident :
+  // le serveur renvoie 409 et l'agent doit confirmer explicitement.
+  const doDeliver = async (force = false) => {
+    setBusy(true);
+    try {
+      const r = await confirmSpecialOrderDelivery(orderId, { force });
+      afterMutation(r);
+      toast.success('Livraison confirmée');
+      if (r.data?.warning) toast.error(r.data.warning, { duration: 8000 });
+    } catch (err) {
+      const d = err.response?.data;
+      if (d?.requiresConfirmation) {
+        if (window.confirm(`${d.error}\n\nConfirmer quand même la livraison ? Le solde restera dû et la commande sera signalée « Solde impayé ».`)) {
+          setBusy(false);
+          return doDeliver(true);
+        }
+      } else {
+        toast.error(d?.error || 'Livraison impossible');
+      }
+    } finally { setBusy(false); }
+  };
+
+  // Rejoue l'écriture comptable d'un règlement encaissé mais resté hors du livre.
+  const doAccountPayment = async (paymentId) => {
+    setBusy(true);
+    try {
+      afterMutation(await accountSpecialOrderPayment(orderId, paymentId));
+      toast.success('Règlement porté au livre comptable');
+    } catch (err) { toast.error(err.response?.data?.error || 'Comptabilisation impossible'); }
+    finally { setBusy(false); }
+  };
+
+  // Trace l'appel passé au client. C'est ce qui éteint l'alerte « Client à prévenir » :
+  // sans SMS ni WhatsApp branchés, l'appel EST la notification.
+  const doLogContact = async (outcome) => {
+    setBusy(true);
+    try {
+      afterMutation(await logSpecialOrderContact(orderId, {
+        channel: contact.channel, event: contact.event, outcome, note: contact.note.trim() || null,
+      }));
+      setContact((s) => ({ ...s, note: '' }));
+      toast.success(outcome === 'reached' ? 'Contact enregistré — le client est prévenu' : 'Tentative sans réponse enregistrée');
+    } catch (err) { toast.error(err.response?.data?.error || 'Erreur'); }
     finally { setBusy(false); }
   };
 
@@ -160,6 +223,18 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
               <button className="so-x" onClick={onClose} aria-label="Fermer"><FiX size={20} /></button>
             </div>
 
+            {/* ALERTES — ce que cette commande réclame de l'équipe, ici et maintenant. */}
+            {(data.alerts || []).length > 0 && (
+              <div className={`so-alertbox ${data.alertLevel}`}>
+                {data.alerts.map((a) => (
+                  <div key={a.key} className={`so-alertbox-item ${a.severity}`}>
+                    <FiAlertTriangle size={14} />
+                    <span><strong>{a.label}</strong> — {a.detail}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* CLIENT */}
             <div style={{ background: '#f8fafc', borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ fontWeight: 700, color: '#0f172a' }}><FiUser size={13} style={{ verticalAlign: -1, marginRight: 5 }} />{data.customer.name}</div>
@@ -199,13 +274,30 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
               <div className="so-money-line due"><span>Reste à payer</span><span>{formatPrice(t.balance)}</span></div>
             </div>
 
+            {/* LIVRAISON — le geste principal : constater la remise du livre au client,
+                à tout moment du cycle, sans dérouler le workflow étape par étape. */}
+            {data.status !== 'cancelled' && !['picked_up', 'closed'].includes(data.status) && (
+              <div className="so-deliver">
+                <div className="so-deliver-text">
+                  <strong>Le client est venu chercher son livre ?</strong>
+                  <span>
+                    Confirmez la livraison — la vente sera portée au livre comptable.
+                    {t.balance > 0 && <> Il reste <strong>{formatPrice(t.balance)}</strong> à encaisser.</>}
+                  </span>
+                </div>
+                <button className="btn btn-primary" disabled={busy} onClick={() => doDeliver(false)}>
+                  <FiPackage size={15} /> Confirmer la livraison
+                </button>
+              </div>
+            )}
+
             {/* WORKFLOW */}
             {!isTerminal && (
               <div className="so-section">
                 <p className="so-section-title">Faire avancer la commande</p>
                 <div className="so-actions">
                   {suggestedNext && (
-                    <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => doStatus(suggestedNext)}>
+                    <button className="btn btn-outline btn-sm" disabled={busy} onClick={() => doStatus(suggestedNext)}>
                       <FiArrowRight size={14} /> Passer à : {statusMap[suggestedNext]?.label}
                     </button>
                   )}
@@ -247,6 +339,15 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
             {/* PAIEMENTS */}
             <div className="so-section">
               <p className="so-section-title">Paiements</p>
+              {data.invoice ? (
+                <p className="so-invoice-line">
+                  <FiBookOpen size={12} /> Portés au livre comptable sur la facture <strong>{data.invoice.ref || `#${data.invoice.id}`}</strong>
+                </p>
+              ) : (
+                <p className="so-invoice-line muted">
+                  <FiBookOpen size={12} /> Aucune facture : la comptabilité se crée au premier encaissement.
+                </p>
+              )}
               {data.payments.length === 0 ? (
                 <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 8px' }}>Aucun paiement enregistré.</p>
               ) : data.payments.map((p) => (
@@ -255,10 +356,25 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
                     <strong>{formatPrice(p.amount)}</strong> · {METHOD_LABELS[p.method] || p.method}
                     {p.reference ? <span style={{ color: '#94a3b8' }}> · {p.reference}</span> : ''}
                     {p.note ? <span style={{ color: '#94a3b8' }}> · {p.note}</span> : ''}
+                    {!p.dolibarr_payment_id && (
+                      <div className="so-unaccounted">
+                        <FiAlertTriangle size={11} /> Encaissé mais hors du livre comptable
+                        {p.sync_error && <span title={p.sync_error}> · voir le détail</span>}
+                      </div>
+                    )}
                   </span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>{fmtDateTime(p.created_at)} · {p.received_by || '—'}</span>
-                    <button className="so-line-del" onClick={() => doDeletePayment(p.id)} disabled={busy} aria-label="Supprimer paiement"><FiTrash2 size={14} /></button>
+                    {!p.dolibarr_payment_id ? (
+                      <>
+                        <button className="btn btn-outline btn-sm" onClick={() => doAccountPayment(p.id)} disabled={busy}>
+                          <FiRefreshCw size={12} /> Comptabiliser
+                        </button>
+                        <button className="so-line-del" onClick={() => doDeletePayment(p.id)} disabled={busy} aria-label="Supprimer paiement"><FiTrash2 size={14} /></button>
+                      </>
+                    ) : (
+                      <span className="so-pill sent" title="Ce règlement figure au livre comptable">comptabilisé</span>
+                    )}
                   </span>
                 </div>
               ))}
@@ -298,9 +414,56 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
               )}
             </div>
 
+            {/* CONTACT MANUEL — l'appel vaut notification tant que SMS/WhatsApp sont muets. */}
+            {data.status !== 'cancelled' && (
+              <div className="so-section so-contact">
+                <p className="so-section-title"><FiPhoneCall size={13} style={{ verticalAlign: -2, marginRight: 5 }} />Contact client</p>
+                {data.customer.phone ? (
+                  <p className="so-contact-lead">
+                    Appelez le client au <a href={`tel:${String(data.customer.phone).replace(/\s/g, '')}`}>{data.customer.phone}</a>,
+                    puis enregistrez l'appel ci-dessous : c'est cette trace qui vaut notification.
+                  </p>
+                ) : (
+                  <p className="so-contact-lead warn">
+                    Aucun téléphone au dossier — ce client ne peut pas être prévenu. Ajoutez son numéro via « Modifier ».
+                  </p>
+                )}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                  <div style={{ minWidth: 190, flex: 1 }}>
+                    <label style={{ fontSize: '0.74rem', color: '#64748b' }}>Motif de l'appel</label>
+                    <select value={contact.event} onChange={(e) => setContact((s) => ({ ...s, event: e.target.value }))}
+                      style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8 }}>
+                      {CONTACT_EVENTS.map((ev) => <option key={ev.key} value={ev.key}>{ev.label}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label style={{ fontSize: '0.74rem', color: '#64748b' }}>Moyen</label>
+                    <select value={contact.channel} onChange={(e) => setContact((s) => ({ ...s, channel: e.target.value }))}
+                      style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8 }}>
+                      <option value="phone">Appel téléphonique</option>
+                      <option value="whatsapp_manual">WhatsApp (manuel)</option>
+                      <option value="sms_manual">SMS (manuel)</option>
+                      <option value="in_person">En personne</option>
+                    </select>
+                  </div>
+                  <input value={contact.note} onChange={(e) => setContact((s) => ({ ...s, note: e.target.value }))}
+                    placeholder="Ce que le client a répondu (optionnel)"
+                    style={{ flex: 2, minWidth: 170, padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8 }} />
+                </div>
+                <div className="so-actions" style={{ marginTop: 10 }}>
+                  <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => doLogContact('reached')}>
+                    <FiPhoneCall size={13} /> Client joint
+                  </button>
+                  <button className="btn btn-outline btn-sm" disabled={busy} onClick={() => doLogContact('no_answer')}>
+                    <FiPhoneOff size={13} /> Sans réponse
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* NOTIFICATIONS */}
             <div className="so-section">
-              <p className="so-section-title">Notifications client</p>
+              <p className="so-section-title">Notifications automatiques &amp; journal des contacts</p>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 10 }}>
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <label style={{ fontSize: '0.74rem', color: '#64748b' }}>Message à envoyer</label>
@@ -322,15 +485,28 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
                 <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: 0 }}>Aucune notification envoyée.</p>
               ) : (
                 <div style={{ maxHeight: 160, overflowY: 'auto' }}>
-                  {data.notifications.map((n) => (
-                    <div key={n.id} className="so-row">
-                      <span>{EVENT_LABELS[n.event] || n.event} · <span style={{ color: '#64748b' }}>{CHANNEL_LABELS[n.channel] || n.channel}</span> {n.recipient ? <span style={{ color: '#94a3b8' }}>→ {n.recipient}</span> : ''}</span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className={`so-pill ${n.status}`}>{n.status === 'sent' ? 'envoyé' : n.status === 'failed' ? 'échec' : 'ignoré'}</span>
-                        <span style={{ fontSize: '0.74rem', color: '#94a3b8' }}>{fmtDateTime(n.created_at)}</span>
-                      </span>
-                    </div>
-                  ))}
+                  {data.notifications.map((n) => {
+                    const manual = ['phone', 'whatsapp_manual', 'sms_manual', 'in_person'].includes(n.channel);
+                    const label = n.status === 'sent' ? (manual ? 'client joint' : 'envoyé')
+                      : n.status === 'failed' ? (manual ? 'sans réponse' : 'échec')
+                        : 'non envoyé';
+                    return (
+                      <div key={n.id} className="so-row">
+                        <span>
+                          {EVENT_LABELS[n.event] || n.event} · <span style={{ color: '#64748b' }}>{CHANNEL_LABELS[n.channel] || n.channel}</span>
+                          {n.recipient ? <span style={{ color: '#94a3b8' }}> → {n.recipient}</span> : ''}
+                          {n.detail && <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>{n.detail}</div>}
+                        </span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span className={`so-pill ${n.status}${manual ? ' manual' : ''}`}>{label}</span>
+                          <span style={{ fontSize: '0.74rem', color: '#94a3b8', textAlign: 'right' }}>
+                            {fmtDateTime(n.created_at)}
+                            {n.actor_username && <div>{n.actor_username}</div>}
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

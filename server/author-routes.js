@@ -5,8 +5,9 @@ import { mkdirSync, existsSync, renameSync } from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
-import { generateManuscriptRef, transition, STAGE_LABELS, MANUSCRIPT_EVENTS } from './manuscript-workflow.js';
+import { generateManuscriptRef, transition, STAGE_LABELS, MANUSCRIPT_EVENTS, promoteLatestCorrectionAsAuthorFinal } from './manuscript-workflow.js';
 import { notifyTransition, sendTransitionEmail, getAuthorPreferences } from './manuscript-emails.js';
+import { addManuscriptVersion } from './manuscript-versions.js';
 import { computeRoyaltyBreakdown } from './royalties.js';
 import { ensureAuthorTier } from './author-tier.js';
 
@@ -224,9 +225,9 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
 
       const manuscriptStats = {
         total: manuscripts.length,
-        in_progress: manuscripts.filter((m) => !['printed', 'evaluation_negative'].includes(m.current_stage)).length,
+        in_progress: manuscripts.filter((m) => !['printed', 'in_communication', 'published', 'evaluation_negative'].includes(m.current_stage)).length,
         action_required: manuscripts.filter((m) => ['correction_author_review', 'bat_author_review'].includes(m.current_stage)).length,
-        printed: manuscripts.filter((m) => m.current_stage === 'printed').length,
+        printed: manuscripts.filter((m) => ['printed', 'in_communication', 'published'].includes(m.current_stage)).length,
       };
 
       // 2. Contrats Dolibarr liés à l'auteur (par dolibarr_thirdparty_id ou par nom)
@@ -599,6 +600,69 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     res.download(file.file_path, file.file_name);
   });
 
+  // Dépôt d'une version retravaillée après verdict « à retravailler » :
+  // nouvelle version du kind `original` + transition evaluation_rework → in_evaluation.
+  const reworkUpload = createManuscriptMulter('original', 20, /\.(pdf|doc|docx|odt|rtf)$/i);
+  router.post('/manuscripts/:id/submit-rework', requireAuthorAuth, csrfProtection, (req, res) => {
+    reworkUpload.single('original')(req, res, (err) => {
+      if (err) {
+        const msg = err.code === 'LIMIT_FILE_SIZE'
+          ? 'Fichier trop volumineux (max 20 Mo)'
+          : (err.message || 'Fichier invalide');
+        return res.status(400).json({ error: msg });
+      }
+      try {
+        const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ? AND author_id = ?')
+          .get(req.params.id, req.author.id);
+        if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+        if (manuscript.current_stage !== 'evaluation_rework') {
+          return res.status(400).json({
+            error: `Dépôt impossible à ce stade (${STAGE_LABELS[manuscript.current_stage] || manuscript.current_stage})`,
+          });
+        }
+        if (!req.file) return res.status(400).json({ error: 'Fichier manuscrit retravaillé requis' });
+
+        const note = (req.body?.note || '').trim() || null;
+        const actor = {
+          role: 'author',
+          id: req.author.id,
+          label: `${req.author.firstname} ${req.author.lastname}`,
+        };
+        // Moteur de versionnage commun (manuscript-versions.js) : empreinte
+        // SHA-256, refus du doublon (fichier identique à la version courante),
+        // frise, purge de rétention des binaires intermédiaires.
+        let version;
+        try {
+          ({ version } = addManuscriptVersion(db, {
+            manuscriptId: manuscript.id,
+            file: req.file,
+            actor,
+            uploadedByRole: 'author',
+            uploadedById: req.author.id,
+            note,
+            eventNote: (v) => `Version retravaillée v${v} — ${req.file.originalname || req.file.filename}`,
+          }));
+        } catch (err) {
+          if (err.code === 'DUPLICATE_VERSION') {
+            return res.status(409).json({ error: 'Ce fichier est identique à la version déjà déposée — envoyez votre version retravaillée.' });
+          }
+          throw err;
+        }
+
+        const updated = transition(db, manuscript.id, 'in_evaluation', actor, {
+          note: note
+            ? `Version retravaillée déposée par l'auteur — ${note}`
+            : `Version retravaillée v${version} déposée par l'auteur`,
+        });
+        notifyTransition(db, transporter, updated, 'in_evaluation', actor, siteUrl);
+        res.json({ success: true, stage: 'in_evaluation', version });
+      } catch (e) {
+        console.error('[AUTHOR] submit-rework error:', e.message);
+        res.status(500).json({ error: e.message || 'Erreur lors du dépôt' });
+      }
+    });
+  });
+
   // ─── VALIDATIONS AUTEUR ───────────────────────────────────
   router.post('/manuscripts/:id/validate-correction', requireAuthorAuth, csrfProtection, (req, res) => {
     const { decision, comment } = req.body;
@@ -616,6 +680,9 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     ).run(manuscript.id, decision, comment || null, req.author.id);
     const nextStage = decision === 'approved' ? 'in_editorial' : 'in_correction';
     const actor = { role: 'author', id: req.author.id, label: `${req.author.firstname} ${req.author.lastname}` };
+    if (decision === 'approved') {
+      promoteLatestCorrectionAsAuthorFinal(db, manuscript.id, actor);
+    }
     const updated = transition(db, manuscript.id, nextStage, actor, { note: `Validation correction : ${decision}${comment ? ' — ' + comment : ''}` });
     // L'auteur vient de valider lui-même : on ne lui renvoie pas le message
     // « validation éditoriale » (redondant). Il sera prévenu sur sa demande

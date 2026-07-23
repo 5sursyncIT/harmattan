@@ -518,8 +518,10 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
       const [rows] = await dolibarrPool.query(
         `SELECT p.rowid AS id, p.ref, p.label, p.price_ttc, p.barcode,
+                pe.soustitre,
                 COALESCE(ps.reel, 0) AS stock_reel
          FROM llx_product p
+         LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
          LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = ${POS_CONFIG.warehouse}
          ${where}
          ORDER BY p.label ASC
@@ -539,8 +541,10 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const code = req.params.code.trim();
       const [rows] = await dolibarrPool.query(
         `SELECT p.rowid AS id, p.ref, p.label, p.price_ttc, p.barcode,
+                pe.soustitre,
                 COALESCE(ps.reel, 0) AS stock_reel
          FROM llx_product p
+         LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
          LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = ${POS_CONFIG.warehouse}
          WHERE p.ref = ? OR p.barcode = ?
          LIMIT 1`,
@@ -2534,7 +2538,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           const lineTotal = item.line_total || item.qty * item.price_ttc * (1 - (item.discount || 0) / 100);
           return templateRow
             .replace('{ITEM_ISBN}', escapeXml(item.ref || ''))
-            .replace('{ITEM_LABEL}', escapeXml(item.label))
+            .replace('{ITEM_LABEL}', escapeXml(item.label) + (item.soustitre ? `<text:line-break/>${escapeXml(item.soustitre)}` : ''))
             .replace('{ITEM_QTY}', escapeXml(String(item.qty)))
             .replace('{ITEM_PU}', escapeXml(parseInt(item.price_ttc).toLocaleString('fr-FR')))
             .replace('{ITEM_DISCOUNT}', escapeXml(item.discount > 0 ? `-${item.discount}%` : ''))

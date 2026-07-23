@@ -2,8 +2,9 @@
 /**
  * Document builddoc endpoint — L'Harmattan Sénégal
  *
- * Génère le PDF d'une facture (llx_facture) ou d'un devis (llx_propal)
- * via Dolibarr::generateDocument() et retourne le binaire PDF directement.
+ * Génère le PDF d'une facture (llx_facture), d'un devis (llx_propal) ou d'une
+ * facture fournisseur (llx_facture_fourn) via Dolibarr::generateDocument() et
+ * retourne le binaire PDF directement.
  *
  * À déployer dans /var/www/html/dolibarr/htdocs/custom/senharmattansync/
  * Pattern identique à contract-builddoc.php.
@@ -11,13 +12,15 @@
  * Usage :
  *   POST /custom/senharmattansync/document-builddoc.php
  *   Header: X-Dolibarr-Secret: <DOLIBARR_WEBHOOK_SECRET>
- *   Body JSON: { "type": "invoice"|"propal", "id": 42 }
+ *   Body JSON: { "type": "invoice"|"propal"|"supplier_invoice", "id": 42 }
  *
  *   → Si succès: Content-Type: application/pdf, binaire PDF
  *   → Sinon: 4xx/5xx + JSON erreur
  *
- * Appelé par le backend Node (GET /api/admin/invoices/:id/pdf
- * et /api/admin/propals/:id/pdf) quand l'API REST builddoc est cassée.
+ * Appelé par le backend Node (GET /api/admin/invoices/:id/pdf,
+ * /api/admin/propals/:id/pdf et
+ * /api/admin/consignments/settlements/:id/supplier-invoice/pdf)
+ * quand l'API REST builddoc est cassée.
  */
 
 // ── 1. Authentification par secret partagé ─────────────────────────
@@ -111,10 +114,10 @@ $raw = file_get_contents('php://input');
 $payload = json_decode($raw, true);
 $type = $payload['type'] ?? '';
 $id = isset($payload['id']) ? (int) $payload['id'] : 0;
-if ($id <= 0 || !in_array($type, ['invoice', 'propal'], true)) {
+if ($id <= 0 || !in_array($type, ['invoice', 'propal', 'supplier_invoice'], true)) {
     http_response_code(400);
     header('Content-Type: application/json');
-    echo json_encode(['error' => 'payload requires { type: invoice|propal, id: number }']);
+    echo json_encode(['error' => 'payload requires { type: invoice|propal|supplier_invoice, id: number }']);
     exit;
 }
 
@@ -132,17 +135,24 @@ require_once $dolRoot.'/main.inc.php';
 
 global $conf, $db, $langs, $user;
 
-// ── 4. Charger l'objet Facture ou Propal ───────────────────────────
+// ── 4. Charger l'objet Facture, Propal ou FactureFournisseur ───────
 if ($type === 'invoice') {
     require_once $dolRoot.'/compta/facture/class/facture.class.php';
     $obj = new Facture($db);
     $defaultModel = 'crabe';
-    $moduleConfKey = 'facture';
+} elseif ($type === 'supplier_invoice') {
+    // Dolibarr ne configure volontairement AUCUN modèle PDF par défaut pour les
+    // factures fournisseur (cf. modFournisseur.class.php : on y joint d'ordinaire
+    // le PDF envoyé par le fournisseur). Ici le document est émis PAR L'Harmattan
+    // pour le compte du déposant (autofacturation du dépôt-vente) : on retombe
+    // donc explicitement sur le modèle standard « canelle ».
+    require_once $dolRoot.'/fourn/class/fournisseur.facture.class.php';
+    $obj = new FactureFournisseur($db);
+    $defaultModel = 'canelle';
 } else {
     require_once $dolRoot.'/comm/propal/class/propal.class.php';
     $obj = new Propal($db);
     $defaultModel = 'azur';
-    $moduleConfKey = 'propal';
 }
 
 if ($obj->fetch($id) <= 0) {
@@ -157,7 +167,10 @@ if (!is_object($langs) || !$langs) {
     $langs = new Translate('', $conf);
     $langs->setDefaultLang('fr_FR');
 }
-$langs->load($type === 'invoice' ? 'bills' : 'propal');
+$langs->load($type === 'propal' ? 'propal' : 'bills');
+if ($type === 'supplier_invoice') {
+    $langs->load('suppliers');
+}
 $langs->load('main');
 $langs->load('companies');
 $langs->load('products');
@@ -167,8 +180,12 @@ $model = !empty($obj->model_pdf) ? $obj->model_pdf : $defaultModel;
 // Réparer un éventuel chemin de template ODT obsolète (post-migration serveur) :
 // d'anciens model_pdf stockent un chemin absolu vers /htdocs/gestion.senharmattan.com
 // qui n'existe plus depuis le passage à /var/www/html/dolibarr.
-$scandirConst = ($type === 'invoice') ? 'FACTURE_ADDON_PDF_ODT_PATH' : 'PROPALE_ADDON_PDF_ODT_PATH';
-$fallbackSub  = ($type === 'invoice') ? 'invoices' : 'proposals';
+$odtPathByType = [
+    'invoice'          => ['FACTURE_ADDON_PDF_ODT_PATH', 'invoices'],
+    'propal'           => ['PROPALE_ADDON_PDF_ODT_PATH', 'proposals'],
+    'supplier_invoice' => ['SUPPLIER_INVOICE_ADDON_PDF_ODT_PATH', 'supplier_invoices'],
+];
+list($scandirConst, $fallbackSub) = $odtPathByType[$type];
 $model = repairOdtTemplatePath($model, $scandirConst, $fallbackSub);
 
 $generated = $obj->generateDocument($model, $langs, 0, 0, 0);
@@ -186,19 +203,35 @@ if ($generated <= 0) {
 }
 
 // ── 6. Localiser le PDF généré ─────────────────────────────────────
-$outputDir = !empty($conf->{$moduleConfKey}->multidir_output[$obj->entity])
-    ? $conf->{$moduleConfKey}->multidir_output[$obj->entity]
-    : $conf->{$moduleConfKey}->dir_output;
+// Les factures fournisseur vivent sous $conf->fournisseur->facture (objet
+// imbriqué), pas sous $conf->{module} comme les factures client et les devis.
+if ($type === 'supplier_invoice') {
+    $outputDir = !empty($conf->fournisseur->facture->multidir_output[$obj->entity])
+        ? $conf->fournisseur->facture->multidir_output[$obj->entity]
+        : $conf->fournisseur->facture->dir_output;
+} else {
+    $moduleConfKey = ($type === 'invoice') ? 'facture' : 'propal';
+    $outputDir = !empty($conf->{$moduleConfKey}->multidir_output[$obj->entity])
+        ? $conf->{$moduleConfKey}->multidir_output[$obj->entity]
+        : $conf->{$moduleConfKey}->dir_output;
+}
 $refSan = dol_sanitizeFileName($obj->ref);
-$folder = $outputDir.'/'.$refSan;
+
+// Contrairement aux factures client / devis (dossier = <output>/<REF>), les
+// factures fournisseur nichent sous un répertoire haché get_exdir().
+$folder = ($type === 'supplier_invoice')
+    ? $outputDir.'/'.get_exdir($obj->id, 2, 0, 0, $obj, 'invoice_supplier').$refSan
+    : $outputDir.'/'.$refSan;
 
 $pdfPath = null;
-$candidates = [
-    $folder.'/'.$refSan.'.pdf',
-];
+$candidates = [];
 if (!empty($obj->last_main_doc)) {
-    // last_main_doc est souvent "facture/REF/file.pdf" (relatif à documents/)
-    $candidates[] = dirname($outputDir).'/'.$obj->last_main_doc;
+    // Chemin canonique, valable pour TOUS les types : last_main_doc vaut
+    // "<filepath>/<filename>" relatif à DOL_DATA_ROOT (cf. CommonObject::indexFile).
+    $candidates[] = DOL_DATA_ROOT.'/'.$obj->last_main_doc;
+}
+$candidates[] = $folder.'/'.$refSan.'.pdf';
+if (!empty($obj->last_main_doc)) {
     $candidates[] = $folder.'/'.basename($obj->last_main_doc);
 }
 
