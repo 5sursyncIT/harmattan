@@ -1,21 +1,22 @@
 import { useState, useEffect, useMemo } from 'react';
-import { FiX, FiPlus, FiTrash2, FiCheckCircle, FiFileText, FiRotateCcw } from 'react-icons/fi';
+import { FiX, FiPlus, FiTrash2, FiCheckCircle, FiFileText, FiRotateCcw, FiAlertTriangle } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { createContractQuote, updateContractQuote, openQuotePdf } from '../../api/quotes';
+import {
+  FCFA_PER_EUR, DEFAULT_AUTHOR_DISCOUNT, FORMAT_CUSTOM, toQuoteFormat, contractPriceEur,
+  buildFormatChoices, QUOTE_FORMAT_OPTIONS as FORMAT_OPTIONS,
+} from '../../utils/bookFormats';
+import {
+  compareSpecs, specFromContractExtrafields, specFromQuote, QUOTE_SYNCED_FIELDS,
+} from '../../utils/contractConformity';
 
-const FCFA_PER_EUR = 655.957;
-const DEFAULT_AUTHOR_DISCOUNT = 30;  // remise auteur par défaut (%) si non renseignée au contrat
 const COLOR_FLAT_PRICE = 852000;     // Prix fixe contribution impression couleur (item 6)
 
 // Choix figés par la direction (menus déroulants). `value` = texte rendu sur le PDF,
 // `label` = libellé court affiché à l'éditeur. Le format accepte une saisie libre
-// via l'option « Autre » (sentinelle FORMAT_CUSTOM).
-const FORMAT_CUSTOM = '__custom__';
-const FORMAT_OPTIONS = [
-  { label: '135 × 215 mm', value: '13.5 cm sur 21.5 cm' },
-  { label: '155 × 240 mm', value: '15.5 cm sur 24 cm' },
-  { label: 'A4 (210 × 297 mm)', value: 'A4 (21 cm sur 29.7 cm)' },
-];
+// via l'option « Autre » (sentinelle FORMAT_CUSTOM). Le vocabulaire vit dans
+// utils/bookFormats.js : c'est lui qui permet de comparer le format du devis à
+// celui du contrat malgré leurs deux graphies.
 const INTERIOR_OPTIONS = [
   { label: '1 couleur N&B', value: 'une couleur N & B' },
   { label: 'Mix N&B/Couleur', value: 'mixte N & B / couleur' },
@@ -65,7 +66,9 @@ function loadItemsFromQuote(items) {
 
 export default function ContractQuoteModal({ contract, quote, onClose, onCreated }) {
   const isEdit = !!quote;
-  const ef = contract.extrafields || {};
+  // Mémoïsé : `ef` alimente le calcul de conformité à chaque frappe — une nouvelle
+  // référence d'objet à chaque rendu relancerait le useMemo pour rien.
+  const ef = useMemo(() => contract.extrafields || {}, [contract.extrafields]);
   const author = contract.author || {};
 
   // Détecte civilité depuis le nom (très basique — éditable)
@@ -79,10 +82,10 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
   // Why: sans parseInt, `ef.authorPurchaseEnabled = "0"` est truthy → branche "enabled"
   // avec qty parsée à 0 → la ligne 4 disparaissait silencieusement.
   const numPages = parseInt(ef.nombrePagesEstime) || 100;
-  // Compat anciens contrats : prix stocké en FCFA (souvent 8000–15000) avant la bascule en €.
-  // Au-delà de 200 € c'est forcément une valeur FCFA → on convertit.
-  const rawPrice = parseFloat(ef.prixPublicPrevisionnel) || 15;
-  const numPriceEur = rawPrice > 200 ? Math.round(rawPrice / 655.957 * 100) / 100 : rawPrice;
+  // Le contrat porte le prix public en EUROS (décision de la direction) : on le
+  // reprend tel quel. La conversion en FCFA n'a lieu qu'au calcul de la ligne
+  // « achat d'exemplaires », dans buildDefaultItems.
+  const numPriceEur = contractPriceEur(ef.prixPublicPrevisionnel) ?? 15;
   const purchaseEnabled = parseInt(ef.authorPurchaseEnabled) === 1;
   const purchaseQty = parseInt(ef.authorPurchaseQty) || 0;
   const initialQty = purchaseEnabled && purchaseQty > 0 ? purchaseQty : 50;
@@ -92,6 +95,10 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
   const purchaseDiscount = Number.isFinite(rawDiscount) && rawDiscount >= 0 && rawDiscount <= 100
     ? rawDiscount
     : DEFAULT_AUTHOR_DISCOUNT;
+  // Format hérité du contrat, retranscrit dans la graphie du devis. Sans ça, le
+  // devis démarrait sur son propre défaut (135 × 215) quand le contrat annonçait
+  // le format standard (155 × 240) : un écart créé d'office à chaque devis.
+  const contractFormat = toQuoteFormat(ef.formatOuvrage) || '13.5 cm sur 21.5 cm';
 
   // En révision : présence d'une ligne « impression Couleur » dans le devis existant.
   const quoteHasColor = isEdit && (quote.items || []).some(i => /impression\s+couleur/i.test(i.label || ''));
@@ -102,7 +109,7 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
     recipient_name: quote.recipient_name || author.name || '',
     book_title: quote.book_title || ef.bookTitle || '',
     book_pages: quote.book_pages ?? numPages,
-    book_format: quote.book_format || '13.5 cm sur 21.5 cm',
+    book_format: toQuoteFormat(quote.book_format) || contractFormat,
     book_interior: quote.book_interior || 'une couleur N & B',
     book_paper: quote.book_paper || 'bouffant 80 grammes',
     book_cover: quote.book_cover || 'cartonné, coucher brillant, quadrichromie avec pellicule',
@@ -116,7 +123,7 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
     recipient_name: author.name || '',
     book_title: ef.bookTitle || '',
     book_pages: numPages,
-    book_format: '13.5 cm sur 21.5 cm',
+    book_format: contractFormat,
     book_interior: 'une couleur N & B',
     book_paper: 'bouffant 80 grammes',
     book_cover: 'cartonné, coucher brillant, quadrichromie avec pellicule',
@@ -131,10 +138,10 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
     diffusion: 'Dakar, en Afrique de l\'Ouest, à Paris et sur Internet',
     color: false,
   }));
-  // Format « Autre » : saisie libre dès que la valeur ne fait pas partie des choix figés.
-  const [formatCustom, setFormatCustom] = useState(
-    () => !FORMAT_OPTIONS.some(o => o.value === form.book_format),
-  );
+  // La liste déroulante reste le mode normal : un format hors liste y est ajouté
+  // par buildFormatChoices au lieu de forcer la saisie libre.
+  const [formatCustom, setFormatCustom] = useState(false);
+  const formatChoices = buildFormatChoices(form.book_format, FORMAT_OPTIONS);
   const [items, setItems] = useState(() => (isEdit
     ? loadItemsFromQuote(quote.items)
     : buildDefaultItems({
@@ -160,6 +167,26 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
     ...f, copies_qty: Math.max(0, (parseInt(f.copies_qty) || 0) + delta),
   }));
   const total = items.reduce((s, i) => s + (parseInt(i.price) || 0), 0);
+
+  // Conformité au contrat, recalculée à chaque frappe. Même moteur que le verdict
+  // enregistré côté serveur (utils/contractConformity.js) : ce que l'éditeur voit
+  // ici est exactement ce qui sera journalisé à l'enregistrement.
+  const conformity = useMemo(() => compareSpecs(
+    specFromContractExtrafields(ef),
+    specFromQuote({
+      book_pages: form.book_pages,
+      book_format: form.book_format,
+      book_price_eur: form.book_price_eur,
+      discount_pct: form.discount_pct,
+      copies_qty: form.copies_qty,
+    }),
+  ), [ef, form.book_pages, form.book_format, form.book_price_eur, form.discount_pct, form.copies_qty]);
+
+  // Quantité et remise sont recopiées sur le contrat à l'enregistrement : les
+  // annoncer comme des écarts pendant la saisie serait une fausse alerte. Restent
+  // les caractéristiques que le devis ne reporte PAS (pages, format, prix public).
+  const unsyncedDiffs = conformity.diffs.filter(d => !QUOTE_SYNCED_FIELDS.includes(d.field));
+  const syncedDiffs = conformity.diffs.filter(d => QUOTE_SYNCED_FIELDS.includes(d.field));
 
   // Recalcul auto des items standards (1, 2, 4, 6) quand pages/prix/couleur changent.
   // Why: les lignes 1/2/6 dépendent linéairement du nombre de pages, et la 4
@@ -308,10 +335,12 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
                 value={formatCustom ? FORMAT_CUSTOM : form.book_format}
                 onChange={e => {
                   const v = e.target.value;
-                  if (v === FORMAT_CUSTOM) { setFormatCustom(true); set('book_format', ''); }
-                  else { setFormatCustom(false); set('book_format', v); }
+                  // On conserve la valeur courante comme base de la saisie libre
+                  // plutôt que de vider le champ.
+                  if (v === FORMAT_CUSTOM) { setFormatCustom(true); return; }
+                  setFormatCustom(false); set('book_format', v);
                 }}>
-                {FORMAT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                {formatChoices.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 <option value={FORMAT_CUSTOM}>Autre format (saisie manuelle)</option>
               </select>
               {formatCustom && (
@@ -366,6 +395,38 @@ export default function ContractQuoteModal({ contract, quote, onClose, onCreated
               </span>
             </div>
           </div>
+
+          {/* Écart avec le contrat, en direct. On avertit sans bloquer : négocier
+              un prix ou une pagination différents est légitime — c'est le laisser
+              passer inaperçu qui ne l'est pas. L'écart est journalisé à
+              l'enregistrement et réalignable depuis la fiche contrat. */}
+          {unsyncedDiffs.length > 0 && (
+            <div className="ct-inline-warning" style={{ marginTop: 12 }}>
+              <FiAlertTriangle size={14} />
+              <div>
+                <strong>Ce devis s'écarte du contrat.</strong>
+                <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                  {unsyncedDiffs.map(d => (
+                    <li key={d.field}>
+                      {d.label} : contrat <strong>{d.contractDisplay}</strong> → devis <strong>{d.quoteDisplay}</strong>
+                    </li>
+                  ))}
+                </ul>
+                <div style={{ marginTop: 4, fontStyle: 'italic' }}>
+                  L'écart sera tracé. Depuis la fiche contrat, vous pourrez reporter ces valeurs sur le contrat (s'il est encore en brouillon).
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Quantité et remise : pas un écart, une mise à jour. L'annoncer évite
+              la surprise de voir l'annexe du contrat changer après coup. */}
+          {syncedDiffs.length > 0 && (
+            <p className="ct-field-hint" style={{ marginTop: 10 }}>
+              À l'enregistrement, l'annexe « Engagement d'achat de l'Auteur » du contrat sera mise à jour :{' '}
+              {syncedDiffs.map(d => `${d.label.toLowerCase()} ${d.contractDisplay} → ${d.quoteDisplay}`).join(', ')}.
+            </p>
+          )}
+
           <div className="ct-form-row cols-2">
             <div className="ct-field">
               <label>Couverture</label>

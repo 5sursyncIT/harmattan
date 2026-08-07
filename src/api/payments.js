@@ -4,8 +4,8 @@ import api from './dolibarr';
  * Initialise un checkout PayTech pour une commande existante.
  * Retourne { redirect_url, token } — le frontend doit faire window.location = redirect_url.
  */
-export const initPaytechCheckout = (orderId) =>
-  api.post('/payments/paytech/init', { order_id: orderId });
+export const initPaytechCheckout = (orderId, orderToken) =>
+  api.post('/payments/paytech/init', { order_id: orderId, order_token: orderToken });
 
 /**
  * Récupère le statut courant d'une commande (polling après retour PayTech).

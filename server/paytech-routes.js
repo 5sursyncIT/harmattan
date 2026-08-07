@@ -149,6 +149,7 @@ export function createPaytechRouter({
   getAdminEmails,
   emailService, // { sendOrderConfirmationToCustomer, sendNewOrderNotificationToAdmin }
   whatsapp,     // { sendOrderConfirmation }
+  canAccessOrder, // (op, req) => bool — anti-IDOR (jeton commande ou session propriétaire)
 }) {
   const router = Router();
 
@@ -168,6 +169,10 @@ export function createPaytechRouter({
 
       const op = db.prepare('SELECT * FROM order_payments WHERE dolibarr_order_id = ? LIMIT 1').get(String(order_id));
       if (!op) return res.status(404).json({ error: 'Commande introuvable' });
+      // Anti-IDOR : init réservée au propriétaire (jeton commande ou session client).
+      if (typeof canAccessOrder === 'function' && !canAccessOrder(op, req)) {
+        return res.status(403).json({ error: 'Accès non autorisé à cette commande' });
+      }
 
       // Si déjà confirmé, ne pas re-initier
       if (op.payment_status === 'confirmed') {

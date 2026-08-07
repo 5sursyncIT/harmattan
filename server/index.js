@@ -599,6 +599,30 @@ function requireCustomerAuth(req, res, next) {
 // ─── PAYTECH columns migration (idempotent) ─────────────────
 import { migrateAddPaytechColumns } from './migrations/add-paytech-columns.js';
 migrateAddPaytechColumns(db);
+
+// Jeton d'accès à usage unique lié à une commande (anti-IDOR sur preuve de paiement
+// et init PayTech) : on stocke le SHA-256, le client reçoit le jeton brut une fois.
+try { db.exec('ALTER TABLE order_payments ADD COLUMN access_token TEXT'); } catch (e) { void e; }
+const hashOrderToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+// Autorise l'accès à une commande si : jeton valide fourni, OU client authentifié
+// propriétaire (email de session = email commande). Préserve le checkout invité.
+function canAccessOrder(op, req) {
+  if (!op) return false;
+  // Commandes antérieures au système de jeton (access_token NULL) : on conserve le
+  // comportement historique pour ne pas bloquer la preuve de paiement des commandes
+  // déjà en cours. Les nouvelles commandes ont toujours un jeton → protégées.
+  if (!op.access_token) return true;
+  const provided = req.body?.order_token || req.headers['x-order-token'] || '';
+  if (op.access_token && provided && safeEqual(hashOrderToken(provided), op.access_token)) return true;
+  const sess = req.cookies?.customer_session;
+  if (sess) {
+    const owner = db.prepare(
+      "SELECT c.email FROM customer_sessions cs JOIN customers c ON c.id = cs.customer_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+    ).get(hashCustomerSessionToken(sess));
+    if (owner && op.customer_email && owner.email && owner.email.toLowerCase() === op.customer_email.toLowerCase()) return true;
+  }
+  return false;
+}
 import { migrateAddUpcomingBooks } from './migrations/add-upcoming-books.js';
 migrateAddUpcomingBooks(db);
 
@@ -849,8 +873,8 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
 });
 
 // Admin endpoint to view sync logs
-app.get('/api/webhooks/logs', (req, res) => {
-  // Only allow from admin session (reuse admin auth check if available)
+app.get('/api/webhooks/logs', adminAuth(db), (req, res) => {
+  // Session admin obligatoire : ce journal expose l'historique de sync produits.
   const limit = Math.min(parseInt(req.query.limit) || 50, 200);
   const logs = db.prepare('SELECT * FROM webhook_sync_log ORDER BY id DESC LIMIT ?').all(limit);
   res.json(logs);
@@ -1607,6 +1631,8 @@ app.post('/api/orders/:id/payment-proof', csrfProtection, (req, res) => {
 
   const payment = db.prepare('SELECT * FROM order_payments WHERE dolibarr_order_id = ?').get(req.params.id);
   if (!payment) return res.status(404).json({ error: 'Commande introuvable' });
+  // Anti-IDOR : preuve réservée au propriétaire de la commande (jeton ou session).
+  if (!canAccessOrder(payment, req)) return res.status(403).json({ error: 'Accès non autorisé à cette commande' });
   if (payment.payment_status !== 'pending') return res.status(400).json({ error: 'Cette commande a déjà été traitée' });
 
   db.prepare(
@@ -1674,6 +1700,7 @@ try {
     },
     emailService,
     whatsapp: whatsappService,
+    canAccessOrder,
   }));
   console.log(`[PAYTECH] routes mounted (configured=${isPaytechConfigured()})`);
 } catch (err) {
@@ -2967,11 +2994,14 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
     // Get order details
     const orderDetail = await dolibarrApi.get(`/orders/${orderId}`);
 
+    // Jeton d'accès à usage unique : renvoyé une fois au client, hashé en base.
+    const orderToken = crypto.randomBytes(32).toString('hex');
+
     // Persister le statut de paiement en local (traçabilité)
     db.prepare(
-      `INSERT INTO order_payments (dolibarr_order_id, order_ref, customer_name, customer_email, customer_phone, payment_method, payment_status, amount_expected)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
-    ).run(String(orderId), orderDetail.data.ref, `${customer.firstname} ${customer.lastname}`, customer.email, customer.phone || '', payment_method, parseFloat(orderDetail.data.total_ttc) || 0);
+      `INSERT INTO order_payments (dolibarr_order_id, order_ref, customer_name, customer_email, customer_phone, payment_method, payment_status, amount_expected, access_token)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+    ).run(String(orderId), orderDetail.data.ref, `${customer.firstname} ${customer.lastname}`, customer.email, customer.phone || '', payment_method, parseFloat(orderDetail.data.total_ttc) || 0, hashOrderToken(orderToken));
 
     // Invalidate caches
     items.forEach((item) => {
@@ -3038,6 +3068,7 @@ app.post('/api/orders', orderLimiter, csrfProtection, async (req, res) => {
       success: true,
       order_id: orderId,
       order_ref: orderDetail.data.ref,
+      order_token: orderToken,
       payment_status: 'pending',
       total: orderDetail.data.total_ttc,
       paytech_redirect_url: paytechRedirectUrl,
@@ -3400,8 +3431,8 @@ app.get('/api/sync/status', (req, res) => {
   res.json(getSyncStatus());
 });
 
-// Manual sync trigger
-app.post('/api/sync/trigger', syncLimiter, async (req, res) => {
+// Manual sync trigger — session admin obligatoire (déclenche une charge Dolibarr).
+app.post('/api/sync/trigger', adminAuth(db), syncLimiter, async (req, res) => {
   try {
     const { type = 'all' } = req.body;
     if (type === 'products' || type === 'all') await syncProducts();

@@ -6,11 +6,14 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, mkdirSync, createReadStream, readFileSync, statSync, rmSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, createReadStream, readFileSync, rmSync, unlinkSync } from 'fs';
 import { transition as wfTransition, logManuscriptEvent } from './manuscript-workflow.js';
 import { createAuthorNotification, createAuthorEventNotification, sendTransitionEmail } from './manuscript-emails.js';
 import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { makeAdminAuth } from './admin-auth.js';
+import {
+  rebuildContractDocument, listContractDocuments, refreshContractDocumentIfAny,
+} from './contract-document.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -175,18 +178,9 @@ const DOLIBARR_INSTANCE_KEY = process.env.DOLIBARR_INSTANCE_KEY || '';
 const DOLIBARR_SIGN_TOKEN_ENCRYPTED = process.env.DOLIBARR_SIGN_TOKEN || '';
 const DOLIBARR_PUBLIC_URL = process.env.DOLIBARR_PUBLIC_URL || '';
 
-// ─── Dolibarr builddoc helper (custom module endpoint) ───
-const DOLIBARR_WEBHOOK_SECRET = process.env.DOLIBARR_WEBHOOK_SECRET || '';
-const BUILDDOC_URL = 'http://localhost/dolibarr/htdocs/custom/senharmattansync/contract-builddoc.php';
-
-async function rebuildContractDocument(contractId) {
-  if (!DOLIBARR_WEBHOOK_SECRET) throw new Error('DOLIBARR_WEBHOOK_SECRET non configuré');
-  const { data } = await axios.post(BUILDDOC_URL, { contract_id: contractId }, {
-    headers: { 'X-Dolibarr-Secret': DOLIBARR_WEBHOOK_SECRET, 'Content-Type': 'application/json' },
-    timeout: 30000,
-  });
-  return data;
-}
+// ─── Dolibarr builddoc helper ────────────────────────────
+// Déporté dans contract-document.js : les devis de contribution en ont besoin
+// eux aussi (ils réécrivent des extrafields imprimés dans l'annexe du contrat).
 
 if (!DOLIBARR_INSTANCE_KEY || !DOLIBARR_SIGN_TOKEN_ENCRYPTED || !DOLIBARR_PUBLIC_URL) {
   console.warn('[CONTRACTS] DOLIBARR_INSTANCE_KEY, DOLIBARR_SIGN_TOKEN et DOLIBARR_PUBLIC_URL manquants — la signature en ligne sera désactivée');
@@ -354,19 +348,6 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
   function likeParam(value) {
     if (typeof value !== 'string') return '';
     return value.slice(0, 200);
-  }
-
-  // Liste les documents Dolibarr d'un contrat. Dolibarr renvoie une 404 quand
-  // aucun document n'existe encore — on la traite comme une liste vide plutôt
-  // que comme une erreur (un brouillon sans PDF n'est pas un cas d'erreur).
-  async function listContractDocuments(id) {
-    try {
-      const docsRes = await adminApi.get('/documents', { params: { modulepart: 'contract', id } });
-      return docsRes.data || [];
-    } catch (err) {
-      if (err.response?.status === 404) return [];
-      throw err;
-    }
   }
 
   // Garantit que model_pdf est renseigné en base (Dolibarr::create/update ne le
@@ -905,11 +886,21 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       if (data.free_author_copies !== undefined) arrayOptions.options_free_author_copies = numField(data.free_author_copies, 'Exemplaires gratuits entre 0 et 100', { int: true, max: 100 });
       if (data.author_purchase_enabled !== undefined) arrayOptions.options_author_purchase_enabled = data.author_purchase_enabled ? 1 : 0;
       if (data.author_purchase_qty !== undefined) arrayOptions.options_author_purchase_qty = parseInt(data.author_purchase_qty) || 0;
-      if (data.author_purchase_discount !== undefined) arrayOptions.options_author_purchase_discount = parseFloat(data.author_purchase_discount) || 0;
+      // Même garde que les taux de royalties : une valeur non numérique ne doit
+      // pas se transformer en 0 silencieux — la remise pilote le montant facturé
+      // à l'auteur (ligne « achat d'exemplaires » du devis).
+      if (data.author_purchase_discount !== undefined) arrayOptions.options_author_purchase_discount = numField(data.author_purchase_discount, 'Remise auteur entre 0 et 100%', { max: 100 });
 
       // Nouvelles variables v2
       if (data.tirage_initial !== undefined) arrayOptions.options_tirage_initial = numField(data.tirage_initial, 'Tirage initial doit être un entier positif', { int: true });
-      if (data.format_ouvrage !== undefined) arrayOptions.options_format_ouvrage = (data.format_ouvrage || '').trim();
+      // Format : un champ vidé côté client effaçait le format imprimé au contrat.
+      // On refuse la chaîne vide plutôt que de la propager (même principe que les
+      // champs numériques ci-dessus : ne jamais effacer par omission).
+      if (data.format_ouvrage !== undefined) {
+        const fmt = String(data.format_ouvrage || '').trim();
+        if (!fmt) numErrors.push('Format de l\'ouvrage requis');
+        else arrayOptions.options_format_ouvrage = fmt.slice(0, 60);
+      }
       if (data.prix_public_previsionnel !== undefined) arrayOptions.options_prix_public_previsionnel = numField(data.prix_public_previsionnel, 'Prix public prévisionnel doit être un nombre positif');
       if (data.nombre_pages_estime !== undefined) arrayOptions.options_nombre_pages_estime = numField(data.nombre_pages_estime, 'Nombre de pages doit être un entier positif', { int: true });
       if (data.exemplaires_sp !== undefined) arrayOptions.options_exemplaires_sp = numField(data.exemplaires_sp, 'Exemplaires SP doit être un entier positif', { int: true });
@@ -934,7 +925,13 @@ export function createContractRouter({ db, dolibarrPool, csrfProtection, transpo
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'update_contract', `Contrat #${id} modifié`);
 
-      res.json({ success: true });
+      // Un brouillon n'a normalement aucun document : le PDF naît à la validation.
+      // L'exception est le contrat validé puis ROUVERT pour correction — il garde
+      // son PDF d'origine, qui annoncerait encore l'ancienne pagination / l'ancien
+      // prix jusqu'à la re-validation.
+      const documentRebuilt = await refreshContractDocumentIfAny(id, { context: 'modification du contrat' });
+
+      res.json({ success: true, documentRebuilt });
     } catch (err) {
       console.error('Update contract error:', err.response?.data || err.message);
       const { status, body } = dolibarrError(err, 'Erreur modification contrat');

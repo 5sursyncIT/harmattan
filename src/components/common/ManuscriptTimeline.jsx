@@ -27,6 +27,8 @@ const STAGE_ICONS = {
   quote_sent: FiSend,
   quote_paid: FiCreditCard,
   quote_deleted: FiTrash2,
+  quote_contract_divergence: FiAlertTriangle,
+  contract_aligned_on_quote: FiCheckSquare,
   contract_doc_sent: FiDownload,
   contract_sent: FiMail,
   contract_deleted: FiTrash2,
@@ -78,6 +80,10 @@ const EVENT_TONE = {
   launch_prepared: 'success',
   quote_deleted: 'danger',
   contract_deleted: 'danger',
+  // Un devis qui s'écarte du contrat n'est pas une erreur, mais un point à
+  // arbitrer : ambre plutôt que rouge.
+  quote_contract_divergence: 'warn',
+  contract_aligned_on_quote: 'success',
 };
 
 // Évènements « techniques » à faible valeur pour le suivi : brouillons,

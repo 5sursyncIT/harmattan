@@ -6,6 +6,7 @@ import toast from 'react-hot-toast';
 import './Contracts.css';
 import useAdminRole, { CONTRACT_WRITE_ROLES } from '../../../hooks/useAdminRole';
 import { CONTRACT_MODEL_CHOICES, RIGHTS_SCOPE_CHOICES } from '../../../utils/contractTypes';
+import { CONTRACT_FORMAT_OPTIONS } from '../../../utils/bookFormats';
 
 // Données (labels, couleurs, defaults) centralisées dans utils/contractTypes.js ;
 // seules les icônes — détail de présentation de ce wizard — restent locales.
@@ -131,7 +132,10 @@ export default function ContractCreate() {
     author_purchase_discount: 30,
     // Paramètres de fabrication (v2)
     tirage_initial: 100,
-    format_ouvrage: '15,5 × 24 cm',
+    // Défaut aligné sur celui du serveur (getDefaultsForType) et sur l'usage réel :
+    // « 15 × 21 cm » couvre près de la moitié des contrats en base. Le formulaire
+    // proposait « 15,5 × 24 cm », en contradiction avec le défaut serveur.
+    format_ouvrage: CONTRACT_FORMAT_OPTIONS[0].value,
     nombre_pages_estime: 200,
     prix_public_previsionnel: 15,
     exemplaires_sp: 5,
@@ -589,8 +593,9 @@ export default function ContractCreate() {
             </Field>
             <Field label="Format">
               <select value={form.format_ouvrage} onChange={e => set('format_ouvrage', e.target.value)}>
-                <option value="15,5 × 24 cm">15,5 × 24 cm (standard)</option>
-                <option value="13,5 × 21,5 cm">13,5 × 21,5 cm (devis-fabrication)</option>
+                {CONTRACT_FORMAT_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
               </select>
             </Field>
             <Field label="Pages (estimé)" error={errors.nombre_pages_estime}>

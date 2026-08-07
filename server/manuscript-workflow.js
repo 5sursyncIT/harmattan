@@ -71,6 +71,12 @@ export const MANUSCRIPT_EVENTS = {
   quote_sent:        { label: "Devis envoyé à l'auteur",        authorVisible: true },
   quote_paid:        { label: 'Devis encaissé',                 authorVisible: false },
   quote_deleted:     { label: 'Devis supprimé',                 authorVisible: false },
+  // Contrôle de conformité devis ↔ contrat : le devis s'écarte des caractéristiques
+  // de fabrication du contrat (pages, format, prix public, remise), puis report de
+  // ces valeurs négociées sur le contrat. Interne — l'auteur n'a pas à voir la
+  // mécanique de rapprochement, seulement le devis qui en résulte.
+  quote_contract_divergence:  { label: 'Écart devis / contrat',        authorVisible: false },
+  contract_aligned_on_quote:  { label: 'Contrat réaligné sur le devis', authorVisible: false },
   // Action interne : un admin récupère le PDF/ODT du contrat (route GET /document).
   contract_doc_sent: { label: 'Document de contrat téléchargé', authorVisible: false },
   // Vrai envoi à l'auteur : e-mail du lien de signature (route POST /send-signature).

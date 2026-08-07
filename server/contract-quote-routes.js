@@ -9,6 +9,12 @@ import { createAuthorEventNotification } from './manuscript-emails.js';
 import { makeAdminAuth } from './admin-auth.js';
 import { adminApi } from './dolibarr-admin-client.js';
 import { recordInvoicePayment, resolvePaymentId } from './dolibarr-payments.js';
+import {
+  compareSpecs, specFromContractRow, specFromQuote, conformitySummary,
+  CONFORMITY_DIVERGENT,
+} from '../src/utils/contractConformity.js';
+import { toContractFormat } from '../src/utils/bookFormats.js';
+import { refreshContractDocumentIfAny } from './contract-document.js';
 
 const execFile = promisify(execFileCb);
 
@@ -198,7 +204,12 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contract_quotes_contract ON contract_quotes(contract_id)`);
   // Migration : lien vers la facture Dolibarr générée lors de l'encaissement,
   // et remise auteur (%) retenue pour ce devis (traçabilité / réimpression).
-  for (const col of ['dolibarr_invoice_id INTEGER', 'invoice_ref TEXT', 'discount_pct REAL']) {
+  // `copies_qty` : quantité d'exemplaires contractuels retenue pour CE devis.
+  // Elle était seulement recopiée sur le contrat (extrafield author_purchase_qty)
+  // et déduisible du seul libellé « 4 - Achat de N exemplaires ». La conserver ici
+  // permet de contrôler que le contrat porte bien la même — c'est cette valeur que
+  // l'annexe « Engagement d'achat de l'Auteur » imprime.
+  for (const col of ['dolibarr_invoice_id INTEGER', 'invoice_ref TEXT', 'discount_pct REAL', 'copies_qty INTEGER']) {
     try { db.exec(`ALTER TABLE contract_quotes ADD COLUMN ${col}`); } catch { /* déjà présente */ }
   }
 
@@ -233,6 +244,100 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
     );
     if (!rows.length) return null;
     return { socid: Number(rows[0].socid), email: rows[0].email || null, name: rows[0].nom || '' };
+  }
+
+  // ─── Conformité devis ↔ contrat ────────────────────────
+  // Caractéristiques de fabrication portées par le contrat, plus son statut
+  // (seul un brouillon peut être réaligné). Lecture SQL directe : la conformité
+  // est calculée pour chaque devis d'une liste, un aller-retour REST par devis
+  // serait disproportionné.
+  async function contractFabrication(contractId) {
+    if (!dolibarrPool) return null;
+    const [rows] = await dolibarrPool.query(
+      `SELECT c.statut,
+              ce.nombre_pages_estime, ce.format_ouvrage,
+              ce.prix_public_previsionnel, ce.author_purchase_discount,
+              ce.author_purchase_qty
+         FROM llx_contrat c
+         LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+        WHERE c.rowid = ? LIMIT 1`,
+      [contractId],
+    );
+    return rows.length ? rows[0] : null;
+  }
+
+  // Verdict de conformité d'un devis, enrichi de ce que l'UI doit savoir pour
+  // proposer (ou refuser) l'alignement du contrat.
+  function conformityFor(fabrication, quote) {
+    const result = compareSpecs(specFromContractRow(fabrication || {}), specFromQuote(quote));
+    const isDraft = fabrication ? Number(fabrication.statut) === 0 : false;
+    const invoiced = !!quote.dolibarr_invoice_id;
+    return {
+      ...result,
+      // L'alignement réécrit le contrat : impossible hors brouillon (garde reprise
+      // de PUT /contracts/:id) et sans écart à reporter.
+      canAlignContract: result.status === CONFORMITY_DIVERGENT && isDraft,
+      contractIsDraft: isDraft,
+      quoteIsInvoiced: invoiced,
+    };
+  }
+
+  // Reporte sur le contrat les conditions d'achat retenues au devis.
+  //
+  // L'ANNEXE « Engagement d'achat de l'Auteur » du contrat imprime DEUX valeurs :
+  // `author_purchase_qty` et `author_purchase_discount`. Seule la première était
+  // recopiée — d'où des annexes annonçant « prix public moins 0.00 % » alors que
+  // le devis appliquait 30 %. Et rien ne régénérait le document : le contrat
+  // CT2607-0075 affichait « 0 exemplaires » alors que l'extrafield portait 50,
+  // parce que son PDF datait d'avant le devis.
+  //
+  // Une valeur `null` signifie « le client ne l'a pas fournie » : on n'écrase alors
+  // rien. Ne JAMAIS pousser un défaut calculé ici — il écraserait une valeur que la
+  // direction a délibérément saisie au contrat.
+  async function persistPurchaseTerms(contractId, { copiesQty = null, discountPct = null } = {}) {
+    const arrayOptions = {};
+    if (copiesQty !== null) {
+      arrayOptions.options_author_purchase_qty = copiesQty;
+      // qty > 0 active la clause d'achat ; qty = 0 la désactive.
+      arrayOptions.options_author_purchase_enabled = copiesQty > 0 ? 1 : 0;
+    }
+    if (discountPct !== null) arrayOptions.options_author_purchase_discount = discountPct;
+    if (Object.keys(arrayOptions).length === 0) return false;
+
+    try {
+      await adminApi.put(`/contracts/${contractId}`, { array_options: arrayOptions });
+    } catch (e) {
+      console.warn('Persist purchase terms warning:', e.response?.data?.error || e.message);
+      return false;
+    }
+    // Le document existant imprime ces valeurs : il vient de devenir périmé.
+    await refreshContractDocumentIfAny(contractId, { context: 'conditions d\'achat reportées depuis le devis' });
+    return true;
+  }
+
+  // Journalise un écart au moment où il est créé : sans cette trace, une
+  // divergence introduite puis « corrigée » côté contrat serait indétectable
+  // a posteriori. Best-effort — n'interrompt jamais l'enregistrement du devis.
+  async function traceConformity({ contractId, quote, ref, username, action }) {
+    try {
+      const fabrication = await contractFabrication(contractId);
+      const result = compareSpecs(specFromContractRow(fabrication || {}), specFromQuote(quote));
+      if (result.status !== CONFORMITY_DIVERGENT) return result;
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(username, action, `Devis ${ref} — écart au contrat #${contractId} : ${conformitySummary(result)}`);
+
+      const msId = manuscriptIdForContract(contractId);
+      if (msId) {
+        logManuscriptEvent(db, msId, 'quote_contract_divergence',
+          { role: 'system', id: null, label: username },
+          `Devis ${ref} : ${conformitySummary(result)}`);
+      }
+      return result;
+    } catch (e) {
+      console.warn('Conformity trace warning:', e.message);
+      return null;
+    }
   }
 
   // Total / déjà payé / reste à payer d'une facture Dolibarr (lecture directe).
@@ -296,6 +401,10 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
       const discountPct = Number.isFinite(rawDiscount)
         ? Math.min(100, Math.max(0, rawDiscount))
         : DEFAULT_AUTHOR_DISCOUNT;
+      // Distinguer « remise réellement transmise » de « repli sur le défaut » : seule
+      // la première doit être reportée sur le contrat. Reporter le défaut écraserait
+      // une remise négociée que la direction a saisie au contrat.
+      const providedDiscount = Number.isFinite(rawDiscount) ? discountPct : null;
 
       if (!recipient_name?.trim()) return res.status(400).json({ error: 'Nom du destinataire requis' });
       if (!book_title?.trim()) return res.status(400).json({ error: 'Titre de l\'ouvrage requis' });
@@ -316,8 +425,8 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
         const r = db.prepare(`INSERT INTO contract_quotes (
           contract_id, ref, recipient_title, recipient_name, book_title, book_pages,
           book_format, book_interior, book_paper, book_cover, book_price_eur, diffusion,
-          items_json, total, discount_pct, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          items_json, total, discount_pct, copies_qty, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           contractId, ref,
           String(recipient_title || 'Monsieur').slice(0, 20),
           recipient_name.trim().slice(0, 120),
@@ -332,6 +441,7 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
           JSON.stringify(sanitizedItems),
           total,
           discountPct,
+          copiesQty,
           req.admin.username,
         );
         return { id: r.lastInsertRowid, ref };
@@ -341,22 +451,9 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'create_quote', `Devis ${ref} (contrat #${contractId}) — total ${total} FCFA`);
 
-      // Persiste le nombre d'exemplaires contractuels choisi sur le contrat Dolibarr
-      // (extrafield author_purchase_qty) afin de pré-remplir les prochains devis.
-      // qty > 0 active aussi la clause d'achat ; qty = 0 la désactive. Best-effort :
-      // un échec de persistance ne doit pas casser la création du devis déjà enregistré.
-      if (copiesQty !== null) {
-        try {
-          await adminApi.put(`/contracts/${contractId}`, {
-            array_options: {
-              options_author_purchase_qty: copiesQty,
-              options_author_purchase_enabled: copiesQty > 0 ? 1 : 0,
-            },
-          });
-        } catch (e) {
-          console.warn('Persist author_purchase_qty warning:', e.response?.data?.error || e.message);
-        }
-      }
+      // Reporte quantité + remise sur le contrat et rafraîchit son annexe.
+      // Best-effort : un échec ne doit pas casser le devis déjà enregistré.
+      await persistPurchaseTerms(contractId, { copiesQty, discountPct: providedDiscount });
 
       // Trace sur la frise du manuscrit lié (ne bloque pas la création du devis)
       try {
@@ -368,7 +465,14 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
         }
       } catch (e) { console.warn('Manuscript event (quote_created) warning:', e.message); }
 
-      res.status(201).json({ id, ref, total });
+      // Contrôle de conformité au contrat : un écart n'empêche pas la création
+      // (la négociation est légitime) mais il est journalisé et remonté à l'UI.
+      const conformity = await traceConformity({
+        contractId, ref, username: req.admin.username, action: 'quote_contract_divergence',
+        quote: { book_pages, book_format, book_price_eur, discount_pct: discountPct },
+      });
+
+      res.status(201).json({ id, ref, total, conformity });
     } catch (err) {
       console.error('Create quote error:', err.message);
       res.status(500).json({ error: 'Erreur création devis' });
@@ -408,6 +512,7 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
       const discountPct = Number.isFinite(rawDiscount)
         ? Math.min(100, Math.max(0, rawDiscount))
         : DEFAULT_AUTHOR_DISCOUNT;
+      const providedDiscount = Number.isFinite(rawDiscount) ? discountPct : null;
 
       if (!recipient_name?.trim()) return res.status(400).json({ error: 'Nom du destinataire requis' });
       if (!book_title?.trim()) return res.status(400).json({ error: 'Titre de l\'ouvrage requis' });
@@ -426,6 +531,7 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
         recipient_title = ?, recipient_name = ?, book_title = ?, book_pages = ?,
         book_format = ?, book_interior = ?, book_paper = ?, book_cover = ?,
         book_price_eur = ?, diffusion = ?, items_json = ?, total = ?, discount_pct = ?,
+        copies_qty = COALESCE(?, copies_qty),
         status = 'draft'
         WHERE id = ?`).run(
         String(recipient_title || 'Monsieur').slice(0, 20),
@@ -441,25 +547,16 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
         JSON.stringify(sanitizedItems),
         total,
         discountPct,
+        copiesQty,
         quoteId,
       );
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'update_quote', `Devis ${existing.ref} révisé — total ${total} FCFA (était ${existing.total})`);
 
-      // Persiste le nombre d'exemplaires contractuels choisi sur le contrat (comme à la création).
-      if (copiesQty !== null) {
-        try {
-          await adminApi.put(`/contracts/${existing.contract_id}`, {
-            array_options: {
-              options_author_purchase_qty: copiesQty,
-              options_author_purchase_enabled: copiesQty > 0 ? 1 : 0,
-            },
-          });
-        } catch (e) {
-          console.warn('Persist author_purchase_qty warning:', e.response?.data?.error || e.message);
-        }
-      }
+      // Report des conditions d'achat sur le contrat + rafraîchissement de l'annexe
+      // (identique à la création : une révision change souvent la remise négociée).
+      await persistPurchaseTerms(existing.contract_id, { copiesQty, discountPct: providedDiscount });
 
       try {
         const msId = manuscriptIdForContract(existing.contract_id);
@@ -470,7 +567,13 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
         }
       } catch (e) { console.warn('Manuscript event (quote_revised) warning:', e.message); }
 
-      res.json({ id: quoteId, ref: existing.ref, total, status: 'draft' });
+      const conformity = await traceConformity({
+        contractId: existing.contract_id, ref: existing.ref,
+        username: req.admin.username, action: 'quote_contract_divergence',
+        quote: { book_pages, book_format, book_price_eur, discount_pct: discountPct },
+      });
+
+      res.json({ id: quoteId, ref: existing.ref, total, status: 'draft', conformity });
     } catch (err) {
       console.error('Update quote error:', err.message);
       res.status(500).json({ error: 'Erreur révision devis' });
@@ -483,9 +586,27 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
       const contractId = parseInt(req.params.contractId);
       const quotes = db.prepare(
         `SELECT id, ref, recipient_name, book_title, total, status, created_at, created_by,
-                dolibarr_invoice_id, invoice_ref
+                dolibarr_invoice_id, invoice_ref,
+                book_pages, book_format, book_price_eur, discount_pct, copies_qty, items_json
          FROM contract_quotes WHERE contract_id = ? ORDER BY created_at DESC`,
       ).all(contractId);
+
+      // Conformité au contrat : une seule lecture des caractéristiques de
+      // fabrication pour toute la liste. Un échec de lecture laisse simplement
+      // les devis sans verdict plutôt que d'en inventer un.
+      let fabrication = null;
+      try { fabrication = await contractFabrication(contractId); }
+      catch (e) { console.warn('Conformity read warning:', e.message); }
+      for (const q of quotes) {
+        // `items` sert de repli pour les devis antérieurs à la colonne copies_qty
+        // (la quantité n'y vit que dans le libellé de la ligne 4).
+        if (fabrication) {
+          let items = null;
+          try { items = JSON.parse(q.items_json); } catch (e) { void e; }
+          q.conformity = conformityFor(fabrication, { ...q, items });
+        }
+        delete q.items_json; // charge inutile pour la liste
+      }
 
       // Enrichit les devis facturés du reste à payer live (best-effort : un échec
       // de lecture Dolibarr ne casse pas la liste, on garde le statut stocké).
@@ -574,10 +695,96 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
           }
         } catch (e) { void e; }
       }
+      try {
+        const fabrication = await contractFabrication(quote.contract_id);
+        if (fabrication) quote.conformity = conformityFor(fabrication, quote);
+      } catch (e) { console.warn('Conformity read warning:', e.message); }
       res.json(quote);
     } catch (err) {
       console.error('Get quote error:', err.message);
       res.status(500).json({ error: 'Erreur lecture devis' });
+    }
+  });
+
+  // POST /api/quotes/:id/align-contract — reporte sur le CONTRAT les valeurs
+  // négociées du devis (pages, format, prix public, remise auteur).
+  //
+  // Sens unique volontaire : c'est le devis qui porte la décision commerciale la
+  // plus récente, et le contrat qui doit la refléter — l'inverse (écraser le devis
+  // avec le contrat) reviendrait à effacer une négociation. Réservé au brouillon :
+  // un contrat validé se rouvre d'abord (/contracts/:id/reopen, admins), ce qui
+  // impose de repasser par la validation — et interdit de fait tout réalignement
+  // silencieux d'un contrat signé.
+  router.post('/quotes/:id/align-contract', auth, csrfProtection, async (req, res) => {
+    try {
+      const quoteId = parseInt(req.params.id);
+      if (!quoteId) return res.status(400).json({ error: 'Devis invalide' });
+
+      const quote = db.prepare('SELECT * FROM contract_quotes WHERE id = ?').get(quoteId);
+      if (!quote) return res.status(404).json({ error: 'Devis introuvable' });
+
+      const fabrication = await contractFabrication(quote.contract_id);
+      if (!fabrication) return res.status(404).json({ error: 'Contrat parent introuvable' });
+      if (Number(fabrication.statut) !== 0) {
+        return res.status(409).json({
+          error: 'Ce contrat n\'est plus un brouillon : rouvrez-le en brouillon avant de le réaligner sur le devis.',
+        });
+      }
+
+      quote.items = (() => { try { return JSON.parse(quote.items_json); } catch (e) { void e; return null; } })();
+      const before = compareSpecs(specFromContractRow(fabrication), specFromQuote(quote));
+      if (before.status !== CONFORMITY_DIVERGENT) {
+        return res.status(409).json({ error: 'Aucun écart à reporter : le contrat est déjà conforme au devis.' });
+      }
+
+      // On ne réécrit QUE les champs réellement en écart — un alignement ne doit
+      // pas repeupler au passage des champs que la direction avait laissés vides.
+      const arrayOptions = {};
+      const quoteSpec = specFromQuote(quote);
+      for (const diff of before.diffs) {
+        if (diff.field === 'pages') arrayOptions.options_nombre_pages_estime = quoteSpec.pages;
+        // Le format repasse dans la graphie du contrat (« 15,5 × 24 cm ») : le PDF
+        // du contrat ne doit pas hériter du phrasé de la fiche de fabrication.
+        if (diff.field === 'format') arrayOptions.options_format_ouvrage = toContractFormat(quote.book_format);
+        if (diff.field === 'price') arrayOptions.options_prix_public_previsionnel = quoteSpec.priceEur;
+        if (diff.field === 'discount') arrayOptions.options_author_purchase_discount = quoteSpec.discountPct;
+        if (diff.field === 'copies') {
+          arrayOptions.options_author_purchase_qty = quoteSpec.copies;
+          // L'annexe précise « Engagement actif uniquement si la quantité est
+          // supérieure à 0 » : le drapeau doit suivre la quantité.
+          arrayOptions.options_author_purchase_enabled = quoteSpec.copies > 0 ? 1 : 0;
+        }
+      }
+      if (Object.keys(arrayOptions).length === 0) {
+        return res.status(409).json({ error: 'Aucun champ alignable dans cet écart.' });
+      }
+
+      await adminApi.put(`/contracts/${quote.contract_id}`, { array_options: arrayOptions });
+
+      // Le contrat vient de changer : son document (dont l'annexe d'engagement
+      // d'achat) doit suivre, sinon l'alignement resterait invisible sur le PDF.
+      const documentRebuilt = await refreshContractDocumentIfAny(quote.contract_id, { context: 'alignement sur le devis' });
+
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(req.admin.username, 'align_contract_on_quote',
+          `Contrat #${quote.contract_id} réaligné sur le devis ${quote.ref} — ${conformitySummary(before)}`);
+
+      try {
+        const msId = manuscriptIdForContract(quote.contract_id);
+        if (msId) {
+          logManuscriptEvent(db, msId, 'contract_aligned_on_quote',
+            { role: req.admin.role || 'admin', id: req.admin.id, label: req.admin.username },
+            `Contrat réaligné sur le devis ${quote.ref} — ${conformitySummary(before)}`);
+        }
+      } catch (e) { console.warn('Manuscript event (contract_aligned_on_quote) warning:', e.message); }
+
+      // Verdict recalculé après écriture : c'est la preuve que l'alignement a pris,
+      // pas une hypothèse — si Dolibarr a refusé un champ, l'écart réapparaît ici.
+      const after = conformityFor(await contractFabrication(quote.contract_id), quote);
+      res.json({ aligned: Object.keys(arrayOptions), before, conformity: after, documentRebuilt });
+    } catch (err) {
+      console.error('Align contract error:', err.response?.data || err.message);
+      res.status(500).json({ error: 'Erreur alignement du contrat' });
     }
   });
 

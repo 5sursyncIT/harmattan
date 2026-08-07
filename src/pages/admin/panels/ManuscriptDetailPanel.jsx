@@ -364,18 +364,41 @@ export default function ManuscriptDetailPanel() {
     finally { setContractBusy(false); }
   };
 
-  // La route /contracts/list n'a pas de recherche plein-texte unique : on charge la
-  // liste récente et on filtre côté client (réf / titre / auteur).
-  const loadContracts = async () => {
+  // Sans terme : liste récente. Avec terme : recherche côté serveur (réf / titre /
+  // auteur en parallèle, fusion par id) — la liste récente est plafonnée à 50, un
+  // contrat ancien n'y figure pas et le filtre client seul ne le trouverait jamais.
+  const loadContracts = async (query = '') => {
     setContractSearching(true);
     try {
-      const res = await getContracts({ limit: 50, sort: 'date', order: 'DESC' });
-      const list = Array.isArray(res.data) ? res.data : (res.data?.contracts || res.data?.items || []);
+      const q = query.trim();
+      let list;
+      if (q) {
+        const results = await Promise.allSettled([
+          getContracts({ ref: q, limit: 50 }),
+          getContracts({ title: q, limit: 50 }),
+          getContracts({ author: q, limit: 50 }),
+        ]);
+        const seen = new Map();
+        for (const r of results) {
+          if (r.status !== 'fulfilled') continue;
+          const items = Array.isArray(r.value.data) ? r.value.data : (r.value.data?.contracts || r.value.data?.items || []);
+          for (const c of items) if (!seen.has(c.id)) seen.set(c.id, c);
+        }
+        list = [...seen.values()];
+      } else {
+        const res = await getContracts({ limit: 50, sort: 'date', order: 'DESC' });
+        list = Array.isArray(res.data) ? res.data : (res.data?.contracts || res.data?.items || []);
+      }
       setContractResults(list);
     } catch { setContractResults([]); }
     finally { setContractSearching(false); }
   };
-  const openLinkModal = () => { setLinkModal(true); setContractQuery(''); loadContracts(); };
+  useEffect(() => {
+    if (!linkModal) return;
+    const t = setTimeout(() => loadContracts(contractQuery), 300);
+    return () => clearTimeout(t);
+  }, [linkModal, contractQuery]);
+  const openLinkModal = () => { setLinkModal(true); setContractQuery(''); };
   const confirmLink = async (contractId) => {
     setContractBusy(true);
     try {

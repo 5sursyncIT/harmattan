@@ -105,6 +105,7 @@ export default function CheckoutPage() {
       await api.post(`/orders/${orderResult?.order_id}/payment-proof`, {
         transaction_ref: proofRef.trim(),
         payer_phone: proofPhone.trim(),
+        order_token: orderResult?.order_token,
       });
       setProofSent(true);
       toast.success('Référence envoyée ! Nous vérifions votre paiement.');
@@ -128,9 +129,14 @@ export default function CheckoutPage() {
           {method?.instructions && (
             <div className="payment-instructions">
               <h3>{method.icon} Payez par {method.label}</h3>
-              {method.instructions.split('\n').map((line, i) => (
-                <p key={i} dangerouslySetInnerHTML={{ __html: line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} />
-              ))}
+              {method.instructions.split('\n').map((line, i) => {
+                // Échapper tout HTML de la config (éditable admin/libraire) AVANT de
+                // ré-introduire uniquement le **gras** — sinon XSS stocké possible.
+                const safe = line
+                  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                  .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+                return <p key={i} dangerouslySetInnerHTML={{ __html: safe }} />;
+              })}
               <p style={{ fontWeight: 700, color: '#10531a', fontSize: '1.1rem', marginTop: 12 }}>
                 Montant exact à envoyer : {formatPrice(orderResult?.total)}
               </p>

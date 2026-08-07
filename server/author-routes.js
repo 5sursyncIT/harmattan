@@ -467,8 +467,10 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     const author = db.prepare('SELECT id, firstname FROM authors WHERE email = ?').get(email);
     if (!author) return res.json({ success: true }); // anti-enumeration
     const token = crypto.randomBytes(32).toString('hex');
+    // Seul le SHA-256 est stocké ; le lien email porte le token brut.
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    db.prepare('INSERT OR REPLACE INTO author_password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, token, expiresAt);
+    db.prepare('INSERT OR REPLACE INTO author_password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, tokenHash, expiresAt);
     const resetUrl = `${siteUrl}/auteur/mot-de-passe-oublie?token=${token}&email=${encodeURIComponent(email)}`;
     transporter?.sendMail({
       from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
@@ -485,7 +487,8 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
       return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères, une majuscule et un chiffre' });
     }
-    const reset = db.prepare("SELECT * FROM author_password_resets WHERE email = ? AND token = ? AND expires_at > datetime('now')").get(email, token);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const reset = db.prepare("SELECT * FROM author_password_resets WHERE email = ? AND token = ? AND expires_at > datetime('now')").get(email, tokenHash);
     if (!reset) return res.status(400).json({ error: 'Lien expiré ou invalide' });
     const hash = await bcrypt.hash(password, 12);
     db.prepare('UPDATE authors SET password = ? WHERE email = ?').run(hash, email);

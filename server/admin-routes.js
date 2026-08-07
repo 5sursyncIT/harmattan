@@ -782,10 +782,18 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     }
   });
 
-  // Admin: get full config (including SMTP)
+  // Seuls super_admin / admin voient et modifient les identifiants SMTP.
+  const SMTP_PRIVILEGED = ['super_admin', 'admin'];
+
+  // Admin: get full config — SMTP masqué pour les rôles non privilégiés (ex. libraire).
   app.get('/api/admin/config/full', auth, (req, res) => {
     try {
-      res.json(readConfig());
+      const config = readConfig();
+      if (!SMTP_PRIVILEGED.includes(req.admin?.role)) {
+        const { smtp, ...rest } = config;
+        return res.json(rest);
+      }
+      res.json(config);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Erreur lecture config' });
@@ -813,6 +821,11 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
     try {
       const config = readConfig();
       const updates = req.body;
+
+      // Mutation SMTP réservée à super_admin / admin (détournement d'emails sinon).
+      if (updates.smtp !== undefined && !SMTP_PRIVILEGED.includes(req.admin?.role)) {
+        return res.status(403).json({ error: 'Configuration SMTP réservée à l’administrateur' });
+      }
 
       // Merge updates into config — uniquement les clés autorisées (anti mass-assignment).
       for (const [key, value] of Object.entries(updates)) {

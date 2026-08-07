@@ -122,12 +122,16 @@ export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter
         if (!customer) return; // compte inexistant : aucun mail, mais réponse déjà identique
 
         const token = crypto.randomBytes(32).toString('hex');
+        // On ne stocke JAMAIS le token brut : seul son SHA-256 est persisté (le lien
+        // envoyé par email contient le token brut). Un accès en lecture à la base ne
+        // permet donc pas de forger un lien de réinitialisation valide.
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
         const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
         db.exec(`CREATE TABLE IF NOT EXISTS password_resets (
           email TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at DATETIME NOT NULL
         )`);
-        db.prepare('INSERT OR REPLACE INTO password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, token, expiresAt);
+        db.prepare('INSERT OR REPLACE INTO password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, tokenHash, expiresAt);
 
         const baseUrl = process.env.SITE_URL || 'http://38.242.229.122:3000';
         const resetUrl = `${baseUrl}/reinitialiser-mdp?token=${token}&email=${encodeURIComponent(email)}`;
@@ -153,7 +157,8 @@ export function createAuthRouter({ db, csrfProtection, sanitizeBody, authLimiter
       }
 
       db.exec(`CREATE TABLE IF NOT EXISTS password_resets (email TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at DATETIME NOT NULL)`);
-      const reset = db.prepare("SELECT * FROM password_resets WHERE email = ? AND token = ? AND expires_at > datetime('now')").get(email, token);
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      const reset = db.prepare("SELECT * FROM password_resets WHERE email = ? AND token = ? AND expires_at > datetime('now')").get(email, tokenHash);
       if (!reset) return res.status(400).json({ error: 'Lien expiré ou invalide. Veuillez refaire une demande.' });
 
       const hash = await bcrypt.hash(password, 12);

@@ -9,6 +9,10 @@ export const markQuoteSent = (id) => api.post(`/quotes/${id}/send`);
 export const deleteQuote = (id) => api.delete(`/quotes/${id}`);
 export const getQuoteDefaults = (params) => api.get('/quotes/defaults', { params });
 
+// Reporte sur le contrat (brouillon) les caractéristiques négociées du devis :
+// pages, format, prix public, remise auteur. Sens unique — cf. contract-quote-routes.js.
+export const alignContractOnQuote = (id) => api.post(`/quotes/${id}/align-contract`);
+
 // Encaissement d'un devis de contribution (crée la facture + enregistre le règlement).
 export const getQuoteBanks = () => api.get('/quotes/banks');
 export const payQuote = (id, payload) => api.post(`/quotes/${id}/pay`, payload);

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   getContract, validateContract, closeContract, deleteContract,
@@ -10,11 +10,16 @@ import {
   FiArrowLeft, FiCheckCircle, FiXCircle, FiDownload, FiUser, FiBook,
   FiPercent, FiFileText, FiCalendar, FiCopy, FiEdit3, FiSave, FiAlertCircle, FiRefreshCw,
   FiPlus, FiTrash2, FiSend, FiCheck, FiUploadCloud, FiDollarSign,
+  FiLayers, FiMaximize2, FiTag, FiGift, FiAlertTriangle, FiGitMerge,
 } from 'react-icons/fi';
 import Loader from '../../../components/common/Loader';
 import ConfirmModal from '../../../components/common/ConfirmModal';
 import toast from 'react-hot-toast';
-import { listContractQuotes, getQuote, deleteQuote, markQuoteSent, openQuotePdf } from '../../../api/quotes';
+import { listContractQuotes, getQuote, deleteQuote, markQuoteSent, openQuotePdf, alignContractOnQuote } from '../../../api/quotes';
+import {
+  CONTRACT_FORMAT_OPTIONS, FORMAT_CUSTOM, contractPriceEur, FCFA_PER_EUR,
+  buildFormatChoices, toContractFormat,
+} from '../../../utils/bookFormats';
 import ContractQuoteModal from '../../../components/admin/ContractQuoteModal';
 import QuotePaymentModal from '../../../components/admin/QuotePaymentModal';
 import { formatPrice } from '../../../utils/formatters';
@@ -41,6 +46,36 @@ function InfoRow({ icon, label, value, mono = false }) {
   );
 }
 
+// Construit le formulaire d'édition à partir des données du contrat (source unique,
+// évite la duplication entre le chargement initial et les rechargements après action).
+const buildEditForm = (data) => {
+  const ef = data?.extrafields || {};
+  return {
+    contract_type: ef.contractType || 'harmattan_2024',
+    book_title: ef.bookTitle || '',
+    book_isbn: ef.bookIsbn || '',
+    royalty_rate_print: ef.royaltyPrint ?? 10,
+    royalty_rate_digital: ef.royaltyDigital ?? 10,
+    royalty_threshold: ef.royaltyThreshold ?? 500,
+    free_author_copies: ef.freeCopies ?? 5,
+    // Caractéristiques de fabrication : saisies à la création, elles n'étaient
+    // plus modifiables ensuite alors qu'elles s'impriment dans le contrat ET
+    // pilotent le montant du devis de contribution. Chaînes vides plutôt que
+    // valeurs par défaut : un champ vide au contrat doit le rester tant que la
+    // direction ne l'a pas renseigné (le back refuse les valeurs non numériques).
+    tirage_initial: ef.tirageInitial ?? '',
+    // Ramené à la graphie du contrat quand les dimensions correspondent à une
+    // option connue (« 15 cm sur 21 cm » → « 15 × 21 cm ») : mêmes dimensions,
+    // donc aucune donnée altérée, mais le menu déroulant retrouve son entrée.
+    format_ouvrage: toContractFormat(ef.formatOuvrage || ''),
+    nombre_pages_estime: ef.nombrePagesEstime ?? '',
+    prix_public_previsionnel: ef.prixPublicPrevisionnel ?? '',
+    exemplaires_sp: ef.exemplairesSp ?? '',
+    author_purchase_discount: ef.authorPurchaseDiscount ?? '',
+    note_private: data?.notePrivate || '',
+  };
+};
+
 export default function ContractDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -64,6 +99,9 @@ export default function ContractDetail() {
   }, [showPhysicalSign, physSigning]);
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
+  // Format hors liste (contrats antérieurs à la liste figée) → saisie libre.
+  const [formatCustom, setFormatCustom] = useState(false);
+  const [aligningQuote, setAligningQuote] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [showQuoteModal, setShowQuoteModal] = useState(false);
@@ -131,26 +169,22 @@ export default function ContractDetail() {
     }
   };
 
-  // Construit le formulaire d'édition à partir des données du contrat (source unique,
-  // évite la duplication entre le chargement initial et les rechargements après action).
-  const buildEditForm = (data) => {
-    const ef = data?.extrafields || {};
-    return {
-      contract_type: ef.contractType || 'harmattan_2024',
-      book_title: ef.bookTitle || '',
-      book_isbn: ef.bookIsbn || '',
-      royalty_rate_print: ef.royaltyPrint ?? 10,
-      royalty_rate_digital: ef.royaltyDigital ?? 10,
-      royalty_threshold: ef.royaltyThreshold ?? 500,
-      free_author_copies: ef.freeCopies ?? 5,
-      note_private: data?.notePrivate || '',
-    };
-  };
+  // Alimente le formulaire ET décide si le format s'édite via la liste ou en saisie
+  // libre. Indispensable : un contrat ancien porte un format hors liste (« 15 × 21 cm »,
+  // l'ancien défaut serveur). Avec un simple <select>, React afficherait la première
+  // option et l'enregistrement écraserait le format d'origine sans que personne
+  // ne l'ait demandé.
+  // Le menu déroulant reste le mode normal, même pour un format hors liste :
+  // buildFormatChoices l'y ajoute. La saisie libre ne s'ouvre que sur demande.
+  const hydrateEdit = useCallback((data) => {
+    setEditForm(buildEditForm(data));
+    setFormatCustom(false);
+  }, []);
 
   const load = () => {
     setLoading(true);
     return getContract(id)
-      .then(r => { setContract(r.data); if (r.data) setEditForm(buildEditForm(r.data)); })
+      .then(r => { setContract(r.data); if (r.data) hydrateEdit(r.data); })
       .catch(() => toast.error('Contrat introuvable'))
       .finally(() => setLoading(false));
   };
@@ -159,11 +193,11 @@ export default function ContractDetail() {
     let cancelled = false;
     setLoading(true);
     getContract(id)
-      .then(r => { if (!cancelled) { setContract(r.data); setEditForm(buildEditForm(r.data)); } })
+      .then(r => { if (!cancelled) { setContract(r.data); hydrateEdit(r.data); } })
       .catch(() => { if (!cancelled) toast.error('Contrat introuvable'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, hydrateEdit]);
 
   useEffect(() => {
     if (contract?.status >= 1) {
@@ -276,12 +310,52 @@ export default function ContractDetail() {
     catch (err) { toast.error(err.response?.data?.error || 'Erreur suppression'); setActionLoading(false); }
   };
 
+  // Champs numériques de fabrication : le back REFUSE une valeur non numérique
+  // (garde Number.isFinite ajoutée après l'incident des royalties effacées par un
+  // NaN). Un champ laissé vide doit donc être omis de la requête, pas envoyé à ''.
+  const OPTIONAL_NUMERIC_FIELDS = [
+    'tirage_initial', 'nombre_pages_estime', 'prix_public_previsionnel',
+    'exemplaires_sp', 'author_purchase_discount',
+  ];
+
+  const buildUpdatePayload = () => {
+    const payload = { ...editForm };
+    for (const field of OPTIONAL_NUMERIC_FIELDS) {
+      if (payload[field] === '' || payload[field] === null || payload[field] === undefined) delete payload[field];
+    }
+    // Idem pour le format : une chaîne vide effacerait le format imprimé au contrat.
+    if (!String(payload.format_ouvrage || '').trim()) delete payload.format_ouvrage;
+    return payload;
+  };
+
   const handleUpdate = async () => {
     if (actionLoading) return;
     setActionLoading(true);
-    try { await updateContract(id, editForm); toast.success('Contrat mis à jour'); setIsEditing(false); await load(); }
+    try {
+      await updateContract(id, buildUpdatePayload());
+      toast.success('Contrat mis à jour');
+      setIsEditing(false);
+      await load();
+      // Les caractéristiques de fabrication viennent peut-être de changer : le
+      // verdict de conformité des devis est recalculé côté serveur, on le recharge.
+      await loadQuotes();
+    }
     catch (err) { toast.error(err.response?.data?.error || 'Erreur lors de la mise à jour'); }
     finally { setActionLoading(false); }
+  };
+
+  // Reporte les valeurs négociées d'un devis sur le contrat (brouillon uniquement).
+  const handleAlignContract = async (quote) => {
+    if (aligningQuote) return;
+    setAligningQuote(quote.id);
+    try {
+      await alignContractOnQuote(quote.id);
+      toast.success(`Contrat réaligné sur le devis ${quote.ref}`);
+      await load();
+      await loadQuotes();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur alignement du contrat');
+    } finally { setAligningQuote(null); }
   };
 
   const copyRef = async () => {
@@ -298,6 +372,9 @@ export default function ContractDetail() {
   const typeMeta = contractTypeMeta(ef.contractType);
   const typeColor = typeMeta.color;
   const statusClass = contract.status === 0 ? 'ct-badge-draft' : contract.status === 1 ? 'ct-badge-active' : 'ct-badge-closed';
+
+  // Options du menu format, valeur courante incluse même si elle est hors liste.
+  const formatChoices = buildFormatChoices(editForm.format_ouvrage, CONTRACT_FORMAT_OPTIONS);
 
   const formatDate = (ts) => {
     if (!ts) return '—';
@@ -393,6 +470,97 @@ export default function ContractDetail() {
             )}
           </div>
 
+          {/* Caractéristiques de fabrication — s'impriment dans le PDF du contrat
+              et servent de référence au devis de contribution. Modifiables tant
+              que le contrat est un brouillon (garde côté serveur). */}
+          <div className="ct-section">
+            <h3 className="ct-section-title"><FiLayers size={16} /> Fabrication</h3>
+            {isEditing ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="ct-field">
+                  <label>Format</label>
+                  <select
+                    value={formatCustom ? FORMAT_CUSTOM : editForm.format_ouvrage}
+                    onChange={e => {
+                      const v = e.target.value;
+                      // « Autre » n'efface pas la valeur : on la garde comme point
+                      // de départ à la saisie, plus pratique qu'un champ vide.
+                      if (v === FORMAT_CUSTOM) { setFormatCustom(true); return; }
+                      setFormatCustom(false);
+                      setEditForm({ ...editForm, format_ouvrage: v });
+                    }}
+                  >
+                    {!editForm.format_ouvrage && <option value="">— non renseigné —</option>}
+                    {formatChoices.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    <option value={FORMAT_CUSTOM}>Autre (saisie libre)…</option>
+                  </select>
+                  {formatCustom && (
+                    <>
+                      <input
+                        type="text" value={editForm.format_ouvrage} style={{ marginTop: 6 }}
+                        onChange={e => setEditForm({ ...editForm, format_ouvrage: e.target.value })}
+                        placeholder="ex. 15,5 × 24 cm"
+                        maxLength={60}
+                      />
+                      <button
+                        type="button" className="ct-btn-link" style={{ alignSelf: 'flex-start', marginTop: 4 }}
+                        onClick={() => setFormatCustom(false)}
+                      >
+                        Revenir aux formats standards
+                      </button>
+                    </>
+                  )}
+                </div>
+                <div className="ct-royalty-grid">
+                  <div className="ct-field">
+                    <label>Pages (estimé)</label>
+                    <input type="number" min={0} value={editForm.nombre_pages_estime}
+                      onChange={e => setEditForm({ ...editForm, nombre_pages_estime: e.target.value })} />
+                  </div>
+                  <div className="ct-field">
+                    <label>Prix public (€)</label>
+                    <input type="number" min={0} step={0.5} value={editForm.prix_public_previsionnel}
+                      onChange={e => setEditForm({ ...editForm, prix_public_previsionnel: e.target.value })} />
+                  </div>
+                  <div className="ct-field">
+                    <label>Tirage initial</label>
+                    <input type="number" min={0} value={editForm.tirage_initial}
+                      onChange={e => setEditForm({ ...editForm, tirage_initial: e.target.value })} />
+                  </div>
+                  <div className="ct-field">
+                    <label>Exemplaires SP</label>
+                    <input type="number" min={0} value={editForm.exemplaires_sp}
+                      onChange={e => setEditForm({ ...editForm, exemplaires_sp: e.target.value })} />
+                  </div>
+                  <div className="ct-field">
+                    <label>Remise auteur (%)</label>
+                    <input type="number" min={0} max={100} value={editForm.author_purchase_discount}
+                      onChange={e => setEditForm({ ...editForm, author_purchase_discount: e.target.value })} />
+                  </div>
+                </div>
+                <p className="ct-field-hint">
+                  Prix public en euros (prix catalogue Paris)
+                  {parseFloat(editForm.prix_public_previsionnel) > 0
+                    && ` — soit ≈ ${Math.round(parseFloat(editForm.prix_public_previsionnel) * FCFA_PER_EUR).toLocaleString('fr-FR')} FCFA`}.
+                  Ces valeurs s'impriment dans le contrat et servent de référence au devis de contribution.
+                </p>
+              </div>
+            ) : (
+              <>
+                <InfoRow icon={<FiMaximize2 size={14} />} label="Format" value={ef.formatOuvrage} />
+                <InfoRow icon={<FiFileText size={14} />} label="Pages (estimé)" value={ef.nombrePagesEstime ? `${ef.nombrePagesEstime} p.` : null} />
+                <InfoRow icon={<FiTag size={14} />} label="Prix public" value={
+                  contractPriceEur(ef.prixPublicPrevisionnel)
+                    ? `${contractPriceEur(ef.prixPublicPrevisionnel).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`
+                    : null
+                } />
+                <InfoRow icon={<FiLayers size={14} />} label="Tirage initial" value={ef.tirageInitial ? `${ef.tirageInitial} ex.` : null} />
+                <InfoRow icon={<FiGift size={14} />} label="Exemplaires SP" value={ef.exemplairesSp ? `${ef.exemplairesSp} ex.` : null} />
+                <InfoRow icon={<FiPercent size={14} />} label="Remise auteur" value={ef.authorPurchaseDiscount != null && ef.authorPurchaseDiscount !== '' ? `${ef.authorPurchaseDiscount} %` : null} />
+              </>
+            )}
+          </div>
+
           {/* Contract lines */}
           {contract.lines?.length > 0 && (
             <div className="ct-section">
@@ -466,6 +634,8 @@ export default function ContractDetail() {
                   const effStatus = q.payment_status || q.status || 'draft';
                   const sb = QUOTE_STATUS[effStatus] || QUOTE_STATUS.draft;
                   const isInvoiced = !!q.dolibarr_invoice_id;
+                  const conf = q.conformity;
+                  const diverges = conf?.status === 'divergent';
                   return (
                   <div key={q.id} className="ct-quote-row">
                     <div className="ct-quote-row-info">
@@ -509,6 +679,55 @@ export default function ContractDetail() {
                         </button>
                       )}
                     </div>
+
+                    {/* Contrôle de conformité : le devis peut légitimement s'écarter
+                        du contrat (négociation), mais l'écart doit être visible et
+                        arbitré — pas découvert à la facturation. */}
+                    {diverges && (
+                      <div className="ct-conformity">
+                        <div className="ct-conformity-head">
+                          <FiAlertTriangle size={13} /> Écart avec le contrat
+                        </div>
+                        <ul className="ct-conformity-list">
+                          {conf.diffs.map(d => (
+                            <li key={d.field}>
+                              {d.label} : contrat <strong>{d.contractDisplay}</strong>{' '}
+                              <span className="ct-conformity-arrow">→</span> devis <strong>{d.quoteDisplay}</strong>
+                              {d.field === 'pages' && d.impactFcfa
+                                ? ` (${d.impactFcfa > 0 ? '+' : ''}${d.impactFcfa.toLocaleString('fr-FR')} F sur les lignes 1 et 2)`
+                                : ''}
+                              {d.inferred ? ' — le contrat ne renseigne pas de remise, défaut maison appliqué' : ''}
+                            </li>
+                          ))}
+                        </ul>
+                        <div className="ct-conformity-actions">
+                          {canModify && conf.canAlignContract && (
+                            <button
+                              onClick={() => handleAlignContract(q)}
+                              disabled={aligningQuote === q.id}
+                              className="ct-btn ct-btn-outline"
+                              style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                              title="Reporter les valeurs du devis sur le contrat (pages, format, prix public, remise)"
+                            >
+                              <FiGitMerge size={12} /> {aligningQuote === q.id ? 'Alignement…' : 'Aligner le contrat sur ce devis'}
+                            </button>
+                          )}
+                          {!conf.contractIsDraft && (
+                            <span className="ct-conformity-note">
+                              Contrat non modifiable à ce stade : rouvrez-le en brouillon pour le réaligner, ou révisez le devis.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {conf?.status === 'ok' && (
+                      <div className="ct-conformity-ok"><FiCheck size={11} /> Conforme au contrat</div>
+                    )}
+                    {conf?.status === 'unknown' && (
+                      <div className="ct-conformity-ok" style={{ color: '#64748b' }}>
+                        <FiAlertCircle size={11} /> Conformité non vérifiable — renseignez les caractéristiques de fabrication du contrat
+                      </div>
+                    )}
                   </div>
                   );
                 })}
