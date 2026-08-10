@@ -12,6 +12,17 @@ export function safeHttpUrl(raw, opts = {}) {
   const trimmed = String(raw).trim();
   if (!trimmed || trimmed.length > 2048) return null;
 
+  // Chemin interne (« /images/authors/x.jpg », photos d'auteurs et couvertures) :
+  // même origine, aucun schéma exécutable possible, on le rend tel quel. Sont
+  // exclus « //hôte » (URL protocol-relative, donc lien externe déguisé) et
+  // « /\hôte », que plusieurs navigateurs interprètent comme « //hôte ».
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//') && !trimmed.startsWith('/\\')) {
+    return trimmed;
+  }
+  // Refus net : sans cette ligne, la normalisation plus bas transformerait
+  // « /\evil.com » en « https://evil.com » — un lien externe déguisé en chemin.
+  if (trimmed.startsWith('/\\')) return null;
+
   // Un schéma explicite est conservé tel quel : c'est ce qui permet de rejeter
   // javascript: / data: plus bas, au lieu de les préfixer par https://.
   const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed);
