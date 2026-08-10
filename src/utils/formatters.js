@@ -14,9 +14,14 @@ export const truncateText = (text, maxLength = 150) => {
 
 export function stripHtml(html) {
   if (!html) return '';
-  const tmp = document.createElement('div');
-  tmp.innerHTML = html;
-  let text = tmp.textContent || tmp.innerText || '';
+  // Pas de innerHTML : évite l'exécution de handlers (img onerror, etc.).
+  let text;
+  if (typeof DOMParser !== 'undefined') {
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    text = doc.body?.textContent || '';
+  } else {
+    text = String(html).replace(/<[^>]*>/g, ' ');
+  }
   // Remove publishing metadata block starting with "Date de publication"
   text = text.replace(/\s*Date de publication\s*:[\s\S]*$/i, '');
   // Remove Amazon-style metadata (Publisher/Éditeur, Language, ISBN-10, ISBN-13, etc.)

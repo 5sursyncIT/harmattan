@@ -57,7 +57,7 @@ export default function AdminLogin({ onLogin }) {
         <form onSubmit={submitCredentials} className="admin-login-form">
           <img src="/images/logo.png" alt="Logo" className="admin-login-logo" />
           <h2>Administration</h2>
-          <input type="text" placeholder="Nom d'utilisateur" value={username} onChange={(e) => setUsername(e.target.value)} required autoComplete="username" />
+          <input type="text" placeholder="Nom d'utilisateur ou e-mail" value={username} onChange={(e) => setUsername(e.target.value)} required autoComplete="username" />
           <input type="password" placeholder="Mot de passe" value={password} onChange={(e) => setPassword(e.target.value)} required autoComplete="current-password" />
           <button type="submit" disabled={loading}>{loading ? 'Connexion…' : 'Se connecter'}</button>
         </form>

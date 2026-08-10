@@ -1,9 +1,10 @@
 import { NavLink } from 'react-router-dom';
-import { FiPieChart, FiPackage, FiAlertTriangle, FiShoppingCart, FiTruck, FiClipboard, FiRepeat } from 'react-icons/fi';
+import { FiPieChart, FiPackage, FiAlertTriangle, FiShoppingCart, FiTruck, FiClipboard, FiRepeat, FiClock } from 'react-icons/fi';
 
 const TABS = [
   { to: '/admin/stock', label: 'Pilotage', icon: <FiPieChart size={15} />, end: true },
   { to: '/admin/stock/products', label: 'Produits', icon: <FiPackage size={15} /> },
+  { to: '/admin/stock/movements', label: 'Historique', icon: <FiClock size={15} /> },
   { to: '/admin/stock/adjust', label: 'Ajuster', icon: <FiClipboard size={15} /> },
   { to: '/admin/stock/transfer', label: 'Transfert', icon: <FiRepeat size={15} /> },
   { to: '/admin/stock/alerts', label: 'Alertes', icon: <FiAlertTriangle size={15} /> },

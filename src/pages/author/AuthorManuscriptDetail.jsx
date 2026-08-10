@@ -3,6 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom';
 import { FiArrowLeft, FiDownload, FiCheck, FiX, FiExternalLink, FiUpload } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
+import { safeHttpUrl } from '../../utils/safeUrl';
 import ManuscriptTimeline from '../../components/common/ManuscriptTimeline';
 import NotificationBell from '../../components/author/NotificationBell';
 import './AuthorPages.css';
@@ -176,9 +177,9 @@ export default function AuthorManuscriptDetail() {
                       {f.external_url ? 'Lien de téléchargement externe' : `${f.file_name} · ${formatSize(f.file_size)}`}
                     </div>
                   </div>
-                  {f.external_url ? (
+                  {safeHttpUrl(f.external_url) ? (
                     <a
-                      href={f.external_url}
+                      href={safeHttpUrl(f.external_url)}
                       className="btn btn-ghost"
                       target="_blank"
                       rel="noopener noreferrer"

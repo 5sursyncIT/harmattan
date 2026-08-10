@@ -464,21 +464,29 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
   router.post('/forgot-password', authLimiter, csrfProtection, sanitizeBody(['email']), (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email requis' });
-    const author = db.prepare('SELECT id, firstname FROM authors WHERE email = ?').get(email);
-    if (!author) return res.json({ success: true }); // anti-enumeration
-    const token = crypto.randomBytes(32).toString('hex');
-    // Seul le SHA-256 est stocké ; le lien email porte le token brut.
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    db.prepare('INSERT OR REPLACE INTO author_password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, tokenHash, expiresAt);
-    const resetUrl = `${siteUrl}/auteur/mot-de-passe-oublie?token=${token}&email=${encodeURIComponent(email)}`;
-    transporter?.sendMail({
-      from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
-      to: email,
-      subject: 'Réinitialisation de votre mot de passe auteur',
-      html: `<p>Bonjour ${escapeHtml(author.firstname || '')},</p><p>Vous avez demandé la réinitialisation de votre mot de passe.</p><p><a href="${resetUrl}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Réinitialiser mon mot de passe</a></p><p>Ce lien expire dans 1 heure.</p>`,
-    }).catch((err) => console.error('[AUTHOR] reset email error:', err.message));
+
+    // Anti-énumération : réponse immédiate et identique ; travail en arrière-plan.
     res.json({ success: true });
+
+    setImmediate(() => {
+      try {
+        const author = db.prepare('SELECT id, firstname FROM authors WHERE email = ?').get(email);
+        if (!author) return;
+        const token = crypto.randomBytes(32).toString('hex');
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        db.prepare('INSERT OR REPLACE INTO author_password_resets (email, token, expires_at) VALUES (?, ?, ?)').run(email, tokenHash, expiresAt);
+        const resetUrl = `${siteUrl}/auteur/mot-de-passe-oublie?token=${token}&email=${encodeURIComponent(email)}`;
+        transporter?.sendMail({
+          from: '"L\'Harmattan Sénégal" <noreply@senharmattan.com>',
+          to: email,
+          subject: 'Réinitialisation de votre mot de passe auteur',
+          html: `<p>Bonjour ${escapeHtml(author.firstname || '')},</p><p>Vous avez demandé la réinitialisation de votre mot de passe.</p><p><a href="${resetUrl}" style="background:#10531a;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Réinitialiser mon mot de passe</a></p><p>Ce lien expire dans 1 heure.</p>`,
+        }).catch((err) => console.error('[AUTHOR] reset email error:', err.message));
+      } catch (err) {
+        console.error('[AUTHOR] forgot-password error:', err.message);
+      }
+    });
   });
 
   router.post('/reset-password', authLimiter, csrfProtection, async (req, res) => {
@@ -505,7 +513,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     res.json(rows.map((r) => ({ ...r, stage_label: STAGE_LABELS[r.current_stage] || r.current_stage })));
   });
 
-  router.post('/manuscripts', requireAuthorAuth, originalUpload.single('original'), (req, res) => {
+  router.post('/manuscripts', requireAuthorAuth, csrfProtection, originalUpload.single('original'), (req, res) => {
     try {
       const { title, genre, synopsis, biography, message } = req.body;
       if (!title) return res.status(400).json({ error: 'Titre requis' });

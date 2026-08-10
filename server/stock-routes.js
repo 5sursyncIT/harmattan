@@ -15,9 +15,16 @@ import {
   getDefaultSafetyDays,
   getSupplyType,
 } from './stock-engine.js';
+import {
+  createStockJournal, classifyMovement, resolveActor, decodeDolibarrLabel,
+  MOVEMENT_KINDS, kindSqlPredicate,
+} from './stock-journal.js';
 
 export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   const router = Router();
+
+  // Attribution des mouvements de stock aux utilisateurs de l'app (cf. stock-journal.js).
+  const journal = createStockJournal(db);
 
   // Libraire = lecture seule sur le module stock
   function blockLibrarianWrite(req, res, next) {
@@ -558,12 +565,19 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         timeout: 30000,
       });
       // qty POSITIVE = entrée de stock (Dolibarr remappe le type interne).
-      await adminApi.post('/stockmovements', {
+      const entryMove = await adminApi.post('/stockmovements', {
         product_id: parseInt(product_id, 10),
         warehouse_id: wh,
         qty: Math.abs(q),
         movementcode: 'ENTREE',
         movementlabel: `Entrée stock — ${String(reason || '').slice(0, 80) || req.admin.username}`,
+      });
+
+      // Attribution : l'identifiant renvoyé par Dolibarr relie le mouvement à son
+      // auteur réel — sans quoi l'historique n'afficherait que le compte de service.
+      journal.record(entryMove.data, {
+        username: req.admin.username, role: req.admin.role, source: 'entry', reason,
+        context: { product_ref: product.ref, warehouse_id: wh, qty: q },
       });
 
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
@@ -622,12 +636,19 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         timeout: 30000,
       });
       // Mouvement signé : delta > 0 = entrée (ENTREE), delta < 0 = sortie (SORTIE).
-      await adminApi.post('/stockmovements', {
+      const adjustMove = await adminApi.post('/stockmovements', {
         product_id: parseInt(product_id, 10),
         warehouse_id: wh,
         qty: delta,
         movementcode: delta > 0 ? 'ENTREE' : 'SORTIE',
         movementlabel: `Ajustement inventaire (${current}→${counted}) — ${String(reason || '').slice(0, 60) || req.admin.username}`,
+      });
+
+      // Un ajustement négatif ressort en type_mouvement 2, comme une vente :
+      // seule cette attribution permet de les distinguer dans l'historique.
+      journal.record(adjustMove.data, {
+        username: req.admin.username, role: req.admin.role, source: 'adjust', reason,
+        context: { product_ref: product.ref, warehouse_id: wh, before: current, after: counted, delta },
       });
 
       // Feedback immédiat : si le produit n'est plus en rupture, on solde les
@@ -776,6 +797,16 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         return res.status(500).json({ error: "Erreur d'entrée en destination — transfert annulé, aucun stock déplacé." });
       }
 
+      // Les deux jambes sont attribuées séparément : chacune est un mouvement à
+      // part entière dans l'historique, et le code TRF les relie.
+      journal.recordMany([
+        { movementId: outId, source: 'transfer_out' },
+        { movementId: inId, source: 'transfer_in' },
+      ].map(e => ({
+        ...e, username: req.admin.username, role: req.admin.role, reason,
+        context: { code: trfCode, product_ref: product.ref, qty: q, from: whMap.get(src).ref, to: whMap.get(dst).ref },
+      })));
+
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(req.admin.username, 'stock_transfer',
           `Transfert : ${product.ref} × ${q} ${whMap.get(src).ref}→${whMap.get(dst).ref}${reason ? ' — ' + reason : ''} [${trfCode}]`);
@@ -889,6 +920,200 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
     } catch (err) {
       console.error('[STOCK] transfers history error:', err.message);
       res.status(500).json({ error: "Erreur chargement de l'historique des transferts" });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // HISTORIQUE COMPLET DES MOUVEMENTS DE STOCK
+  //
+  // Registre de référence : llx_stock_mouvement — il capte TOUT (ventes, avoirs,
+  // entrées, ajustements, transferts, réceptions, site web), y compris ce que
+  // l'application ne déclenche pas elle-même. Partir du journal applicatif aurait
+  // donné un historique partiel, donc trompeur.
+  //
+  // Ce que cette route ajoute au registre brut :
+  //   • une NATURE lisible (cf. classifyMovement) — `type_mouvement` ne suffit
+  //     pas : un ajustement négatif y ressort en type 2, comme une vente ;
+  //   • l'ACTEUR RÉEL et sa provenance (cf. resolveActor) — Dolibarr n'inscrit
+  //     que le porteur de la clé API ;
+  //   • le document d'origine (facture…) quand il existe.
+  // ═══════════════════════════════════════════════════════════
+
+  // Construit le WHERE commun à la liste, au comptage et à l'export.
+  async function buildMovementFilters(query) {
+    const where = ['1=1'];
+    const params = [];
+
+    const term = String(query.q || '').trim();
+    if (term) {
+      const like = `%${term}%`;
+      where.push('(p.ref LIKE ? OR p.label LIKE ? OR m.label LIKE ? OR m.inventorycode LIKE ?)');
+      params.push(like, like, like, like);
+    }
+    const productId = parseInt(query.product_id, 10);
+    if (Number.isInteger(productId)) { where.push('m.fk_product = ?'); params.push(productId); }
+
+    const warehouseId = parseInt(query.warehouse_id, 10);
+    if (Number.isInteger(warehouseId)) { where.push('m.fk_entrepot = ?'); params.push(warehouseId); }
+
+    if (query.direction === 'in') where.push('m.value > 0');
+    else if (query.direction === 'out') where.push('m.value < 0');
+
+    // Bornes de dates INCLUSIVES : `date_to` doit couvrir toute la journée saisie,
+    // sinon un filtre « jusqu'au 10 » exclut silencieusement le 10 au matin.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(query.date_from || '')) { where.push('m.datem >= ?'); params.push(`${query.date_from} 00:00:00`); }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(query.date_to || '')) { where.push('m.datem <= ?'); params.push(`${query.date_to} 23:59:59`); }
+
+    const kindFilter = kindSqlPredicate(String(query.kind || ''));
+    if (kindFilter) where.push(`(${kindFilter.sql})`);
+
+    // Filtre par acteur : l'attribution vit dans SQLite, impossible à joindre à
+    // MySQL. On résout d'abord les identifiants concernés, puis on restreint.
+    const actor = String(query.actor || '').trim();
+    if (actor) {
+      const ids = db.prepare('SELECT movement_id FROM stock_movement_actors WHERE admin_username = ?')
+        .all(actor).map(r => r.movement_id);
+      if (ids.length === 0) return { where: ['1=0'], params: [] }; // aucun mouvement : filtre vide assumé
+      where.push(`m.rowid IN (${ids.map(() => '?').join(',')})`);
+      params.push(...ids);
+    }
+
+    return { where, params };
+  }
+
+  // Assemble les lignes prêtes à afficher : nature, acteur, document d'origine.
+  function decorateMovements(rows) {
+    const attributions = journal.attributionsFor(rows.map(r => r.id));
+    return rows.map(r => {
+      const attribution = attributions.get(r.id) || null;
+      const kind = classifyMovement(r, attribution);
+      const documentUser = null; // les documents Dolibarr portent eux aussi le compte de service
+      const who = resolveActor({
+        attribution,
+        dolibarrUser: r.u_login ? { login: r.u_login, firstname: r.u_first, lastname: r.u_last } : null,
+        documentUser,
+      });
+      const qty = Number(r.value) || 0;
+      return {
+        id: r.id,
+        date: r.datem,
+        product_id: r.fk_product,
+        product_ref: r.product_ref,
+        product_label: r.product_label,
+        warehouse_id: r.fk_entrepot,
+        warehouse_ref: r.warehouse_ref,
+        qty,
+        direction: qty >= 0 ? 'in' : 'out',
+        kind,
+        kind_label: MOVEMENT_KINDS[kind]?.label || 'Mouvement',
+        label: decodeDolibarrLabel(r.label),
+        code: r.inventorycode || null,
+        origin: r.origintype ? { type: r.origintype, id: r.fk_origin, ref: r.invoice_ref || null } : null,
+        reason: attribution?.reason || null,
+        source: attribution?.source || null,
+        ...who,
+      };
+    });
+  }
+
+  const MOVEMENT_BASE = `
+    FROM llx_stock_mouvement m
+    LEFT JOIN llx_product p ON p.rowid = m.fk_product
+    LEFT JOIN llx_entrepot e ON e.rowid = m.fk_entrepot
+    LEFT JOIN llx_user u ON u.rowid = m.fk_user_author
+    LEFT JOIN llx_facture f ON m.origintype = 'facture' AND f.rowid = m.fk_origin`;
+
+  const MOVEMENT_COLS = `
+    m.rowid AS id, m.datem, m.value, m.label, m.inventorycode, m.origintype, m.fk_origin,
+    m.fk_product, m.fk_entrepot,
+    p.ref AS product_ref, p.label AS product_label,
+    e.ref AS warehouse_ref,
+    u.login AS u_login, u.firstname AS u_first, u.lastname AS u_last,
+    f.ref AS invoice_ref`;
+
+  router.get('/movements', auth, async (req, res) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 30));
+      const { where, params } = await buildMovementFilters(req.query);
+      const whereSql = where.join(' AND ');
+
+      const [[{ total }]] = await dolibarrPool.query(
+        `SELECT COUNT(*) AS total ${MOVEMENT_BASE} WHERE ${whereSql}`, params);
+
+      // Tri sur rowid (clé primaire) plutôt que datem, qui n'est pas indexée :
+      // l'ordre est le même — rowid est auto-incrémenté — et la pagination reste
+      // stable là où deux mouvements de même horodatage pourraient permuter.
+      const [rows] = await dolibarrPool.query(
+        `SELECT ${MOVEMENT_COLS} ${MOVEMENT_BASE} WHERE ${whereSql}
+         ORDER BY m.rowid DESC LIMIT ? OFFSET ?`,
+        [...params, limit, (page - 1) * limit]);
+
+      res.json({
+        movements: decorateMovements(rows),
+        total,
+        pages: Math.max(1, Math.ceil(total / limit)),
+        page,
+      });
+    } catch (err) {
+      console.error('[STOCK] movements history error:', err.message);
+      res.status(500).json({ error: "Erreur chargement de l'historique des mouvements" });
+    }
+  });
+
+  // Filtres disponibles pour l'écran (dépôts, natures, acteurs connus).
+  router.get('/movements/filters', auth, async (req, res) => {
+    try {
+      const [warehouses] = await dolibarrPool.query(
+        'SELECT rowid AS id, ref, lieu FROM llx_entrepot WHERE statut = 1 ORDER BY ref');
+      const actors = db.prepare(
+        'SELECT admin_username AS username, COUNT(*) AS n FROM stock_movement_actors GROUP BY 1 ORDER BY n DESC'
+      ).all();
+      res.json({
+        warehouses,
+        actors,
+        kinds: Object.entries(MOVEMENT_KINDS).map(([key, v]) => ({ key, label: v.label, tone: v.tone })),
+      });
+    } catch (err) {
+      console.error('[STOCK] movements filters error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement des filtres' });
+    }
+  });
+
+  // Export CSV de l'historique filtré — pour audit et rapprochement comptable.
+  const EXPORT_MAX = 20000;
+  router.get('/movements/export', auth, async (req, res) => {
+    try {
+      const { where, params } = await buildMovementFilters(req.query);
+      const [rows] = await dolibarrPool.query(
+        `SELECT ${MOVEMENT_COLS} ${MOVEMENT_BASE} WHERE ${where.join(' AND ')}
+         ORDER BY m.rowid DESC LIMIT ?`, [...params, EXPORT_MAX]);
+      const movements = decorateMovements(rows);
+
+      // Mêmes intitulés qu'à l'écran : un export qui nomme les choses autrement
+      // que l'interface qui l'a produit se relit mal en réunion.
+      const ACTOR_SOURCES = {
+        app: 'application', inferred: 'rapproché', document: 'document',
+        dolibarr: 'Dolibarr', service: 'écriture automatique', unknown: 'non attribué',
+      };
+      const esc = (v) => {
+        const s = v === null || v === undefined ? '' : String(v);
+        return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const header = ['Date', 'Référence', 'Titre', 'Dépôt', 'Nature', 'Quantité', 'Acteur', 'Origine acteur', 'Compte technique', 'Motif', 'Document', 'Libellé', 'Code'];
+      const lines = movements.map(m => [
+        m.date, m.product_ref, m.product_label, m.warehouse_ref, m.kind_label, m.qty,
+        m.actor || '', ACTOR_SOURCES[m.actor_source] || m.actor_source, m.actor_account || '',
+        m.reason || '', m.origin?.ref || '', m.label, m.code || '',
+      ].map(esc).join(';'));
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="mouvements-stock-${new Date().toISOString().slice(0, 10)}.csv"`);
+      // BOM UTF-8 : sans lui, Excel affiche « Dépôt » en « DÃ©pÃ´t ».
+      res.send('﻿' + [header.join(';'), ...lines].join('\n'));
+    } catch (err) {
+      console.error('[STOCK] movements export error:', err.message);
+      res.status(500).json({ error: "Erreur export de l'historique" });
     }
   });
 
@@ -1096,9 +1321,14 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         const recv = Math.min(recvById[l.id] || 0, l.ordered_qty - l.received_qty);
         if (recv <= 0) continue;
         try {
-          await adminApi.post('/stockmovements', {
+          const move = await adminApi.post('/stockmovements', {
             product_id: l.product_id, warehouse_id: wh, qty: Math.abs(recv),
             movementcode: po.reference, movementlabel: `Réception ${po.reference}`,
+          });
+          journal.record(move.data, {
+            username: req.admin.username, role: req.admin.role, source: 'receive',
+            reason: `Réception ${po.reference}`,
+            context: { purchase_order: po.reference, product_id: l.product_id, qty: recv, warehouse_id: wh },
           });
           const newRecv = l.received_qty + recv;
           db.prepare('UPDATE purchase_order_lines SET received_qty = ?, status = ? WHERE id = ?')

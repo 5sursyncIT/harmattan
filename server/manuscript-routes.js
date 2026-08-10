@@ -3,7 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, unlinkSync } from 'fs';
 import { transition, STAGE_LABELS, MANUSCRIPT_STAGES, MANUSCRIPT_EVENTS, logManuscriptEvent, promoteLatestCorrectionAsAuthorFinal } from './manuscript-workflow.js';
-import { notifyTransition, sendAssignmentEmail, sendAuthorRevisionRequestEmail } from './manuscript-emails.js';
+import { notifyTransition, sendAssignmentEmail, sendAuthorRevisionRequestEmail, notifyIntervenantTask, METIER_TASK_STAGES } from './manuscript-emails.js';
 import { revokeFileTokens } from './manuscript-file-tokens.js';
 import { addManuscriptVersion, getFinalVersion, createDepositToken, getActiveDepositToken, revokeDepositTokens } from './manuscript-versions.js';
 import { createManuscriptMulter } from './author-routes.js';
@@ -454,10 +454,28 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       // L'évaluateur affecté sur un manuscrit « submitted » déclenche la transition
       // auto vers in_evaluation : l'email de tâche (avec lien) part alors via notifyTransition.
       const willAutoTransition = role === 'evaluateur' && user_id && manuscript.current_stage === 'submitted';
+      // Le manuscrit est-il DÉJÀ à l'étape où ce métier travaille ? (remplacement
+      // d'intervenant en cours d'étape, ou affectation tardive)
+      const alreadyAtTaskStage = isContactRole
+        && (METIER_TASK_STAGES[role] || []).includes(manuscript.current_stage);
       if (user_id && before?.prev_id !== user_id && !willAutoTransition) {
         try {
-          const next = resolveRecipient(user_id);
-          if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
+          if (alreadyAtTaskStage) {
+            // Aucune transition ne sera rejouée : l'email d'affectation seul
+            // laissait le nouvel intervenant sans fichier NI lien (et lui
+            // annonçait un travail « dès que le manuscrit atteindra l'étape »
+            // alors qu'il y est déjà). On lui envoie directement le dossier.
+            const intervenant = db.prepare('SELECT id, nom, email, metier FROM intervenants WHERE id = ?').get(user_id);
+            if (intervenant?.email) {
+              notifyIntervenantTask(db, transporter, {
+                manuscript, toStage: manuscript.current_stage, intervenant, siteUrl,
+                actor: wfActor, noteSuffix: ' (affectation en cours d\'étape)',
+              });
+            }
+          } else {
+            const next = resolveRecipient(user_id);
+            if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
+          }
           // Cas auto-transition évaluateur exclu : la transition « En évaluation »
           // trace déjà l'affectation, inutile de la dédoubler.
           logManuscriptEvent(db, msId, 'intervenant_assigned', wfActor,

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { FiUpload, FiLink, FiTrash2 } from 'react-icons/fi';
 import { manuscriptsApi } from '../../../api/manuscripts';
+import { safeHttpUrl } from '../../../utils/safeUrl';
 import useAdminRole from '../../../hooks/useAdminRole.js';
 import './ManuscriptsWorkflow.css';
 
@@ -325,8 +326,8 @@ export default function CorrectionsPanel() {
                         {f.file_size ? <small> · {formatSize(f.file_size)}</small> : null}
                       </div>
                       <div>
-                        {f.external_url ? (
-                          <a className="ms-btn" href={f.external_url} target="_blank" rel="noopener noreferrer">Ouvrir</a>
+                        {safeHttpUrl(f.external_url) ? (
+                          <a className="ms-btn" href={safeHttpUrl(f.external_url)} target="_blank" rel="noopener noreferrer">Ouvrir</a>
                         ) : (
                           <a className="ms-btn" href={manuscriptsApi.downloadUrl(modal, f.id)} target="_blank" rel="noopener noreferrer">
                             Télécharger

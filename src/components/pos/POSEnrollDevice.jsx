@@ -16,9 +16,9 @@ export default function POSEnrollDevice({ onEnrolled }) {
     setError('');
     try {
       const res = await posEnrollDevice(code.trim(), deviceName.trim() || undefined);
-      localStorage.setItem('pos-device-token', res.data.device_token);
+      // Token appareil posé en cookie HttpOnly par le serveur — rien en localStorage.
       toast.success(`Appareil "${res.data.device_name}" enregistré`);
-      onEnrolled();
+      onEnrolled(res.data);
     } catch (err) {
       setError(err.response?.data?.error || 'Code invalide ou expiré');
     } finally {

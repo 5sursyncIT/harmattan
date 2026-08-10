@@ -67,6 +67,8 @@ export const posCreateReturn = (data) => api.post('/pos/returns', { ...data, ter
 
 // Device management
 export const posEnrollDevice = (code, device_name) => api.post('/pos/devices/enroll', { code, device_name });
+export const posDeviceStatus = () => api.get('/pos/devices/status');
+export const posClaimDeviceCookie = (device_token) => api.post('/pos/devices/claim-cookie', { device_token });
 export const posGenerateEnrollCode = (device_name, terminal) => api.post('/pos/devices/generate-code', { device_name, terminal });
 export const posListDevices = () => api.get('/pos/devices');
 export const posRevokeDevice = (id) => api.delete(`/pos/devices/${id}`);

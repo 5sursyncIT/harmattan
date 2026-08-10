@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { FiSearch, FiUser } from 'react-icons/fi';
 import { authorPublicApi } from '../api/author';
+import { safeHttpUrl } from '../utils/safeUrl';
 import Breadcrumb from '../components/common/Breadcrumb';
 import './AuthorsDirectoryPage.css';
 
@@ -98,8 +99,8 @@ export default function AuthorsDirectoryPage() {
                     >
                       <h3 className="author-card-name">{a.name}</h3>
                       <div className="author-card-photo">
-                        {a.photo_url ? (
-                          <img src={a.photo_url} alt={a.name} loading="lazy" />
+                        {safeHttpUrl(a.photo_url) ? (
+                          <img src={safeHttpUrl(a.photo_url)} alt={a.name} loading="lazy" />
                         ) : (
                           <span className="author-card-initials">{getInitials(a.name)}</span>
                         )}

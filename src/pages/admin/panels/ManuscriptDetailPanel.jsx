@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { manuscriptsApi, intervenantsApi } from '../../../api/manuscripts';
 import { getContracts, signContractPhysical, validateContract } from '../../../api/contracts';
 import useAdminRole from '../../../hooks/useAdminRole';
+import { safeHttpUrl } from '../../../utils/safeUrl';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 import ManuscriptTimeline from '../../../components/common/ManuscriptTimeline';
@@ -829,8 +830,8 @@ export default function ManuscriptDetailPanel() {
                       {f.version > 1 && <strong>v{f.version}</strong>} {f.file_name}
                       {!!f.binary_purged && <span style={{ color: '#9ca3af', fontSize: '0.72rem', marginLeft: 6 }}>archivé (fichier purgé)</span>}
                     </div>
-                    {f.external_url ? (
-                      <a href={f.external_url}
+                    {safeHttpUrl(f.external_url) ? (
+                      <a href={safeHttpUrl(f.external_url)}
                         target="_blank" rel="noopener noreferrer"
                         className="ms-btn">
                         <FiExternalLink /> Ouvrir le lien

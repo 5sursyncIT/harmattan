@@ -306,13 +306,22 @@ app.use(helmet({
 
 // CORS — restrict origins
 const ALLOWED_ORIGINS = IS_PROD
-  ? ['https://senharmattan.com', 'https://www.senharmattan.com', 'http://38.242.229.122:3000', 'http://38.242.229.122:3001']
-  : ['http://localhost:3000', 'http://localhost:3001', 'http://38.242.229.122:3000', 'http://38.242.229.122:3001'];
+  ? ['https://senharmattan.com', 'https://www.senharmattan.com']
+  : ['http://localhost:3000', 'http://localhost:3001'];
+// Origine refusée → 403 explicite. `cb(new Error(...))` remontait en 500 :
+// bruit dans le monitoring, et surtout la requête poursuivait sa route — pour une
+// requête simple (non préflightée), le handler s'exécutait avant que le navigateur
+// ne jette la réponse. On coupe donc avant d'atteindre la moindre route.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  // Absence d'Origin = appel serveur-à-serveur (webhook Dolibarr, IPN PayTech,
+  // curl, sondes) : hors périmètre CORS, doit passer.
+  if (!origin || ALLOWED_ORIGINS.includes(origin)) return next();
+  console.warn(`[CORS] Blocked origin: ${origin}`);
+  return res.status(403).json({ error: 'Origine non autorisée' });
+});
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) cb(null, true);
-    else { console.warn(`[CORS] Blocked origin: ${origin}`); cb(new Error('Origin not allowed')); }
-  },
+  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
   credentials: true,
 }));
 
@@ -604,14 +613,29 @@ migrateAddPaytechColumns(db);
 // et init PayTech) : on stocke le SHA-256, le client reçoit le jeton brut une fois.
 try { db.exec('ALTER TABLE order_payments ADD COLUMN access_token TEXT'); } catch (e) { void e; }
 const hashOrderToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+// Legacy sans jeton : on pose un hash opaque (jamais communiqué). L'accès ne reste
+// possible que via session client propriétaire (email) — plus d'IDOR ouvert.
+try {
+  const orphans = db.prepare(
+    "SELECT id FROM order_payments WHERE access_token IS NULL OR access_token = ''"
+  ).all();
+  if (orphans.length) {
+    const upd = db.prepare('UPDATE order_payments SET access_token = ? WHERE id = ?');
+    const fill = db.transaction((rows) => {
+      for (const row of rows) {
+        upd.run(hashOrderToken(crypto.randomBytes(32).toString('hex')), row.id);
+      }
+    });
+    fill(orphans);
+    console.log(`[SECURITY] Backfill access_token : ${orphans.length} commande(s) legacy`);
+  }
+} catch (e) {
+  console.warn('[SECURITY] Backfill access_token échoué:', e.message);
+}
 // Autorise l'accès à une commande si : jeton valide fourni, OU client authentifié
 // propriétaire (email de session = email commande). Préserve le checkout invité.
 function canAccessOrder(op, req) {
   if (!op) return false;
-  // Commandes antérieures au système de jeton (access_token NULL) : on conserve le
-  // comportement historique pour ne pas bloquer la preuve de paiement des commandes
-  // déjà en cours. Les nouvelles commandes ont toujours un jeton → protégées.
-  if (!op.access_token) return true;
   const provided = req.body?.order_token || req.headers['x-order-token'] || '';
   if (op.access_token && provided && safeEqual(hashOrderToken(provided), op.access_token)) return true;
   const sess = req.cookies?.customer_session;
@@ -747,26 +771,22 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
       return res.status(500).json({ error: 'Webhook secret not configured' });
     }
 
-    // Validate via HMAC signature (preferred) or direct secret match
-    // Comparaisons constant-time (safeEqual) pour éviter les timing attacks.
-    // IMPORTANT : signer/vérifier sur le body BRUT (rawBody), pas sur la re-stringification
-    // qui peut différer du JSON original (ordre des clés, échappement Unicode).
+    // HMAC-only (le module senharmattansync envoie X-Webhook-Signature).
+    // Comparaison constant-time ; body brut (rawBody) pour coller à la signature PHP.
+    // Le header X-Webhook-Secret en clair est ignoré volontairement.
+    if (!headerSignature) {
+      console.warn('[WEBHOOK] Signature HMAC absente');
+      return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
     const rawBuf = req.rawBody || Buffer.from(JSON.stringify(req.body));
     const expectedSignature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(rawBuf).digest('hex');
-
-    if (headerSignature && !safeEqual(headerSignature, expectedSignature)) {
-      // Also try with raw body if JSON.stringify differs
-      if (!safeEqual(headerSecret, WEBHOOK_SECRET)) {
-        console.warn('[WEBHOOK] Invalid signature/secret');
-        return res.status(401).json({ error: 'Invalid webhook signature' });
-      }
-      console.warn('[WEBHOOK] Authentification via secret en clair (signature absente/invalide)');
-    } else if (!headerSignature) {
-      if (!safeEqual(headerSecret, WEBHOOK_SECRET)) {
-        console.warn('[WEBHOOK] Invalid secret');
-        return res.status(401).json({ error: 'Invalid webhook secret' });
-      }
-      console.warn('[WEBHOOK] Authentification via secret en clair (signature absente)');
+    if (!safeEqual(headerSignature, expectedSignature)) {
+      console.warn('[WEBHOOK] Invalid signature');
+      return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
+    if (headerSecret) {
+      // Accepté autrefois en secours — journalisé pour détecter d'anciens clients.
+      console.debug('[WEBHOOK] Header secret en clair présent (ignoré, HMAC OK)');
     }
 
     // ── Parse payload ──
@@ -3432,7 +3452,7 @@ app.get('/api/sync/status', (req, res) => {
 });
 
 // Manual sync trigger — session admin obligatoire (déclenche une charge Dolibarr).
-app.post('/api/sync/trigger', adminAuth(db), syncLimiter, async (req, res) => {
+app.post('/api/sync/trigger', adminAuth(db), csrfProtection, syncLimiter, async (req, res) => {
   try {
     const { type = 'all' } = req.body;
     if (type === 'products' || type === 'all') await syncProducts();

@@ -11,6 +11,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { existsSync } from 'fs';
+import { safeHttpUrl } from './safe-url.js';
 
 // Fichier que l'intervenant doit récupérer selon l'étape atteinte, par ordre de
 // préférence (on prend le dernier fichier disponible du premier kind trouvé).
@@ -128,7 +129,27 @@ export function createPublicFileRouter({ db, limiter }) {
       return res.status(410).json({ error: 'Lien expiré ou invalide. Demandez un nouveau lien à l\'éditeur.' });
     }
     const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ?').get(row.file_id);
-    if (!file || !existsSync(file.file_path)) {
+    if (!file) {
+      return res.status(404).json({ error: 'Fichier introuvable sur le serveur' });
+    }
+    // Dépôt par lien externe (manuscrit > 20 Mo déposé sur Drive/WeTransfer) :
+    // `file_path` porte l'URL, il n'y a rien sur le disque. Sans ce cas, le lien
+    // tokenisé envoyé à l'évaluateur/correcteur renvoyait un 404 « fichier
+    // introuvable » — l'intervenant recevait un mail sans PJ ET sans accès.
+    // On consomme quand même un usage : la redirection VAUT téléchargement.
+    if (file.external_url) {
+      const safe = safeHttpUrl(file.external_url, { allowHttp: false });
+      if (!safe) {
+        return res.status(400).json({ error: 'Lien externe invalide (HTTPS requis)' });
+      }
+      db.prepare('UPDATE manuscript_file_tokens SET used_count = used_count + 1 WHERE id = ?').run(row.id);
+      return res.redirect(safe);
+    }
+    // Version intermédiaire dont le binaire a été purgé par la rétention.
+    if (file.binary_purged) {
+      return res.status(410).json({ error: 'Ce fichier a été purgé par la rétention. Demandez un nouveau lien à l\'éditeur.' });
+    }
+    if (!existsSync(file.file_path)) {
       return res.status(404).json({ error: 'Fichier introuvable sur le serveur' });
     }
     db.prepare('UPDATE manuscript_file_tokens SET used_count = used_count + 1 WHERE id = ?').run(row.id);

@@ -533,7 +533,7 @@ export function sendTransitionEmail(transporter, manuscript, toStage, recipient,
  * opts = { manuscript, authorName, accountantEmail, accountantName, siteUrl,
  *          downloadUrl, downloadTtlDays, attachments }
  */
-export function sendAccountantEvaluationEmail(transporter, { manuscript, authorName, accountantEmail, accountantName, siteUrl, downloadUrl = null, downloadTtlDays = 30, attachments = null }) {
+export function sendAccountantEvaluationEmail(transporter, { manuscript, authorName, accountantEmail, accountantName, siteUrl, downloadUrl = null, downloadTtlDays = 30, attachments = null, fileMode = null }) {
   if (!transporter || !accountantEmail) return Promise.resolve();
 
   const msTitle = escapeHtml(manuscript.title || 'le manuscrit');
@@ -555,8 +555,16 @@ export function sendAccountantEvaluationEmail(transporter, { manuscript, authorN
         + btn('Télécharger le manuscrit', downloadUrl);
     }
   } else if (downloadUrl) {
-    body += `<p>Le manuscrit est disponible via ce lien sécurisé (valable ${downloadTtlDays} jours) :</p>`
-      + btn('Télécharger le manuscrit', downloadUrl);
+    if (fileMode === 'external') {
+      body += `<p>L'auteur a déposé son manuscrit via un <strong>lien de téléchargement externe</strong> (fichier volumineux) : il ne peut pas être joint à cet email. Le bouton ci-dessous vous y conduit directement (valable ${downloadTtlDays} jours) :</p>`;
+    } else if (fileMode === 'oversize') {
+      body += `<p>Le manuscrit est <strong>trop volumineux pour être joint</strong> à un email. Vous pouvez le télécharger via ce lien sécurisé (valable ${downloadTtlDays} jours) :</p>`;
+    } else {
+      body += `<p>Le manuscrit est disponible via ce lien sécurisé (valable ${downloadTtlDays} jours) :</p>`;
+    }
+    body += btn('Télécharger le manuscrit', downloadUrl);
+  } else {
+    body += `<p style="color:#a33">Le fichier du manuscrit n'a pas pu être transmis automatiquement — demandez-le à l'équipe éditoriale.</p>`;
   }
   body += btn('Élaborer le contrat', contractsUrl);
 
@@ -668,13 +676,99 @@ export function sendManuscriptDepositEmail(transporter, manuscript, info, recipi
   }).catch((err) => console.error('[VERSIONS] Deposit email error:', err.message));
 }
 
+// Étapes du workflow où chaque métier travaille effectivement. Sert à savoir si
+// un intervenant fraîchement affecté doit recevoir le dossier TOUT DE SUITE
+// (le manuscrit est déjà à son étape) ou seulement une annonce d'affectation.
+export const METIER_TASK_STAGES = {
+  evaluateur: ['in_evaluation'],
+  correcteur: ['in_correction'],
+  infographiste: ['cover_design'],
+  imprimeur: ['print_preparation', 'printing'],
+};
+
+// Formulation d'audit (frise) selon ce que le destinataire a réellement reçu.
+const FILE_MODE_AUDIT = {
+  attached: 'fichier joint',
+  external: 'lien de dépôt externe',
+  oversize: 'lien seul (fichier trop volumineux)',
+  link: 'lien de téléchargement',
+  none: 'SANS fichier',
+};
+
+/**
+ * Résout le fichier à transmettre à un acteur pour l'étape `toStage` et prépare
+ * les deux vecteurs : pièce jointe (binaire local sous le plafond SMTP) et lien
+ * tokenisé. `fileMode` décrit ce que le destinataire recevra vraiment — il
+ * pilote le texte de l'email ET la trace d'audit :
+ *   attached → PJ + lien | external → dépôt Drive/WeTransfer, lien seul
+ *   oversize → binaire trop lourd, lien seul | link → lien seul
+ *   none     → rien à transmettre (on n'émet alors AUCUN lien mort)
+ */
+export function prepareActorFile(db, { manuscriptId, toStage, intervenantId = null, siteUrl = '', ttlHours = 168, maxUses = 5 }) {
+  const file = pickFileForActor(db, manuscriptId, toStage);
+  if (!file) {
+    console.warn('[WORKFLOW] Aucun fichier disponible pour l\'étape', toStage, '— manuscrit', manuscriptId);
+    return { file: null, downloadUrl: null, attachments: null, fileMode: 'none' };
+  }
+
+  let attachments = null;
+  let fileMode;
+  if (file.external_url) {
+    // Dépôt par lien externe : rien à joindre, mais le lien tokenisé redirige
+    // désormais vers l'URL de l'auteur (cf. createPublicFileRouter).
+    fileMode = 'external';
+  } else if (file.file_path && existsSync(file.file_path)) {
+    fileMode = 'link';
+    try {
+      const size = statSync(file.file_path).size;
+      if (size > 0 && size <= MAX_EMAIL_ATTACHMENT_BYTES) {
+        attachments = [{ filename: file.file_name || 'manuscrit', path: file.file_path }];
+        fileMode = 'attached';
+      } else {
+        fileMode = 'oversize';
+        console.warn('[WORKFLOW] Fichier trop volumineux pour pièce jointe — lien seul (manuscrit', manuscriptId, ',', size, 'octets)');
+      }
+    } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe:', err.message); }
+  } else {
+    // Ni binaire local ni URL externe : inutile d'émettre un lien qui donnerait
+    // un 404 — on le dit franchement dans l'email.
+    console.warn('[WORKFLOW] Binaire introuvable sur le disque — email envoyé sans fichier (manuscrit', manuscriptId, ', fichier', file.id, ')');
+    return { file, downloadUrl: null, attachments: null, fileMode: 'none' };
+  }
+
+  const token = createFileToken(db, { manuscriptId, fileId: file.id, intervenantId, ttlHours, maxUses });
+  return { file, downloadUrl: `${siteUrl || ''}/api/files/manuscript/${token}/download`, attachments, fileMode };
+}
+
+/**
+ * Envoie à un intervenant le dossier à traiter pour `toStage` (PJ + lien) et
+ * trace sur la frise SOUS QUELLE FORME il l'a reçu. Point d'entrée unique :
+ * utilisé par les transitions ET par l'affectation d'un intervenant sur un
+ * manuscrit déjà arrivé à son étape.
+ */
+export function notifyIntervenantTask(db, transporter, { manuscript, toStage, intervenant, siteUrl, actor = {}, noteSuffix = '' }) {
+  if (!transporter || !intervenant?.email) return Promise.resolve(null);
+  const { downloadUrl, attachments, fileMode } = prepareActorFile(db, {
+    manuscriptId: manuscript.id, toStage, intervenantId: intervenant.id, siteUrl,
+  });
+  return sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl, attachments, fileMode)
+    .then((info) => {
+      if (!info) return null;
+      try {
+        logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
+          `Tâche « ${STAGE_LABELS[toStage] || toStage} » → ${intervenant.nom} (${intervenant.metier})${noteSuffix} — ${FILE_MODE_AUDIT[fileMode] || fileMode}`);
+      } catch (e) { console.warn('[WORKFLOW] log email_sent (intervenant) warning:', e.message); }
+      return info;
+    });
+}
+
 /**
  * Email de tâche à un intervenant externe (sans compte). Décrit le travail
  * attendu et fournit un lien de téléchargement sécurisé du fichier à traiter.
  * Le retour du travail se fait par réponse email à l'équipe éditoriale.
- * recipient = { nom, email, metier }
+ * recipient = { nom, email, metier } ; fileMode = cf. prepareActorFile()
  */
-export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recipient, downloadUrl, siteUrl, attachments = null) {
+export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recipient, downloadUrl, siteUrl, attachments = null, fileMode = null) {
   if (!transporter || !recipient?.email) return Promise.resolve();
   void siteUrl;
   const roleInfo = ROLE_LABELS[recipient.metier] || { label: recipient.metier || 'intervenant' };
@@ -703,10 +797,17 @@ export function sendIntervenantTaskEmail(transporter, manuscript, toStage, recip
         + btn(copy.fileLabel, downloadUrl);
     }
   } else if (downloadUrl) {
-    body += `<p>Le fichier à traiter est disponible via ce lien sécurisé (valable 7 jours) :</p>`
-      + btn(copy.fileLabel, downloadUrl);
+    // Sans PJ, on dit POURQUOI : un lien nu laissait croire à un oubli.
+    if (fileMode === 'external') {
+      body += `<p>Le manuscrit ayant été déposé par l'auteur via un <strong>lien de téléchargement externe</strong> (fichier volumineux), il ne peut pas être joint à cet email. Le bouton ci-dessous vous y conduit directement (valable 7 jours) :</p>`;
+    } else if (fileMode === 'oversize') {
+      body += `<p>Le fichier est <strong>trop volumineux pour être joint</strong> à un email. Vous pouvez le télécharger via ce lien sécurisé (valable 7 jours) :</p>`;
+    } else {
+      body += `<p>Le fichier à traiter est disponible via ce lien sécurisé (valable 7 jours) :</p>`;
+    }
+    body += btn(copy.fileLabel, downloadUrl);
   } else {
-    body += `<p>L'éditeur vous transmettra le fichier à traiter.</p>`;
+    body += `<p>L'éditeur vous transmettra le fichier à traiter par un prochain envoi.</p>`;
   }
   body += `<p style="color:#555">Une fois votre travail terminé, merci de le renvoyer par retour d'email à l'équipe éditoriale.</p>`;
 
@@ -939,34 +1040,8 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
         'SELECT id, nom, email, metier FROM intervenants WHERE id = ? AND is_active = 1'
       ).get(manuscript[contactCol]);
       if (intervenant?.email) {
-        let downloadUrl = null;
-        let attachments = null;
-        const file = pickFileForActor(db, manuscript.id, toStage);
-        if (file) {
-          const token = createFileToken(db, { manuscriptId: manuscript.id, fileId: file.id, intervenantId: intervenant.id });
-          downloadUrl = `${siteUrl || ''}/api/files/manuscript/${token}/download`;
-          // En plus du lien, on joint le fichier directement à l'email pour le
-          // confort de l'intervenant (ex. correcteur), tant qu'il reste sous le
-          // plafond raisonnable des pièces jointes. Sinon, le lien suffit.
-          try {
-            if (file.file_path && existsSync(file.file_path)) {
-              const size = statSync(file.file_path).size;
-              if (size > 0 && size <= MAX_EMAIL_ATTACHMENT_BYTES) {
-                attachments = [{ filename: file.file_name || 'manuscrit', path: file.file_path }];
-              } else {
-                console.warn('[WORKFLOW] Fichier trop volumineux pour pièce jointe — lien seul (manuscrit', manuscript.id, ',', size, 'octets)');
-              }
-            }
-          } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe intervenant:', err.message); }
-        }
-        // Frise écrite après confirmation SMTP (cf. commentaire côté auteur).
-        sendIntervenantTaskEmail(transporter, manuscript, toStage, intervenant, downloadUrl, siteUrl, attachments).then((info) => {
-          if (!info) return;
-          try {
-            logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-              `Tâche « ${STAGE_LABELS[toStage] || toStage} » → ${intervenant.nom} (${intervenant.metier})`);
-          } catch (e) { console.warn('[WORKFLOW] log email_sent (intervenant) warning:', e.message); }
-        });
+        // Pièce jointe + lien tokenisé + trace de frise : cf. notifyIntervenantTask.
+        notifyIntervenantTask(db, transporter, { manuscript, toStage, intervenant, siteUrl, actor });
         notifiedContact = true;
       }
     } catch (err) {
@@ -1071,43 +1146,21 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
         // sécurisé. TTL 30 jours (vs 7 pour les intervenants) : l'élaboration du
         // contrat et du devis s'étale souvent sur plusieurs semaines.
         const ACCOUNTANT_LINK_TTL_DAYS = 30;
-        let downloadUrl = null;
-        let attachments = null;
-        const file = pickFileForActor(db, manuscript.id, toStage);
-        if (file) {
-          const token = createFileToken(db, {
-            manuscriptId: manuscript.id,
-            fileId: file.id,
-            ttlHours: ACCOUNTANT_LINK_TTL_DAYS * 24,
-            maxUses: 10,
-          });
-          downloadUrl = `${siteUrl || ''}/api/files/manuscript/${token}/download`;
-          try {
-            if (file.file_path && existsSync(file.file_path)) {
-              const size = statSync(file.file_path).size;
-              if (size > 0 && size <= MAX_EMAIL_ATTACHMENT_BYTES) {
-                attachments = [{ filename: file.file_name || 'manuscrit', path: file.file_path }];
-              } else {
-                console.warn('[WORKFLOW] Manuscrit trop volumineux pour pièce jointe comptable — lien seul (manuscrit', manuscript.id, ',', size, 'octets)');
-              }
-            }
-          } catch (err) { console.warn('[WORKFLOW] Erreur pièce jointe comptable:', err.message); }
-        } else {
-          console.warn('[WORKFLOW] Aucun fichier original trouvé — email comptable envoyé sans manuscrit (manuscrit', manuscript.id, ')');
-        }
+        const { downloadUrl, attachments, fileMode } = prepareActorFile(db, {
+          manuscriptId: manuscript.id, toStage, siteUrl,
+          ttlHours: ACCOUNTANT_LINK_TTL_DAYS * 24, maxUses: 10,
+        });
         // Frise écrite après confirmation SMTP (cf. commentaire côté auteur).
         sendAccountantEvaluationEmail(transporter, {
           manuscript, authorName, accountantEmail, accountantName, siteUrl,
-          downloadUrl, downloadTtlDays: ACCOUNTANT_LINK_TTL_DAYS, attachments,
+          downloadUrl, downloadTtlDays: ACCOUNTANT_LINK_TTL_DAYS, attachments, fileMode,
         }).then((info) => {
           if (!info) return;
           try {
             // La frise sert d'audit : on y trace SOUS QUELLE FORME le manuscrit a
             // été transmis au comptable (PJ, lien seul, ou rien).
-            const joint = attachments ? 'manuscrit joint'
-              : (downloadUrl ? 'lien de téléchargement' : 'sans manuscrit');
             logManuscriptEvent(db, manuscript.id, 'email_sent', actor,
-              `Élaboration contrat & devis → comptable (${accountantEmail}) — ${joint}`);
+              `Élaboration contrat & devis → comptable (${accountantEmail}) — ${FILE_MODE_AUDIT[fileMode] || fileMode}`);
           } catch (e) { console.warn('[WORKFLOW] log email_sent (accountant) warning:', e.message); }
         });
       } catch (err) { console.warn('[WORKFLOW] accountant notify error:', err.message); }

@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { posLogin } from '../../api/pos';
+import { posClaimDeviceCookie, posDeviceStatus, posLogin } from '../../api/pos';
 import usePosAuthStore from '../../store/posAuthStore';
 import POSChangePin from '../../components/pos/POSChangePin';
 import POSEnrollDevice from '../../components/pos/POSEnrollDevice';
@@ -11,9 +11,41 @@ export default function POSLoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
-  const [deviceRegistered, setDeviceRegistered] = useState(!!localStorage.getItem('pos-device-token'));
+  const [deviceRegistered, setDeviceRegistered] = useState(null); // null = check en cours
   const login = usePosAuthStore((s) => s.login);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const legacy = localStorage.getItem('pos-device-token');
+        if (legacy) {
+          try {
+            await posClaimDeviceCookie(legacy);
+          } catch {
+            /* token obsolète — on retombe sur l'enrôlement */
+          }
+          try { localStorage.removeItem('pos-device-token'); } catch { /* ignore */ }
+        }
+        const res = await posDeviceStatus();
+        if (!cancelled) setDeviceRegistered(!!res.data?.registered);
+      } catch {
+        if (!cancelled) setDeviceRegistered(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (deviceRegistered === null) {
+    return (
+      <div className="pos-login">
+        <div className="pos-login-card">
+          <p>Vérification de l&apos;appareil…</p>
+        </div>
+      </div>
+    );
+  }
 
   // If device not registered, show enrollment screen
   if (!deviceRegistered) {

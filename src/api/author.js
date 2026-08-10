@@ -18,7 +18,7 @@ async function ensureCsrf() {
 
 api.interceptors.request.use(async (config) => {
   const method = config.method?.toLowerCase();
-  if (['post', 'put', 'delete'].includes(method)) {
+  if (['post', 'put', 'patch', 'delete'].includes(method)) {
     const token = await ensureCsrf();
     if (token) config.headers['X-CSRF-Token'] = token;
   }

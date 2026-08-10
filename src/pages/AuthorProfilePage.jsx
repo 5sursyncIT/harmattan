@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { FiBook, FiGlobe, FiTwitter, FiInstagram, FiLinkedin, FiFacebook, FiUser } from 'react-icons/fi';
 import { authorPublicApi } from '../api/author';
 import { formatPrice } from '../utils/formatters';
+import { safeHttpUrl } from '../utils/safeUrl';
 import { getProductImageUrl } from '../api/dolibarr';
 import Breadcrumb from '../components/common/Breadcrumb';
 import Loader from '../components/common/Loader';
@@ -67,8 +68,8 @@ export default function AuthorProfilePage() {
 
         <header className="author-profile-header">
           <div className="author-profile-photo">
-            {author.photo_url ? (
-              <img src={author.photo_url} alt={author.name} />
+            {safeHttpUrl(author.photo_url) ? (
+              <img src={safeHttpUrl(author.photo_url)} alt={author.name} />
             ) : (
               <span className="author-profile-initials">{getInitials(author.name)}</span>
             )}
@@ -79,28 +80,28 @@ export default function AuthorProfilePage() {
               <FiBook /> {books.length} livre{books.length > 1 ? 's' : ''} publié{books.length > 1 ? 's' : ''}
             </p>
             <div className="author-profile-socials">
-              {author.website && (
-                <a href={author.website} target="_blank" rel="noopener noreferrer" title="Site web">
+              {safeHttpUrl(author.website) && (
+                <a href={safeHttpUrl(author.website)} target="_blank" rel="noopener noreferrer" title="Site web">
                   <FiGlobe />
                 </a>
               )}
-              {author.socials?.twitter && (
-                <a href={author.socials.twitter} target="_blank" rel="noopener noreferrer" title="Twitter">
+              {safeHttpUrl(author.socials?.twitter) && (
+                <a href={safeHttpUrl(author.socials.twitter)} target="_blank" rel="noopener noreferrer" title="Twitter">
                   <FiTwitter />
                 </a>
               )}
-              {author.socials?.instagram && (
-                <a href={author.socials.instagram} target="_blank" rel="noopener noreferrer" title="Instagram">
+              {safeHttpUrl(author.socials?.instagram) && (
+                <a href={safeHttpUrl(author.socials.instagram)} target="_blank" rel="noopener noreferrer" title="Instagram">
                   <FiInstagram />
                 </a>
               )}
-              {author.socials?.linkedin && (
-                <a href={author.socials.linkedin} target="_blank" rel="noopener noreferrer" title="LinkedIn">
+              {safeHttpUrl(author.socials?.linkedin) && (
+                <a href={safeHttpUrl(author.socials.linkedin)} target="_blank" rel="noopener noreferrer" title="LinkedIn">
                   <FiLinkedin />
                 </a>
               )}
-              {author.socials?.facebook && (
-                <a href={author.socials.facebook} target="_blank" rel="noopener noreferrer" title="Facebook">
+              {safeHttpUrl(author.socials?.facebook) && (
+                <a href={safeHttpUrl(author.socials.facebook)} target="_blank" rel="noopener noreferrer" title="Facebook">
                   <FiFacebook />
                 </a>
               )}

@@ -240,3 +240,36 @@
   .sk-trf-qty-row { flex-wrap: wrap; }
   .sk-trf-max { flex: 1; }
 }
+
+/* ── Historique des mouvements ─────────────────────────── */
+
+/* Panneau de filtres : grille auto-ajustée, lisible sur mobile sans média query. */
+.sk-filters-panel {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;
+  padding: 14px; margin-bottom: 14px;
+  background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+}
+.sk-filters-panel label { display: flex; flex-direction: column; gap: 4px; }
+.sk-filters-panel label > span { font-size: 0.75rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.03em; }
+.sk-filters-panel select,
+.sk-filters-panel input {
+  padding: 8px 10px; border: 2px solid #e2e8f0; border-radius: 8px;
+  font-size: 0.85rem; font-family: inherit; background: #fff; min-width: 0;
+}
+.sk-filters-panel select:focus,
+.sk-filters-panel input:focus { outline: none; border-color: #1e40af; }
+
+/* Quantité signée : le sens se lit à l'icône ET à la couleur (jamais couleur seule). */
+.sk-move-qty {
+  display: inline-flex; align-items: center; gap: 3px;
+  min-width: 46px; justify-content: center;
+  padding: 2px 8px; border-radius: 999px; font-weight: 800; font-size: 0.82rem;
+}
+.sk-move-qty.in { background: #f0fdf4; color: #166534; }
+.sk-move-qty.out { background: #fef2f2; color: #dc2626; }
+
+/* Provenance de l'information « acteur » — voir ACTOR_SOURCE côté panneau. */
+.sk-actor-src {
+  display: inline-block; padding: 1px 6px; border-radius: 5px;
+  font-size: 0.68rem; font-weight: 700; white-space: nowrap;
+}

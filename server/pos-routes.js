@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -39,6 +39,36 @@ const POS_CONFIG = {
 // au lieu de localStorage. Marqué Secure dès que COOKIE_SECURE=true (HTTPS).
 const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
 const POS_SESSION_COOKIE = 'pos_session';
+const POS_DEVICE_COOKIE = 'pos_device';
+
+// Repli X-POS-Device : maintenu le temps que le parc bascule sur le cookie
+// HttpOnly, sans quoi une caisse au bundle encore en cache retomberait sur
+// l'écran d'enrôlement. Tant qu'il est ouvert, un token dérobé dans le
+// localStorage d'avant la migration reste utilisable : à fermer via
+// POS_LEGACY_DEVICE_HEADER=false dès que plus aucun appareil ne l'emprunte —
+// c'est ce que dit le journal ci-dessous.
+const POS_LEGACY_DEVICE_HEADER = process.env.POS_LEGACY_DEVICE_HEADER !== 'false';
+
+/** Token appareil : cookie d'abord, header legacy seulement s'il est encore permis. */
+function readDeviceToken(req) {
+  const fromCookie = req.cookies?.[POS_DEVICE_COOKIE];
+  if (fromCookie) return { token: fromCookie, viaLegacyHeader: false };
+  const fromHeader = req.headers['x-pos-device'];
+  if (fromHeader && POS_LEGACY_DEVICE_HEADER) return { token: fromHeader, viaLegacyHeader: true };
+  return { token: null, viaLegacyHeader: false };
+}
+
+// Un appareil encore en repli est signalé au plus une fois par heure : assez pour
+// suivre la migration dans les logs, pas assez pour les noyer.
+const legacyDeviceLastLog = new Map();
+function logLegacyDeviceUse(device) {
+  const now = Date.now();
+  if (now - (legacyDeviceLastLog.get(device.id) || 0) < 60 * 60 * 1000) return;
+  legacyDeviceLastLog.set(device.id, now);
+  console.warn(
+    `[POS] Repli X-POS-Device utilisé par « ${device.device_name} » (T${device.terminal}, id ${device.id}) — cookie pas encore posé.`
+  );
+}
 function posCookieOptions() {
   return {
     httpOnly: true,
@@ -46,6 +76,15 @@ function posCookieOptions() {
     sameSite: 'strict',
     path: '/api/pos',
     maxAge: 24 * 60 * 60 * 1000, // 24h — couvre largement le plafond de session
+  };
+}
+function posDeviceCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: COOKIE_SECURE,
+    sameSite: 'strict',
+    path: '/api/pos',
+    maxAge: 365 * 24 * 60 * 60 * 1000, // liaison appareil longue durée
   };
 }
 
@@ -163,6 +202,26 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     validate: { xForwardedForHeader: false },
   });
 
+  // Brute-force du PIN manager sur les retours. Limiteur DÉDIÉ : réutiliser
+  // `pinLimiter` partagerait son compteur avec /auth/login et /auth/change-pin,
+  // si bien que quelques remboursements légitimes empêcheraient les caissiers de
+  // se connecter (et inversement). Ici :
+  //  - seuls les PIN manager REFUSÉS sont comptés (drapeau posé par la route),
+  //    donc un retour normal — qui ne demande aucun PIN — ne consomme rien ;
+  //  - la clé mêle IP et appareil, pour que des caisses derrière une même IP
+  //    publique gardent des quotas distincts.
+  const managerPinLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: { error: 'Trop de tentatives de PIN manager, réessayez dans 15 minutes' },
+    validate: { xForwardedForHeader: false },
+    // req.posDevice vient de requireDevice (cookie/token vérifié en base) : non
+    // falsifiable par le client, contrairement à un terminal passé dans le body.
+    keyGenerator: (req) => `${ipKeyGenerator(req.ip)}|d${req.posDevice?.id ?? '?'}`,
+    skipSuccessfulRequests: true,
+    requestWasSuccessful: (req, res) => !res.locals?.posManagerPinFailed,
+  });
+
   // Limite les tentatives d'enrôlement d'appareil (protège le code bootstrap).
   const enrollLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -172,11 +231,56 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   });
 
   // ─── Device Verification Middleware ────────────────────
-  function requireDevice(req, res, next) {
-    // Enrollment endpoint is exempt
-    if (req.path === '/devices/enroll' && req.method === 'POST') return next();
+  // Statut appareil (cookie HttpOnly) — avant requireDevice pour permettre
+  // au front de savoir s'il faut afficher l'écran d'enrôlement.
+  router.get('/devices/status', (req, res) => {
+    const { token: deviceToken } = readDeviceToken(req);
+    if (!deviceToken) return res.json({ registered: false });
+    const device = db.prepare(
+      'SELECT device_name, terminal FROM pos_devices WHERE device_token = ? AND active = 1'
+    ).get(deviceToken);
+    if (!device) return res.json({ registered: false });
+    return res.json({
+      registered: true,
+      device_name: device.device_name,
+      terminal: device.terminal,
+    });
+  });
 
-    const deviceToken = req.headers['x-pos-device'];
+  // Migration : un appareil encore en localStorage échange son token contre le cookie HttpOnly.
+  router.post('/devices/claim-cookie', enrollLimiter, csrfProtection, (req, res) => {
+    // Même interrupteur que le repli header : cette route échange un token brut
+    // contre un cookie, elle serait donc le vecteur restant pour un token volé
+    // si on fermait le header sans la fermer elle aussi.
+    if (!POS_LEGACY_DEVICE_HEADER) {
+      return res.status(410).json({ error: 'Migration terminée — réenrôlez cet appareil', code: 'DEVICE_INVALID' });
+    }
+    const deviceToken = String(req.body?.device_token || '').trim();
+    if (!deviceToken || deviceToken.length < 32 || deviceToken.length > 200) {
+      return res.status(400).json({ error: 'Token appareil invalide' });
+    }
+    const device = db.prepare(
+      'SELECT id, device_name, terminal FROM pos_devices WHERE device_token = ? AND active = 1'
+    ).get(deviceToken);
+    if (!device) {
+      return res.status(403).json({ error: 'Appareil non reconnu ou révoqué', code: 'DEVICE_INVALID' });
+    }
+    res.cookie(POS_DEVICE_COOKIE, deviceToken, posDeviceCookieOptions());
+    return res.json({
+      registered: true,
+      device_name: device.device_name,
+      terminal: device.terminal,
+      migrated: true,
+    });
+  });
+
+  function requireDevice(req, res, next) {
+    // Enrollment + claim-cookie exempts
+    if (req.path === '/devices/enroll' && req.method === 'POST') return next();
+    if (req.path === '/devices/claim-cookie' && req.method === 'POST') return next();
+
+    // Cookie HttpOnly en priorité ; header X-POS-Device en repli migration.
+    const { token: deviceToken, viaLegacyHeader } = readDeviceToken(req);
     if (!deviceToken) {
       return res.status(403).json({ error: 'Appareil non enregistré', code: 'DEVICE_REQUIRED' });
     }
@@ -184,6 +288,12 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     const device = db.prepare('SELECT * FROM pos_devices WHERE device_token = ? AND active = 1').get(deviceToken);
     if (!device) {
       return res.status(403).json({ error: 'Appareil non reconnu ou révoqué', code: 'DEVICE_INVALID' });
+    }
+
+    // Si le token arrive encore via header, pose le cookie pour les requêtes suivantes.
+    if (viaLegacyHeader) {
+      logLegacyDeviceUse(device);
+      res.cookie(POS_DEVICE_COOKIE, deviceToken, posDeviceCookieOptions());
     }
 
     db.prepare("UPDATE pos_devices SET last_seen_at = datetime('now'), last_ip = ? WHERE id = ?")
@@ -398,9 +508,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
   // ─── POS Auth Middleware ────────────────────────────────
   function requirePosAuth(req, res, next) {
-    // Cookie HttpOnly en priorité ; en-tête X-POS-Token gardé en repli le temps
-    // que les postes encore sur l'ancien build se reconnectent.
-    const token = req.cookies?.[POS_SESSION_COOKIE] || req.headers['x-pos-token'];
+    // Session portée uniquement par cookie HttpOnly (plus de X-POS-Token).
+    const token = req.cookies?.[POS_SESSION_COOKIE];
     if (!token) return res.status(401).json({ error: 'Authentification POS requise' });
     // Le token n'est stocké que haché — on cherche par empreinte.
     const tokenHash = hashToken(token);
@@ -439,7 +548,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
             .run(hashToken(token), s.id, expiresAt);
           // Session déposée dans un cookie HttpOnly — non exposée au JavaScript.
           res.cookie(POS_SESSION_COOKIE, token, posCookieOptions());
-          return res.json({ id: s.id, name: s.name, role: s.role, token, pin_expired: pinExpired });
+          return res.json({ id: s.id, name: s.name, role: s.role, pin_expired: pinExpired });
         }
       }
 
@@ -477,7 +586,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   });
 
   router.post('/auth/logout', csrfProtection, (req, res) => {
-    const token = req.cookies?.[POS_SESSION_COOKIE] || req.headers['x-pos-token'];
+    const token = req.cookies?.[POS_SESSION_COOKIE];
     if (token) db.prepare('DELETE FROM pos_sessions WHERE token = ?').run(hashToken(token));
     res.clearCookie(POS_SESSION_COOKIE, { httpOnly: true, secure: COOKIE_SECURE, sameSite: 'strict', path: '/api/pos' });
     res.json({ ok: true });
@@ -624,7 +733,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         db.prepare("INSERT OR REPLACE INTO pos_meta (key, value) VALUES ('bootstrap_used', '1')").run();
       }
 
-      res.json({ device_token: deviceToken, device_name: deviceName, terminal });
+      // Token appareil en cookie HttpOnly — jamais exposé au JS / localStorage.
+      res.cookie(POS_DEVICE_COOKIE, deviceToken, posDeviceCookieOptions());
+      res.json({ device_name: deviceName, terminal, enrolled: true });
     } catch (err) {
       console.error('Device enrollment error:', err.message);
       res.status(500).json({ error: 'Erreur enregistrement appareil' });
@@ -1508,7 +1619,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   });
 
   // Create credit note (return)
-  router.post('/returns', requirePosAuth, csrfProtection, async (req, res) => {
+  router.post('/returns', requirePosAuth, managerPinLimiter, csrfProtection, async (req, res) => {
     try {
       const { invoice_id, invoice_ref, items, reason, refund_method, client_return_id, manager_pin } = req.body;
       const terminal = getTerminal(req);
@@ -1556,7 +1667,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const crossMethod = originalMethods.length > 0 && !originalMethods.includes(refundMethod);
       let managerOverrideId = null;
       if (crossMethod && req.posStaff.role !== 'manager') {
-        if (!manager_pin || typeof manager_pin !== 'string') {
+        if (!manager_pin || typeof manager_pin !== 'string' || !/^\d{6}$/.test(manager_pin)) {
           return res.status(403).json({
             error: `Remboursement en ${refundMapping.label} alors que la vente initiale était en ${originalMethods.join('/')}. Un PIN manager est requis.`,
             code: 'MANAGER_PIN_REQUIRED',
@@ -1567,8 +1678,10 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         const managers = db.prepare(
           "SELECT id, name, pin FROM pos_staff WHERE role = 'manager' AND active = 1",
         ).all();
-        const match = managers.find((m) => bcrypt.compareSync(String(manager_pin), m.pin));
+        const match = managers.find((m) => bcrypt.compareSync(manager_pin, m.pin));
         if (!match) {
+          // Seul cas décompté par managerPinLimiter — c'est la tentative de PIN.
+          res.locals.posManagerPinFailed = true;
           return res.status(403).json({ error: 'PIN manager invalide', code: 'MANAGER_PIN_INVALID' });
         }
         managerOverrideId = match.id;

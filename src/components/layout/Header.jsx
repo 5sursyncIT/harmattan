@@ -7,6 +7,7 @@ import useAuthStore from '../../store/authStore';
 import useSiteConfig from '../../hooks/useSiteConfig.jsx';
 import { getProductImageUrl } from '../../api/dolibarr';
 import api from '../../api/dolibarr';
+import { safeHttpUrl } from '../../utils/safeUrl';
 import './Header.css';
 
 const getNavClass = ({ isActive }) => isActive ? 'active' : undefined;
@@ -89,10 +90,10 @@ export default function Header() {
 
           <div className="header-actions">
             <div className="header-socials">
-              {social.facebook && <a href={social.facebook} target="_blank" rel="noopener noreferrer" aria-label="Facebook"><FiFacebook size={16} /></a>}
-              {social.youtube && <a href={social.youtube} target="_blank" rel="noopener noreferrer" aria-label="YouTube"><FiYoutube size={16} /></a>}
-              {social.twitter && <a href={social.twitter} target="_blank" rel="noopener noreferrer" aria-label="X"><FaXTwitter size={16} /></a>}
-              {social.linkedin && <a href={social.linkedin} target="_blank" rel="noopener noreferrer" aria-label="LinkedIn"><FiLinkedin size={16} /></a>}
+              {safeHttpUrl(social.facebook) && <a href={safeHttpUrl(social.facebook)} target="_blank" rel="noopener noreferrer" aria-label="Facebook"><FiFacebook size={16} /></a>}
+              {safeHttpUrl(social.youtube) && <a href={safeHttpUrl(social.youtube)} target="_blank" rel="noopener noreferrer" aria-label="YouTube"><FiYoutube size={16} /></a>}
+              {safeHttpUrl(social.twitter) && <a href={safeHttpUrl(social.twitter)} target="_blank" rel="noopener noreferrer" aria-label="X"><FaXTwitter size={16} /></a>}
+              {safeHttpUrl(social.linkedin) && <a href={safeHttpUrl(social.linkedin)} target="_blank" rel="noopener noreferrer" aria-label="LinkedIn"><FiLinkedin size={16} /></a>}
             </div>
 
             <button

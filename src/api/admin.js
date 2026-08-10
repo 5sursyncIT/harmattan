@@ -180,6 +180,17 @@ export const getStockWarehouses = (product_id) => api.get('/admin/stock/warehous
 export const transferStock = (payload) => api.post('/admin/stock/transfer', payload);
 // Historique des transferts (mouvements appariés TRF-… + auteur réel)
 export const getStockTransfers = (params = {}) => api.get('/admin/stock/transfers', { params });
+
+// Historique COMPLET des mouvements de stock (ventes, avoirs, entrées, ajustements,
+// transferts, réceptions, site web) avec l'acteur et la provenance de cette info.
+export const getStockMovements = (params = {}) => api.get('/admin/stock/movements', { params });
+export const getStockMovementFilters = () => api.get('/admin/stock/movements/filters');
+export const stockMovementsExportUrl = (params = {}) => {
+  const qs = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v !== '' && v !== null && v !== undefined)
+  ).toString();
+  return `/api/admin/stock/movements/export${qs ? `?${qs}` : ''}`;
+};
 // Commandes d'approvisionnement (suivi local + réception)
 export const getPurchaseOrders = (params = {}) => api.get('/admin/stock/purchase-orders', { params });
 export const getPurchaseOrder = (id) => api.get(`/admin/stock/purchase-orders/${id}`);

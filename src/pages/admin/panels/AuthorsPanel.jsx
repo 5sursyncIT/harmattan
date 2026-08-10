@@ -6,6 +6,7 @@ import {
   getAdminAuthors, getAdminAuthor, resetAuthorPassword,
   updateAdminAuthor, uploadAuthorPhoto, notifyAuthorRoyalties,
 } from '../../../api/admin';
+import { safeHttpUrl } from '../../../utils/safeUrl';
 
 const STAGE_LABELS = {
   submitted: 'Soumis', in_evaluation: 'En évaluation',
@@ -224,7 +225,7 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
                   <div><strong>Affichage</strong><span>{data.author.display_name || '—'}</span></div>
                   <div><strong>Slug</strong><span>{data.author.slug || '—'}</span></div>
                   <div><strong>Public</strong><span>{data.author.public_listed ? 'Oui' : 'Non'}</span></div>
-                  <div><strong>Site web</strong><span>{data.author.website ? <a href={data.author.website} target="_blank" rel="noreferrer">{data.author.website}</a> : '—'}</span></div>
+                  <div><strong>Site web</strong><span>{safeHttpUrl(data.author.website) ? <a href={safeHttpUrl(data.author.website)} target="_blank" rel="noreferrer">{data.author.website}</a> : (data.author.website || '—')}</span></div>
                   <div style={{ gridColumn: '1 / -1' }}>
                     <strong>Biographie</strong>
                     <span style={{ whiteSpace: 'pre-wrap' }}>{data.author.bio || '—'}</span>

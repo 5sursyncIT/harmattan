@@ -558,8 +558,18 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   app.post('/api/admin/login', adminLoginLimiter, csrfProtection, (req, res) => {
     const { username, password } = req.body;
-    const admin = db.prepare('SELECT * FROM admin_users WHERE username = ?').get(username);
-    if (!admin || !bcrypt.compareSync(password, admin.password)) {
+    // On accepte le nom d'utilisateur OU l'e-mail : plusieurs comptes ont été
+    // créés avec le nom complet comme identifiant (« Célia Sanchez », espace et
+    // accents compris) et leurs titulaires saisissaient logiquement leur e-mail
+    // — seul identifiant qu'on leur affiche — d'où des « identifiants invalides »
+    // à répétition. L'e-mail est unique en base (vérifié) ; le nom d'utilisateur
+    // exact reste prioritaire, les comptes sans e-mail sont exclus du repli.
+    const ident = typeof username === 'string' ? username.trim() : '';
+    const admin = ident
+      ? (db.prepare('SELECT * FROM admin_users WHERE username = ?').get(ident)
+        || db.prepare("SELECT * FROM admin_users WHERE email IS NOT NULL AND TRIM(email) <> '' AND LOWER(email) = LOWER(?)").get(ident))
+      : null;
+    if (!admin || typeof password !== 'string' || !password || !bcrypt.compareSync(password, admin.password)) {
       return res.status(401).json({ error: 'Identifiants invalides' });
     }
     if (admin.is_active === 0) {
@@ -870,7 +880,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // Admin: upload slider image
-  app.post('/api/admin/config/slider-image', auth, sliderUpload.single('image'), (req, res) => {
+  app.post('/api/admin/config/slider-image', auth, csrfProtection, sliderUpload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Aucune image' });
     res.json({ path: `/images/slider/${req.file.filename}` });
   });
@@ -910,13 +920,13 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
   // Upload d'image de bannière sous le module « slides » (≠ /config/slider-image,
   // réservé aux profils ayant l'accès config) afin que l'éditeur puisse l'utiliser.
-  app.post('/api/admin/slides/image', auth, sliderUpload.single('image'), (req, res) => {
+  app.post('/api/admin/slides/image', auth, csrfProtection, sliderUpload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Aucune image' });
     res.json({ path: `/images/slider/${req.file.filename}` });
   });
 
   // Admin: upload upcoming book cover
-  app.post('/api/admin/config/cover-image', auth, coverUpload.single('image'), (req, res) => {
+  app.post('/api/admin/config/cover-image', auth, csrfProtection, coverUpload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Aucune image' });
     res.json({ path: `/images/couvertures/${req.file.filename}` });
   });
@@ -969,7 +979,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   });
 
   // Admin: mark message as read
-  app.put('/api/admin/contact/messages/:id/read', auth, (req, res) => {
+  app.put('/api/admin/contact/messages/:id/read', auth, csrfProtection, (req, res) => {
     db.prepare('UPDATE contact_messages SET read = 1 WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   });

@@ -26,20 +26,13 @@ async function ensureCsrfToken() {
 // Interceptor: attach CSRF token + POS staff ID
 api.interceptors.request.use(async (config) => {
   const method = config.method?.toLowerCase();
-  if (method === 'post' || method === 'put' || method === 'delete') {
+  if (method === 'post' || method === 'put' || method === 'patch' || method === 'delete') {
     const token = await ensureCsrfToken();
     if (token) {
       config.headers['X-CSRF-Token'] = token;
     }
   }
-  // Attach POS device token (for /api/pos/* routes). La session POS est portée
-  // par un cookie HttpOnly envoyé automatiquement — plus de header de session.
-  if (config.url?.startsWith('/pos/')) {
-    const deviceToken = localStorage.getItem('pos-device-token');
-    if (deviceToken) {
-      config.headers['X-POS-Device'] = deviceToken;
-    }
-  }
+  // Session POS + device : cookies HttpOnly (withCredentials) — plus de token en localStorage.
   return config;
 });
 
@@ -67,7 +60,6 @@ api.interceptors.response.use(
       error.response?.data?.code === 'DEVICE_REQUIRED' &&
       error.config?.url?.startsWith('/pos/')
     ) {
-      localStorage.removeItem('pos-device-token');
       if (window.location.pathname.startsWith('/pos') && !window.location.pathname.includes('connexion')) {
         window.location.href = '/pos/connexion';
       }
@@ -78,7 +70,6 @@ api.interceptors.response.use(
       error.response?.data?.code === 'DEVICE_INVALID' &&
       error.config?.url?.startsWith('/pos/')
     ) {
-      localStorage.removeItem('pos-device-token');
       if (window.location.pathname.startsWith('/pos')) {
         window.location.href = '/pos/connexion';
       }

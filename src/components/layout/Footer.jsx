@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { FiMapPin, FiPhone, FiMail, FiClock, FiFacebook, FiYoutube, FiLinkedin } from 'react-icons/fi';
 import { FaXTwitter, FaCcVisa, FaCcMastercard } from 'react-icons/fa6';
 import useSiteConfig from '../../hooks/useSiteConfig.jsx';
+import { safeHttpUrl } from '../../utils/safeUrl';
 import './Footer.css';
 
 export default function Footer() {
@@ -54,10 +55,10 @@ export default function Footer() {
               <li><FiClock size={14} /> {contact.hours || 'Lun - Ven: 8h - 18h30 | Sam: 9h - 18h30'}</li>
             </ul>
             <div className="footer-socials">
-              {social.facebook && <a href={social.facebook} target="_blank" rel="noopener noreferrer" aria-label="Facebook"><FiFacebook size={18} /></a>}
-              {social.youtube && <a href={social.youtube} target="_blank" rel="noopener noreferrer" aria-label="YouTube"><FiYoutube size={18} /></a>}
-              {social.twitter && <a href={social.twitter} target="_blank" rel="noopener noreferrer" aria-label="X"><FaXTwitter size={18} /></a>}
-              {social.linkedin && <a href={social.linkedin} target="_blank" rel="noopener noreferrer" aria-label="LinkedIn"><FiLinkedin size={18} /></a>}
+              {safeHttpUrl(social.facebook) && <a href={safeHttpUrl(social.facebook)} target="_blank" rel="noopener noreferrer" aria-label="Facebook"><FiFacebook size={18} /></a>}
+              {safeHttpUrl(social.youtube) && <a href={safeHttpUrl(social.youtube)} target="_blank" rel="noopener noreferrer" aria-label="YouTube"><FiYoutube size={18} /></a>}
+              {safeHttpUrl(social.twitter) && <a href={safeHttpUrl(social.twitter)} target="_blank" rel="noopener noreferrer" aria-label="X"><FaXTwitter size={18} /></a>}
+              {safeHttpUrl(social.linkedin) && <a href={safeHttpUrl(social.linkedin)} target="_blank" rel="noopener noreferrer" aria-label="LinkedIn"><FiLinkedin size={18} /></a>}
             </div>
           </div>
         </div>

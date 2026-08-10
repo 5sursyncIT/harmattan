@@ -6,8 +6,22 @@ import useAuthStore from '../store/authStore';
 import useSiteConfig from '../hooks/useSiteConfig.jsx';
 import api, { createOrder } from '../api/dolibarr';
 import { formatPrice } from '../utils/formatters';
+import { safeHttpUrl } from '../utils/safeUrl';
 import toast from 'react-hot-toast';
 import './CheckoutPage.css';
+
+const PAYTECH_HOST_SUFFIXES = ['paytech.sn', 'paytech.africa'];
+
+function isAllowedPaytechRedirect(url) {
+  const safe = safeHttpUrl(url);
+  if (!safe) return false;
+  try {
+    const host = new URL(safe).hostname.toLowerCase();
+    return PAYTECH_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
+  } catch {
+    return false;
+  }
+}
 
 export default function CheckoutPage() {
   const navigate = useNavigate();
@@ -80,8 +94,12 @@ export default function CheckoutPage() {
 
       // PayTech : si l'init a réussi, on redirige vers la page hosted
       if (paymentMethod === 'paytech' && orderRes.data?.paytech_redirect_url) {
+        if (!isAllowedPaytechRedirect(orderRes.data.paytech_redirect_url)) {
+          toast.error('URL de paiement invalide');
+          return;
+        }
         toast.success('Redirection vers le paiement…');
-        window.location.href = orderRes.data.paytech_redirect_url;
+        window.location.href = safeHttpUrl(orderRes.data.paytech_redirect_url);
         return;
       }
 
