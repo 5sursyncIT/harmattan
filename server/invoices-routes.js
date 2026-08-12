@@ -1550,19 +1550,40 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
 // Normalise un corps de requête de paiement vers un tableau de splits
-// [{ method, amount, num_payment }]. Accepte le format multi-méthode (splits[])
-// comme l'ancien format mono-méthode ({ method, amount, num_payment }).
+// [{ method, amount, num_payment, chq_emetteur, chq_banque }]. Accepte le format
+// multi-méthode (splits[]) comme l'ancien format mono-méthode
+// ({ method, amount, num_payment }).
 function normalizeSplits(body) {
   const raw = Array.isArray(body?.splits) && body.splits.length
     ? body.splits
-    : [{ method: body?.method, amount: body?.amount, num_payment: body?.num_payment }];
+    : [{ method: body?.method, amount: body?.amount, num_payment: body?.num_payment,
+         chq_emetteur: body?.chq_emetteur, chq_banque: body?.chq_banque }];
   return raw
     .map(s => ({
       method: String(s?.method || '').toUpperCase(),
       amount: Number(s?.amount),
       num_payment: String(s?.num_payment || '').slice(0, 64),
+      chq_emetteur: String(s?.chq_emetteur || '').slice(0, 100),
+      chq_banque: String(s?.chq_banque || '').slice(0, 100),
     }))
     .filter(s => s.method && s.amount > 0);
+}
+
+// Émetteur du chèque : Dolibarr REFUSE (400 « Emetteur is mandatory when payment
+// code is CHQ ») tout règlement de mode CHQ sans émetteur. À défaut de saisie,
+// on retombe sur le nom du tiers de la facture — c'est lui qui a signé le chèque.
+async function resolveChequeIssuer(pool, invoiceId) {
+  try {
+    const [[row]] = await pool.query(
+      `SELECT s.nom FROM llx_facture f
+       JOIN llx_societe s ON s.rowid = f.fk_soc
+       WHERE f.rowid = ?`, [invoiceId]
+    );
+    return String(row?.nom || '').slice(0, 100) || 'Client';
+  } catch (e) {
+    console.warn('[INVOICES] émetteur chèque non résolu:', e.message);
+    return 'Client';
+  }
 }
 
 // Enregistre N paiements (un par split / méthode) sur une facture, du montant
@@ -1573,6 +1594,11 @@ function normalizeSplits(body) {
 // (closepaidinvoices) que sur le dernier split.
 async function recordSplitPayments(pool, invoiceId, splits, bankAccount, datepUnix, comment) {
   const ids = [];
+  // Un seul lookup du tiers, et seulement s'il y a un chèque sans émetteur saisi.
+  let fallbackIssuer = null;
+  if (splits.some(s => s.method === 'CHQ' && !s.chq_emetteur)) {
+    fallbackIssuer = await resolveChequeIssuer(pool, invoiceId);
+  }
   for (let i = 0; i < splits.length; i++) {
     const s = splits[i];
     const paymentId = await resolvePaymentId(pool, s.method);
@@ -1590,6 +1616,10 @@ async function recordSplitPayments(pool, invoiceId, splits, bankAccount, datepUn
       isLast: i === splits.length - 1,
       numPayment: s.num_payment,
       comment,
+      // Obligatoire côté Dolibarr dès que le mode = CHQ (sinon 400).
+      ...(s.method === 'CHQ'
+        ? { chqemetteur: s.chq_emetteur || fallbackIssuer, chqbank: s.chq_banque || undefined }
+        : {}),
     });
     ids.push(id);
   }

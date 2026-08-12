@@ -28,8 +28,11 @@ export default function InvoicePayModal({ invoice, onClose, onSuccess }) {
   const [bankAccount, setBankAccount] = useState('');
   const [date, setDate] = useState(today());
   const [numPayment, setNumPayment] = useState('');
+  const [chqEmetteur, setChqEmetteur] = useState('');
+  const [chqBanque, setChqBanque] = useState('');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const isCheque = method === 'CHQ';
 
   useEffect(() => {
     getInvoiceBanks()
@@ -58,12 +61,17 @@ export default function InvoicePayModal({ invoice, onClose, onSuccess }) {
         bank_account: Number(bankAccount),
         date,
         num_payment: numPayment || undefined,
+        // Dolibarr refuse un règlement par chèque sans émetteur ; laissé vide,
+        // le serveur retombe sur le nom du client de la facture.
+        chq_emetteur: isCheque ? (chqEmetteur.trim() || undefined) : undefined,
+        chq_banque: isCheque ? (chqBanque.trim() || undefined) : undefined,
       });
       toast.success('Paiement enregistré');
       onSuccess?.();
       onClose();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur enregistrement paiement');
+      const data = err.response?.data;
+      toast.error(data?.detail ? `${data.error} — ${data.detail}` : (data?.error || 'Erreur enregistrement paiement'));
     } finally {
       setSubmitting(false);
     }
@@ -126,6 +134,23 @@ export default function InvoicePayModal({ invoice, onClose, onSuccess }) {
               <input type="text" className="ac-form-input" maxLength={64}
                 value={numPayment} onChange={e => setNumPayment(e.target.value)} />
             </div>
+            {isCheque && (
+              <>
+                <div>
+                  <label className="ac-form-label">Émetteur du chèque</label>
+                  <input type="text" className="ac-form-input" maxLength={100}
+                    placeholder={invoice.customer_name || invoice.client_name || 'Nom du client'}
+                    value={chqEmetteur} onChange={e => setChqEmetteur(e.target.value)} />
+                  <div style={{ fontSize: '0.7rem', color: '#64748b' }}>Vide = nom du client de la facture</div>
+                </div>
+                <div>
+                  <label className="ac-form-label">Banque émettrice</label>
+                  <input type="text" className="ac-form-input" maxLength={100}
+                    placeholder="Optionnel (ex : CBAO)"
+                    value={chqBanque} onChange={e => setChqBanque(e.target.value)} />
+                </div>
+              </>
+            )}
             <div style={{ gridColumn: '1 / -1' }}>
               <label className="ac-form-label">Motif de la régularisation <span style={{ color: '#dc2626' }}>*</span></label>
               <textarea className="ac-form-input" rows={3} maxLength={500} required

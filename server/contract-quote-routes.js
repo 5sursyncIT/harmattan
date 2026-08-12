@@ -912,12 +912,15 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
       // Normalisation splits (multi-méthode ou mono-méthode).
       const rawSplits = Array.isArray(req.body?.splits) && req.body.splits.length
         ? req.body.splits
-        : [{ method: req.body?.method, amount: req.body?.amount, num_payment: req.body?.num_payment }];
+        : [{ method: req.body?.method, amount: req.body?.amount, num_payment: req.body?.num_payment,
+             chq_emetteur: req.body?.chq_emetteur, chq_banque: req.body?.chq_banque }];
       const splits = rawSplits
         .map(s => ({
           method: String(s?.method || '').toUpperCase(),
           amount: Math.round(Number(s?.amount) * 100) / 100,
           num_payment: String(s?.num_payment || '').slice(0, 64),
+          chq_emetteur: String(s?.chq_emetteur || '').slice(0, 100),
+          chq_banque: String(s?.chq_banque || '').slice(0, 100),
         }))
         .filter(s => s.method && s.amount > 0);
       if (!splits.length) return res.status(400).json({ error: 'Au moins une ligne de paiement requise' });
@@ -975,6 +978,16 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
       const willSolde = Math.abs(before.remaining - totalSplit) < 0.01;
       const comment = `Encaissement devis ${quote.ref}`;
       const paymentIds = [];
+      // Dolibarr exige un émetteur dès que le mode = CHQ (400 sinon) : à défaut de
+      // saisie, l'auteur/tiers de la facture est l'émetteur du chèque.
+      let chequeIssuer = null;
+      if (splits.some(s => s.method === 'CHQ' && !s.chq_emetteur)) {
+        const [[socRow]] = await dolibarrPool.query(
+          `SELECT s.nom FROM llx_facture f JOIN llx_societe s ON s.rowid = f.fk_soc WHERE f.rowid = ?`,
+          [invoiceId]
+        );
+        chequeIssuer = String(socRow?.nom || '').slice(0, 100) || 'Client';
+      }
       for (let i = 0; i < splits.length; i++) {
         const s = splits[i];
         const paymentId = await resolvePaymentId(dolibarrPool, s.method);
@@ -988,6 +1001,9 @@ export function createContractQuoteRouter({ db, dolibarrPool, csrfProtection, tr
           isLast: willSolde && i === splits.length - 1,
           numPayment: s.num_payment,
           comment,
+          ...(s.method === 'CHQ'
+            ? { chqemetteur: s.chq_emetteur || chequeIssuer, chqbank: s.chq_banque || undefined }
+            : {}),
         });
         paymentIds.push(pid);
       }

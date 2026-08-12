@@ -622,7 +622,10 @@ function ActionModal({ type, invoice, onClose, onDone }) {
       toast.success(meta.successMessage);
       onDone();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur');
+      const data = err.response?.data;
+      // On expose `detail` : sans lui, un refus Dolibarr (ex. « Emetteur is
+      // mandatory when payment code is CHQ ») s'affichait en « Erreur » opaque.
+      toast.error(data?.detail ? `${data.error} — ${data.detail}` : (data?.error || err?.message || 'Erreur'));
     } finally { setSubmitting(false); }
   };
 
@@ -818,18 +821,29 @@ function SplitPaymentEditor({ remaining, extra, setExtra, banks, withBank = true
 
       <label className="ac-form-label">Encaissement(s) {remaining != null && <>— reste à payer : {formatPrice(remaining)}</>}</label>
       {splits.map((s, i) => (
-        <div key={i} className="ac-split-row">
-          <select className="ac-form-select" required value={s.method || ''}
-            onChange={e => setSplit(i, { method: e.target.value })}>
-            <option value="">Méthode…</option>
-            {PAY_METHODS.map(m => <option key={m.code} value={m.code}>{m.label}</option>)}
-          </select>
-          <input type="number" className="ac-form-input" step="1" min="1" placeholder="Montant"
-            value={s.amount ?? ''} onChange={e => setSplit(i, { amount: Number(e.target.value) })} />
-          <input type="text" className="ac-form-input" maxLength={64} placeholder="N° pièce (opt.)"
-            value={s.num_payment || ''} onChange={e => setSplit(i, { num_payment: e.target.value })} />
-          {splits.length > 1 && (
-            <button type="button" className="ac-mini-btn danger" title="Retirer" onClick={() => removeSplit(i)}><FiX /></button>
+        <div key={i}>
+          <div className="ac-split-row">
+            <select className="ac-form-select" required value={s.method || ''}
+              onChange={e => setSplit(i, { method: e.target.value })}>
+              <option value="">Méthode…</option>
+              {PAY_METHODS.map(m => <option key={m.code} value={m.code}>{m.label}</option>)}
+            </select>
+            <input type="number" className="ac-form-input" step="1" min="1" placeholder="Montant"
+              value={s.amount ?? ''} onChange={e => setSplit(i, { amount: Number(e.target.value) })} />
+            <input type="text" className="ac-form-input" maxLength={64} placeholder="N° pièce (opt.)"
+              value={s.num_payment || ''} onChange={e => setSplit(i, { num_payment: e.target.value })} />
+            {splits.length > 1 && (
+              <button type="button" className="ac-mini-btn danger" title="Retirer" onClick={() => removeSplit(i)}><FiX /></button>
+            )}
+          </div>
+          {/* Chèque : Dolibarr exige un émetteur. Vide = nom du client de la facture. */}
+          {s.method === 'CHQ' && (
+            <div className="ac-split-row" style={{ marginTop: 4 }}>
+              <input type="text" className="ac-form-input" maxLength={100} placeholder="Émetteur du chèque (déf. : le client)"
+                value={s.chq_emetteur || ''} onChange={e => setSplit(i, { chq_emetteur: e.target.value })} />
+              <input type="text" className="ac-form-input" maxLength={100} placeholder="Banque émettrice (opt.)"
+                value={s.chq_banque || ''} onChange={e => setSplit(i, { chq_banque: e.target.value })} />
+            </div>
           )}
         </div>
       ))}

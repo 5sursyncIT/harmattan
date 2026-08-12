@@ -3633,6 +3633,12 @@ app.use((req, res, next) => {
 
 if (IS_PROD) {
   const distPath = join(__dirname, '..', 'dist');
+  // La racine est servie explicitement, AVANT express.static : sinon un client
+  // envoyant un « Range » hors limites reçoit 416, donc une page blanche.
+  // Une page HTML se sert entière — les assets, eux, gardent le support Range.
+  app.get('/', (req, res) =>
+    res.sendFile(join(distPath, 'index.html'), { acceptRanges: false })
+  );
   app.use(express.static(distPath, {
     setHeaders: (res, filePath) => {
       // index.html ne doit jamais être caché : sinon les anciens hash d'assets
@@ -3661,7 +3667,9 @@ if (IS_PROD) {
     try {
       html = readFileSync(join(distPath, 'index.html'), 'utf-8');
     } catch {
-      return res.sendFile(join(distPath, 'index.html'));
+      // acceptRanges:false — un client envoyant un « Range » hors limites
+      // recevait 416, donc une page blanche. Une page HTML se sert entière.
+      return res.sendFile(join(distPath, 'index.html'), { acceptRanges: false });
     }
     const desc = ogEscape(String(description || '').replace(/\s+/g, ' ').trim().slice(0, 280));
     const tags = [
@@ -3745,7 +3753,7 @@ if (IS_PROD) {
     if (req.path.startsWith('/assets/') || /\.(js|mjs|css|map|json|woff2?|ttf|png|jpe?g|gif|svg|webp|ico)$/i.test(req.path)) {
       return res.status(404).type('text/plain').send('Not found');
     }
-    res.sendFile(join(distPath, 'index.html'));
+    res.sendFile(join(distPath, 'index.html'), { acceptRanges: false });
   });
 }
 
@@ -3761,9 +3769,13 @@ function getPaymentModeId(method) {
 // Monté après toutes les routes : capture les erreurs non gérées
 // et évite de divulguer la stack au client.
 app.use((err, req, res, next) => {
-  console.error('[ERR]', err.message);
+  const status = err.status || err.statusCode || 500;
+  // Seules les erreurs serveur sont journalisées : le bruit client (Range hors
+  // limites, requête malformée) noyait les vraies pannes — 286 lignes par jour
+  // pour le seul « Range Not Satisfiable ».
+  if (status >= 500) console.error('[ERR]', err.message);
   if (res.headersSent) return next(err);
-  res.status(err.status || 500).json({ error: 'Erreur serveur' });
+  res.status(status).json({ error: 'Erreur serveur' });
 });
 
 // ─── START ──────────────────────────────────────────────────
@@ -3785,7 +3797,11 @@ app.listen(PORT, process.env.HOST || '127.0.0.1', async () => {
   await migrateLivreDuMois();
 
   // ─── Product Change Polling (complements webhook for REST API changes) ───
-  let lastPollTimestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  // Curseur gardé sous forme d'objet Date : mysql2 le sérialise en heure locale,
+  // le même référentiel que llx_product.tms. Le convertir en UTC (toISOString)
+  // reculait le curseur de 2 h à chaque cycle — la même fenêtre était donc
+  // redétectée indéfiniment, vidant les caches produits toutes les 30 s.
+  let lastPollTimestamp = new Date();
 
   async function pollProductChanges() {
     try {
@@ -3822,9 +3838,9 @@ app.listen(PORT, process.env.HOST || '127.0.0.1', async () => {
         console.log(`[POLL] ${rows.length} produit(s) modifié(s) détecté(s), ${cleared} caches invalidés`);
 
         // Update timestamp to latest tms
-        lastPollTimestamp = rows[0].tms instanceof Date
-          ? rows[0].tms.toISOString().replace('T', ' ').slice(0, 19)
-          : String(rows[0].tms);
+        // rows[0] = le plus récent (ORDER BY tms DESC). On garde la valeur telle
+        // que MySQL l'a rendue — objet Date ou chaîne — sans repasser par UTC.
+        lastPollTimestamp = rows[0].tms;
       }
     } catch (err) {
       console.error('[POLL] Error:', err.message);
