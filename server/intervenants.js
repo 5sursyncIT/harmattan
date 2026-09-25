@@ -79,3 +79,40 @@ export function seedIntervenants(db) {
   });
   tx();
 }
+
+// Rôle d'un compte `admin_users` → métier du carnet. Certains intervenants
+// possèdent ENCORE un compte connectable (correcteurs historiques) : le compte
+// et la fiche du carnet désignent alors la même personne, avec deux identifiants
+// différents.
+const ROLE_TO_METIER = {
+  evaluateur: 'evaluateur',
+  correcteur: 'correcteur',
+  infographiste: 'infographiste',
+  imprimeur: 'imprimeur',
+};
+
+/**
+ * Pont d'identité compte ↔ carnet : fiches du carnet correspondant au compte
+ * connecté, appariées par (email, métier).
+ *
+ * Indispensable depuis que l'affectation écrit `assigned_*_contact_id` (id du
+ * carnet) alors que les écrans métier filtraient sur `assigned_*_id` (id du
+ * compte) : un correcteur titulaire d'un compte voyait son espace VIDE et son
+ * badge à zéro alors qu'il était bien affecté (aucune notification in-app, seul
+ * l'e-mail partait). On renvoie aussi les fiches désactivées : un manuscrit peut
+ * référencer une fiche archivée (doublon désactivé), son dossier doit rester
+ * visible par la personne concernée.
+ *
+ * @returns {number[]} ids d'intervenants (vide si le rôle n'est pas un métier
+ *                     du carnet, si le compte n'a pas d'email, ou sans appariement)
+ */
+export function intervenantIdsForAdmin(db, admin) {
+  const metier = ROLE_TO_METIER[admin?.role];
+  const email = String(admin?.email || '').trim();
+  if (!metier || !email) return [];
+  try {
+    return db.prepare(
+      'SELECT id FROM intervenants WHERE metier = ? AND LOWER(email) = LOWER(?)'
+    ).all(metier, email).map((r) => r.id);
+  } catch (e) { void e; return []; }
+}

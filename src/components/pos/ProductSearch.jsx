@@ -52,10 +52,13 @@ export default function ProductSearch() {
       const res = await posLookupBarcode(code);
       const product = res.data;
       addItem(product);
-      // Info discrète : stock restant après ajout au panier
+      // Info discrète : stock restant après ajout au panier. On parle bien du
+      // RAYON (le dépôt que la caisse décrémente) — le back-office, lui, affiche
+      // le total tous dépôts, d'où l'écart apparent entre les deux écrans.
       const inCart = usePosCartStore.getState().items.find((i) => i.product_id === product.id)?.qty || 0;
       const remaining = Math.max(0, (Number(product.stock_reel) || 0) - inCart);
-      toast(`${product.label} · ${remaining} en stock`, {
+      const reserve = Math.max(0, (Number(product.stock_total) || 0) - (Number(product.stock_reel) || 0));
+      toast(`${product.label} · ${remaining} en rayon${reserve > 0 ? ` (+${reserve} en réserve)` : ''}`, {
         icon: '📚',
         duration: 2000,
         style: {
@@ -158,8 +161,13 @@ export default function ProductSearch() {
                   {parseInt(p.price_ttc).toLocaleString('fr-FR')} F
                 </span>
                 <span className={`pos-search-result-stock ${p.stock_reel > 0 ? 'in' : 'out'}`}>
-                  {p.stock_reel > 0 ? `${p.stock_reel} en stock` : 'Rupture'}
+                  {p.stock_reel > 0 ? `${p.stock_reel} en rayon` : 'Rupture rayon'}
                 </span>
+                {Number(p.stock_total || 0) - Number(p.stock_reel || 0) > 0 && (
+                  <span className="pos-search-result-reserve" title="Exemplaires en réserve : à descendre en rayon avant de vendre">
+                    +{Number(p.stock_total) - Number(p.stock_reel)} en réserve
+                  </span>
+                )}
               </div>
             </button>
           ))}

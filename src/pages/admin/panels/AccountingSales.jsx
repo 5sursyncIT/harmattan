@@ -4,8 +4,6 @@ import { FiArrowLeft, FiDownload, FiFileText } from 'react-icons/fi';
 import { getSalesJournal, exportAccounting } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
-import DolibarrLink from '../../../components/admin/DolibarrLink';
-import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import './Accounting.css';
 
@@ -62,9 +60,8 @@ export default function AccountingSales() {
           </h3>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <DolibarrLink href={dolibarrUrls.sellsJournal()} title="Journal des ventes Dolibarr (écritures)">Journal ventes Dolibarr</DolibarrLink>
-          <DolibarrLink href={dolibarrUrls.invoicesList()} title="Liste des factures Dolibarr">Factures</DolibarrLink>
-          <DolibarrLink href={dolibarrUrls.creditNotesList()} variant="ghost" title="Liste des avoirs (notes de crédit)">Avoirs</DolibarrLink>
+          <Link className="btn btn-outline btn-sm" to="/admin/accounting/entries" title="Écritures comptables (transfert en comptabilité)">Écritures</Link>
+          <Link className="btn btn-outline btn-sm" to="/admin/invoices" title="Liste des factures (les avoirs y sont marqués AVOIR)">Factures</Link>
           <button onClick={handleExport} disabled={exporting} className="btn btn-outline">
             <FiDownload size={14} /> {exporting ? 'Export...' : 'Export CSV'}
           </button>
@@ -134,13 +131,11 @@ export default function AccountingSales() {
                   <tr key={inv.id}>
                     <td className="ac-date">{fmtDate(inv.date)}</td>
                     <td className="ac-ref">
-                      <a
-                        href={dolibarrUrls.invoice(inv.id)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title="Ouvrir la facture dans Dolibarr"
+                      <Link
+                        to={`/admin/invoices?invoice=${inv.id}`}
+                        title="Ouvrir le détail de la facture"
                         style={{ color: '#10531a', textDecoration: 'none' }}
-                      >{inv.ref}</a>
+                      >{inv.ref}</Link>
                     </td>
                     <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.customer || '—'}</td>
                     <td style={{ fontSize: '0.78rem', color: '#64748b' }}>{inv.channel_label}</td>

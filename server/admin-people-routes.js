@@ -15,6 +15,21 @@ import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULI
 import { ensureAuthorTier } from './author-tier.js';
 import { buildSocieteReportPdf } from './societe-report.js';
 import { computeRoyaltyBreakdown } from './royalties.js';
+import { ROLE_ALLOWED_PATHS, FULL_ACCESS_ROLES } from './roles-config.js';
+
+// Le compte du tiers (factures, arriérés, règlements) n'est joint à la fiche
+// auteur que pour les rôles qui ont déjà accès aux fiches tiers. L'éditorial
+// (editor) voit les auteurs mais pas leur situation financière : on s'aligne
+// sur la RBAC de /api/admin/societes plutôt que de figer une liste de rôles.
+function canReadTierAccount(role) {
+  const r = role || 'admin';
+  if (FULL_ACCESS_ROLES.includes(r)) return true;
+  return (ROLE_ALLOWED_PATHS[r] || []).some((rule) => {
+    const re = rule instanceof RegExp ? rule : rule.re;
+    const methods = rule instanceof RegExp ? null : rule.methods;
+    return re.test('/api/admin/societes/1') && (!methods || methods.includes('GET'));
+  });
+}
 
 // Convertit un buffer ODT en PDF via LibreOffice headless. Le modèle de devis
 // (module custom devislibrairie) génère de l'ODT, pas du PDF — sans conversion,
@@ -329,7 +344,7 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     }
   });
 
-  router.get('/authors/:id', auth, (req, res) => {
+  router.get('/authors/:id', auth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const author = db.prepare(
@@ -353,7 +368,82 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
          FROM manuscripts WHERE author_id = ?`
       ).get(id);
 
-      res.json({ author, manuscripts, totals });
+      // ── Compte du tiers lié (factures, arriérés, règlements, contrats) ──
+      // Ces données vivent dans Dolibarr (backend). Elles sont exposées ici pour
+      // que la fiche auteur soit consultable NATIVEMENT : aucun lien vers l'UI
+      // Dolibarr n'est proposé (elle n'est pas accessible depuis le site).
+      // Panne Dolibarr = profil quand même servi, avec account.error.
+      let account = null;
+      if (author.dolibarr_thirdparty_id && dolibarrPool) {
+        const tierId = author.dolibarr_thirdparty_id;
+        if (!canReadTierAccount(req.admin?.role)) {
+          account = { tier_id: tierId, restricted: true };
+        } else {
+        try {
+          const [[societe]] = await dolibarrPool.query(
+            `SELECT rowid AS id, nom, name_alias, code_client, code_fournisseur, client, fournisseur,
+                    email, phone, town, status, datec AS created_at
+             FROM llx_societe WHERE rowid = ?`, [tierId]
+          );
+          if (!societe) {
+            account = { tier_id: tierId, missing: true };
+          } else {
+            // Avoirs (type=2) exclus du « payé » : leur règlement est une
+            // restitution, pas un encaissement (même règle que /societes/:id).
+            const [[invoiceTotals]] = await dolibarrPool.query(
+              // « Facturé » = factures vivantes seulement (validées + payées) :
+              // brouillons (0) et abandonnées (3) fausseraient l'équation
+              // facturé − payé = arriérés.
+              `SELECT COUNT(*) AS count,
+                      COALESCE(SUM(CASE WHEN fk_statut IN (1,2) THEN total_ttc ELSE 0 END), 0) AS total_ttc,
+                      COALESCE(SUM(CASE WHEN type <> 2 THEN paid_amount ELSE 0 END), 0) AS total_paid,
+                      COALESCE(SUM(CASE WHEN fk_statut = 1 AND type <> 2
+                                        THEN GREATEST(total_ttc - paid_amount, 0) ELSE 0 END), 0) AS total_unpaid,
+                      COALESCE(SUM(CASE WHEN fk_statut = 1 AND type <> 2
+                                        AND GREATEST(total_ttc - paid_amount, 0) > 0 THEN 1 ELSE 0 END), 0) AS unpaid_count,
+                      COALESCE(SUM(CASE WHEN fk_statut = 0 THEN 1 ELSE 0 END), 0) AS draft_count,
+                      COALESCE(SUM(CASE WHEN fk_statut = 3 THEN 1 ELSE 0 END), 0) AS abandoned_count
+               FROM (
+                 SELECT f.total_ttc, f.fk_statut, f.type,
+                        COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+                 FROM llx_facture f WHERE f.fk_soc = ?
+               ) t`, [tierId]
+            );
+            const [invoices] = await dolibarrPool.query(
+              `SELECT f.rowid AS id, f.ref, f.datef AS date, f.total_ttc, f.paye, f.fk_statut, f.type,
+                      COALESCE((SELECT SUM(pf.amount) FROM llx_paiement_facture pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount
+               FROM llx_facture f WHERE f.fk_soc = ? ORDER BY f.datef DESC, f.rowid DESC LIMIT 25`, [tierId]
+            );
+            const [payments] = await dolibarrPool.query(
+              `SELECT p.rowid AS id, p.datep AS date, pf.amount, f.ref AS invoice_ref, f.rowid AS invoice_id,
+                      cp.code AS method_code
+               FROM llx_paiement_facture pf
+               JOIN llx_paiement p ON p.rowid = pf.fk_paiement
+               JOIN llx_facture f ON f.rowid = pf.fk_facture
+               LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+               WHERE f.fk_soc = ? ORDER BY p.datep DESC, p.rowid DESC LIMIT 15`, [tierId]
+            );
+            const [contracts] = await dolibarrPool.query(
+              `SELECT c.rowid AS id, c.ref, c.statut, c.date_contrat AS date,
+                      ce.book_title, ce.book_isbn, ce.contract_type
+               FROM llx_contrat c
+               LEFT JOIN llx_contrat_extrafields ce ON ce.fk_object = c.rowid
+               WHERE c.fk_soc = ? ORDER BY c.rowid DESC LIMIT 25`, [tierId]
+            );
+            const [quotes] = await dolibarrPool.query(
+              `SELECT rowid AS id, ref, datep AS date, total_ttc, fk_statut
+               FROM llx_propal WHERE fk_soc = ? ORDER BY rowid DESC LIMIT 25`, [tierId]
+            );
+            account = { tier_id: tierId, societe, invoiceTotals, invoices, payments, contracts, quotes };
+          }
+        } catch (e) {
+          console.error('Author account (tiers) error:', e.message);
+          account = { tier_id: tierId, error: 'Compte tiers indisponible' };
+        }
+        }
+      }
+
+      res.json({ author, manuscripts, totals, account });
     } catch (err) {
       console.error('Author detail error:', err.message);
       res.status(500).json({ error: 'Erreur chargement auteur' });

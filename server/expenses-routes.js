@@ -171,8 +171,10 @@ export function writeExpenseAudit(db, { expense_id, ref, action, reason, actor, 
 export async function notifyAdminsExpense(transporter, db, dto, siteUrl) {
   try {
     if (!transporter) return;
+    // Le comptable est destinataire au même titre que les admins : une sortie de
+    // caisse est d'abord son sujet. Il en était exclu — donc aveugle au module.
     const admins = db.prepare(
-      "SELECT email FROM admin_users WHERE is_active=1 AND role IN ('super_admin','admin') AND email IS NOT NULL AND email != ''"
+      "SELECT email FROM admin_users WHERE is_active=1 AND role IN ('super_admin','admin','comptable') AND email IS NOT NULL AND email != ''"
     ).all();
     const to = admins.map(a => a.email).filter(Boolean);
     if (to.length === 0) return;

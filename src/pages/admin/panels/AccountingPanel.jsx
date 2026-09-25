@@ -4,8 +4,6 @@ import { FiDollarSign, FiTrendingUp, FiAlertCircle, FiBriefcase, FiUsers, FiBook
 import { getAccountingDashboard } from '../../../api/accounting';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
-import DolibarrLink from '../../../components/admin/DolibarrLink';
-import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import './Accounting.css';
 
@@ -66,9 +64,9 @@ export default function AccountingPanel() {
           <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
             Période : {fmtDate(data.period?.from)} → {fmtDate(data.period?.to)}
           </span>
-          <DolibarrLink href={dolibarrUrls.generalLedger()} title="Grand Livre comptable">Grand Livre</DolibarrLink>
-          <DolibarrLink href={dolibarrUrls.balance()} title="Balance comptable">Balance</DolibarrLink>
-          <DolibarrLink href={dolibarrUrls.vatList()} title="Déclarations TVA">TVA</DolibarrLink>
+          <Link className="btn btn-outline btn-sm" to="/admin/accounting/ledger" title="Grand Livre comptable">Grand Livre</Link>
+          <Link className="btn btn-outline btn-sm" to="/admin/accounting/balance" title="Balance comptable">Balance</Link>
+          <Link className="btn btn-outline btn-sm" to="/admin/accounting/vat" title="Déclarations TVA">TVA</Link>
         </div>
       </div>
 

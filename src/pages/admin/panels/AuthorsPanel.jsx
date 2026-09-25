@@ -1,12 +1,14 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Link } from 'react-router-dom';
-import { FiSearch, FiRefreshCw, FiMail, FiEye, FiX, FiKey, FiCheckCircle, FiExternalLink, FiFileText, FiEdit2, FiDollarSign, FiGlobe, FiUpload } from 'react-icons/fi';
+import { Link, useSearchParams } from 'react-router-dom';
+import { FiSearch, FiRefreshCw, FiMail, FiEye, FiX, FiKey, FiCheckCircle, FiExternalLink, FiFileText, FiEdit2, FiDollarSign, FiGlobe, FiUpload, FiCreditCard, FiClipboard, FiBookOpen, FiUser } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import {
   getAdminAuthors, getAdminAuthor, resetAuthorPassword,
   updateAdminAuthor, uploadAuthorPhoto, notifyAuthorRoyalties,
 } from '../../../api/admin';
 import { safeHttpUrl } from '../../../utils/safeUrl';
+import PdfViewerModal from '../../../components/admin/PdfViewerModal';
+import { CONTRACT_STATUS_LABELS } from '../../../utils/contractTypes';
 
 const STAGE_LABELS = {
   submitted: 'Soumis', in_evaluation: 'En évaluation',
@@ -31,9 +33,278 @@ const STAGE_COLORS = {
   in_communication: '#0b4f6c', published: '#10531a',
 };
 
+const INVOICE_STATUS = {
+  0: { label: 'Brouillon', color: '#6b7280' },
+  1: { label: 'Impayée', color: '#b91c1c' },
+  2: { label: 'Payée', color: '#10531a' },
+  3: { label: 'Abandonnée', color: '#9ca3af' },
+};
+const PROPAL_STATUS = {
+  0: { label: 'Brouillon', color: '#6b7280' },
+  1: { label: 'Validé', color: '#0284c7' },
+  2: { label: 'Signé', color: '#10531a' },
+  3: { label: 'Non signé', color: '#b91c1c' },
+  4: { label: 'Facturé', color: '#7c3aed' },
+};
+const CONTRACT_STATUS_COLORS = { 0: '#6b7280', 1: '#10531a', 2: '#0891b2' };
+const PAYMENT_METHODS = {
+  LIQ: 'Espèces', CB: 'Carte', CHQ: 'Chèque', VIR: 'Virement',
+  WAVE: 'Wave', OM: 'Orange Money', PRE: 'Prélèvement', TIP: 'TIP',
+};
+
 function formatDate(ts) {
   if (!ts) return '—';
   return new Date(ts).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function formatMoney(n) {
+  if (n === null || n === undefined) return '—';
+  return new Intl.NumberFormat('fr-FR').format(Math.round(Number(n) || 0)) + ' XOF';
+}
+
+function StatusBadge({ status, map }) {
+  const meta = map[status] || { label: status ?? '—', color: '#888' };
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 8px', borderRadius: 12,
+      background: meta.color + '22', color: meta.color, fontSize: 12, fontWeight: 600,
+    }}>{meta.label}</span>
+  );
+}
+
+function KpiChip({ label, value, tone = 'neutral' }) {
+  const tones = {
+    neutral: { bg: '#f3f4f6', fg: '#374151' },
+    good: { bg: '#10531a18', fg: '#10531a' },
+    bad: { bg: '#b91c1c18', fg: '#b91c1c' },
+  };
+  const t = tones[tone] || tones.neutral;
+  return (
+    <span style={{ background: t.bg, color: t.fg, padding: '4px 12px', borderRadius: 8, fontSize: 13 }}>
+      {label} : <strong>{value}</strong>
+    </span>
+  );
+}
+
+/**
+ * Compte du tiers lié : factures, arriérés, règlements, contrats, devis.
+ * Tout est rendu nativement — l'UI Dolibarr n'est pas accessible depuis le site,
+ * la fiche auteur doit donc se suffire à elle-même.
+ */
+function AuthorAccountSection({ account, tierId, onPdf }) {
+  const [tab, setTab] = useState('invoices');
+
+  if (!account) {
+    return (
+      <section className="admin-modal-section">
+        <h4><FiCreditCard /> Compte & transactions</h4>
+        <p style={{ color: tierId ? '#b91c1c' : '#6b7280', margin: 0 }}>
+          {tierId
+            ? `Fiche tiers #${tierId} rattachée, mais son compte n'a pas pu être chargé (service comptable injoignable).`
+            : `Aucune fiche tiers rattachée : cet auteur n'a ni facture, ni règlement, ni contrat enregistré.
+               La fiche tiers est créée automatiquement dès la première relation réelle (manuscrit, contrat, devis).`}
+        </p>
+      </section>
+    );
+  }
+  if (account.restricted) {
+    return (
+      <section className="admin-modal-section">
+        <h4><FiCreditCard /> Compte & transactions</h4>
+        <p style={{ color: '#6b7280', margin: 0 }}>
+          Cet auteur a un compte tiers, mais sa situation financière (factures, arriérés, règlements)
+          n'est pas accessible avec votre rôle.
+        </p>
+      </section>
+    );
+  }
+  if (account.error || account.missing) {
+    return (
+      <section className="admin-modal-section">
+        <h4><FiCreditCard /> Compte & transactions</h4>
+        <p style={{ color: '#b91c1c', margin: 0 }}>
+          {account.missing
+            ? `La fiche tiers #${account.tier_id} référencée n'existe plus (supprimée ou fusionnée). Le rattachement est à corriger.`
+            : `${account.error} — réessayez dans un instant.`}
+        </p>
+      </section>
+    );
+  }
+
+  const { societe, invoiceTotals: t, invoices = [], payments = [], contracts = [], quotes = [] } = account;
+  const tabs = [
+    { id: 'invoices', label: 'Factures', icon: <FiFileText />, count: t?.count || 0 },
+    { id: 'payments', label: 'Règlements', icon: <FiDollarSign />, count: payments.length },
+    { id: 'contracts', label: 'Contrats', icon: <FiBookOpen />, count: contracts.length },
+    { id: 'quotes', label: 'Devis', icon: <FiClipboard />, count: quotes.length },
+  ];
+
+  return (
+    <section className="admin-modal-section">
+      <h4>
+        <FiCreditCard /> Compte & transactions
+        <span className="admin-modal-section-total">
+          Tiers #{societe.id}{societe.code_client ? ` · ${societe.code_client}` : ''}
+          {societe.status === 0 ? ' · ARCHIVÉ' : ''}
+        </span>
+      </h4>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+        <KpiChip label="Facturé" value={formatMoney(t?.total_ttc)} />
+        <KpiChip label="Réglé" value={formatMoney(t?.total_paid)} tone="good" />
+        {/* MySQL renvoie les SUM(...) en chaînes : « '0' » est truthy, d'où les Number(). */}
+        <KpiChip
+          label="Arriérés"
+          value={`${formatMoney(t?.total_unpaid)}${Number(t?.unpaid_count) > 0 ? ` (${t.unpaid_count} facture${Number(t.unpaid_count) > 1 ? 's' : ''})` : ''}`}
+          tone={Number(t?.total_unpaid) > 0 ? 'bad' : 'good'}
+        />
+        {Number(t?.draft_count) > 0 && <KpiChip label="Brouillons" value={t.draft_count} />}
+        {Number(t?.abandoned_count) > 0 && <KpiChip label="Abandonnées" value={t.abandoned_count} />}
+      </div>
+
+      <div style={{ display: 'flex', borderBottom: '1px solid #e5e7eb', overflowX: 'auto', marginBottom: 12 }}>
+        {tabs.map((tb) => (
+          <button
+            key={tb.id}
+            type="button"
+            onClick={() => setTab(tb.id)}
+            style={{
+              padding: '8px 14px', border: 'none', background: 'none',
+              borderBottom: tab === tb.id ? '2px solid #10531a' : '2px solid transparent',
+              color: tab === tb.id ? '#10531a' : '#6b7280',
+              fontWeight: tab === tb.id ? 600 : 500,
+              cursor: 'pointer', whiteSpace: 'nowrap',
+              display: 'flex', alignItems: 'center', gap: 6, fontSize: 13,
+            }}
+          >
+            {tb.icon} {tb.label}
+            {tb.count > 0 && (
+              <span style={{
+                background: tab === tb.id ? '#10531a' : '#e5e7eb',
+                color: tab === tb.id ? '#fff' : '#374151',
+                padding: '1px 8px', borderRadius: 10, fontSize: 11,
+              }}>{tb.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'invoices' && (
+        invoices.length ? (
+          <>
+            <table className="admin-table">
+              <thead><tr><th>Réf.</th><th>Date</th><th>Montant</th><th>Reste dû</th><th>Statut</th><th></th></tr></thead>
+              <tbody>
+                {invoices.map((inv) => {
+                  const due = inv.fk_statut === 1 && inv.type !== 2
+                    ? Math.max(Number(inv.total_ttc) - Number(inv.paid_amount), 0) : 0;
+                  return (
+                    <tr key={inv.id}>
+                      <td>
+                        <Link to={`/admin/invoices?invoice=${inv.id}`} style={{ color: '#10531a', fontWeight: 700 }}
+                          title="Ouvrir le détail et les actions de la facture">
+                          {inv.ref}
+                        </Link>
+                        {inv.type === 2 && <span style={{ marginLeft: 6, fontSize: 11, color: '#7c3aed' }}>avoir</span>}
+                      </td>
+                      <td>{formatDate(inv.date)}</td>
+                      <td>{formatMoney(inv.total_ttc)}</td>
+                      <td style={{ color: due > 0 ? '#b91c1c' : '#9ca3af', fontWeight: due > 0 ? 700 : 400 }}>
+                        {due > 0 ? formatMoney(due) : '—'}
+                      </td>
+                      <td><StatusBadge status={inv.fk_statut} map={INVOICE_STATUS} /></td>
+                      <td>
+                        <button className="btn-ghost" title="Voir le PDF"
+                          onClick={() => onPdf({ url: `/api/admin/invoices/${inv.id}/pdf`, title: `Facture ${inv.ref}` })}>
+                          <FiEye />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {t?.count > invoices.length && (
+              <p style={{ color: '#6b7280', fontSize: 12, margin: '8px 0 0' }}>
+                {invoices.length} facture(s) les plus récentes sur {t.count} —{' '}
+                <Link to={`/admin/tiers/${societe.id}`} style={{ color: '#10531a' }}>voir tout le compte</Link>.
+              </p>
+            )}
+          </>
+        ) : <p style={{ color: '#6b7280', margin: 0 }}>Aucune facture.</p>
+      )}
+
+      {tab === 'payments' && (
+        payments.length ? (
+          <table className="admin-table">
+            <thead><tr><th>Date</th><th>Montant</th><th>Moyen</th><th>Facture</th></tr></thead>
+            <tbody>
+              {payments.map((p, i) => (
+                <tr key={`${p.id}-${p.invoice_id}-${i}`}>
+                  <td>{formatDate(p.date)}</td>
+                  <td style={{ fontWeight: 700 }}>{formatMoney(p.amount)}</td>
+                  <td>{PAYMENT_METHODS[p.method_code] || p.method_code || '—'}</td>
+                  <td>
+                    <Link to={`/admin/invoices?invoice=${p.invoice_id}`} style={{ color: '#10531a' }}>
+                      {p.invoice_ref}
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p style={{ color: '#6b7280', margin: 0 }}>Aucun règlement enregistré.</p>
+      )}
+
+      {tab === 'contracts' && (
+        contracts.length ? (
+          <table className="admin-table">
+            <thead><tr><th>Réf.</th><th>Ouvrage</th><th>Date</th><th>Statut</th><th></th></tr></thead>
+            <tbody>
+              {contracts.map((c) => (
+                <tr key={c.id}>
+                  <td style={{ fontWeight: 700 }}>{c.ref}</td>
+                  <td>{c.book_title || '—'}</td>
+                  <td>{formatDate(c.date)}</td>
+                  <td>
+                    <StatusBadge
+                      status={c.statut}
+                      map={Object.fromEntries(Object.entries(CONTRACT_STATUS_LABELS).map(
+                        ([k, label]) => [k, { label, color: CONTRACT_STATUS_COLORS[k] || '#6b7280' }]
+                      ))}
+                    />
+                  </td>
+                  <td>
+                    <Link to={`/admin/contracts/${c.id}`} className="btn-ghost" title="Ouvrir le contrat">
+                      <FiExternalLink />
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p style={{ color: '#6b7280', margin: 0 }}>Aucun contrat.</p>
+      )}
+
+      {tab === 'quotes' && (
+        quotes.length ? (
+          <table className="admin-table">
+            <thead><tr><th>Réf.</th><th>Date</th><th>Montant</th><th>Statut</th></tr></thead>
+            <tbody>
+              {quotes.map((q) => (
+                <tr key={q.id}>
+                  <td style={{ fontWeight: 700 }}>{q.ref}</td>
+                  <td>{formatDate(q.date)}</td>
+                  <td>{formatMoney(q.total_ttc)}</td>
+                  <td><StatusBadge status={q.fk_statut} map={PROPAL_STATUS} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p style={{ color: '#6b7280', margin: 0 }}>Aucun devis.</p>
+      )}
+    </section>
+  );
 }
 
 function StageBadge({ stage }) {
@@ -57,6 +328,7 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [pdfView, setPdfView] = useState(null);
   const photoInputRef = useRef(null);
 
   const load = useCallback(() => {
@@ -159,6 +431,7 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
   };
 
   return (
+    <>
     <div className="admin-modal-overlay" onClick={onClose}>
       <div className="admin-modal admin-modal-lg" onClick={(e) => e.stopPropagation()}>
         <div className="admin-modal-header">
@@ -210,6 +483,12 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
                 </table>
               ) : <p style={{ color: '#6b7280', margin: 0 }}>Aucun manuscrit soumis.</p>}
             </section>
+
+            <AuthorAccountSection
+              account={data.account}
+              tierId={data.author.dolibarr_thirdparty_id}
+              onPdf={setPdfView}
+            />
 
             <section className="admin-modal-section">
               <h4>
@@ -341,20 +620,34 @@ function AuthorDetailModal({ id, onClose, onSaved }) {
                 <FiDollarSign /> {notifyLoading ? 'Envoi…' : 'Envoyer récap royalties'}
               </button>
               <button className="btn btn-outline" onClick={handleReset}><FiKey /> Reset MDP</button>
-              {data.author.dolibarr_thirdparty_id && (
-                <a
-                  className="btn btn-outline"
-                  href={`/dolibarr/htdocs/societe/card.php?socid=${data.author.dolibarr_thirdparty_id}`}
-                  target="_blank" rel="noreferrer"
-                >
-                  <FiExternalLink /> Fiche Dolibarr
-                </a>
+              {data.account?.societe && (
+                <>
+                  <Link className="btn btn-outline" to={`/admin/tiers/${data.account.societe.id}`}>
+                    <FiUser /> Fiche tiers
+                  </Link>
+                  {data.account.invoiceTotals?.count > 0 && (
+                    <button
+                      className="btn btn-outline"
+                      onClick={() => setPdfView({
+                        url: `/api/admin/societes/${data.account.societe.id}/report.pdf`,
+                        title: `État de compte — ${data.account.societe.nom}`,
+                      })}
+                    >
+                      <FiFileText /> État de compte
+                    </button>
+                  )}
+                </>
               )}
             </div>
           </div>
         )}
       </div>
     </div>
+    {/* Hors de l'overlay : imbriqué, un clic sur le fond du PDF fermerait aussi la fiche. */}
+    {pdfView && (
+      <PdfViewerModal url={pdfView.url} title={pdfView.title} onClose={() => setPdfView(null)} />
+    )}
+    </>
   );
 }
 
@@ -365,7 +658,22 @@ export default function AuthorsPanel() {
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
-  const [selected, setSelected] = useState(null);
+  // ?author=<id> — ouvre directement la fiche : c'est la cible du bouton
+  // « Fiche auteur » de la fiche manuscrit (l'auteur n'a pas d'URL propre,
+  // sa fiche est une modale de cet écran).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selected, setSelected] = useState(() => {
+    const id = parseInt(searchParams.get('author'), 10);
+    return Number.isInteger(id) ? id : null;
+  });
+  const closeDetail = () => {
+    setSelected(null);
+    if (searchParams.get('author')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('author');
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   const load = useCallback(() => {
     setLoading(true);
@@ -464,7 +772,7 @@ export default function AuthorsPanel() {
         )}
       </div>
 
-      {selected && <AuthorDetailModal id={selected} onClose={() => setSelected(null)} />}
+      {selected && <AuthorDetailModal id={selected} onClose={closeDetail} />}
     </div>
   );
 }

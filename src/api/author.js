@@ -52,8 +52,22 @@ export const authorApi = {
   getManuscript: (id) => api.get(`/author/manuscripts/${id}`),
   downloadFile: (manuscriptId, fileId) =>
     `/api/author/manuscripts/${manuscriptId}/files/${fileId}/download`,
-  validateCorrection: (id, decision, comment) =>
-    api.post(`/author/manuscripts/${id}/validate-correction`, { decision, comment }),
+  // `file` est facultatif : l'auteur peut joindre sa version annotée à son avis.
+  // Sans fichier on reste en JSON (comportement d'origine), avec fichier on
+  // bascule en multipart.
+  validateCorrection: (id, decision, comment, file = null) => {
+    if (!file) {
+      return api.post(`/author/manuscripts/${id}/validate-correction`, { decision, comment });
+    }
+    const fd = new FormData();
+    fd.append('decision', decision);
+    fd.append('comment', comment || '');
+    fd.append('file_attached', '1');
+    fd.append('file', file);
+    return api.post(`/author/manuscripts/${id}/validate-correction`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
   validateBat: (id, decision, comment) =>
     api.post(`/author/manuscripts/${id}/validate-bat`, { decision, comment }),
   submitRework: (id, formData) =>

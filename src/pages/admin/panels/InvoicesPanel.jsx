@@ -4,12 +4,12 @@ import {
   FiFileText, FiDollarSign, FiRefreshCw, FiEdit, FiTrash2, FiUser,
   FiCornerUpLeft, FiX, FiAlertTriangle, FiList, FiCalendar, FiPrinter,
   FiDownload, FiSearch, FiPlusCircle, FiPlus, FiGift, FiLock, FiSlash,
-  FiCheckCircle,
+  FiCheckCircle, FiRotateCcw,
 } from 'react-icons/fi';
 import {
   listInvoices, getInvoice, getInvoicePdf, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
   payInvoice, createCreditNote, setInvoiceToDraft,
-  reassignInvoiceCustomer, deleteInvoiceDraft, abandonInvoice,
+  reassignInvoiceCustomer, deleteInvoiceDraft, abandonInvoice, reopenInvoice,
   validateInvoice, renegotiateInvoice,
   getCustomerCredits, createDeposit, applyCredit, correctPaymentMethod,
 } from '../../../api/invoices';
@@ -409,6 +409,11 @@ function InvoiceActions({ invoice, onAction }) {
     }
     if ((invoice.status === 2 || invoice.paid) && !isCredit) {
       list.push({ key: 'credit-note', label: 'Créer un avoir', icon: <FiRefreshCw />, danger: true });
+    }
+    // Abandonnée à tort (lot de nettoyage trop large, créance finalement soldée) :
+    // la direction peut la remettre dans les créances sous son numéro d'origine.
+    if (invoice.status === 3 && isAdmin) {
+      list.push({ key: 'reopen', label: 'Annuler l\'abandon', icon: <FiRotateCcw /> });
     }
     return list;
   }, [invoice, isAdmin]);
@@ -1306,6 +1311,17 @@ const ACTION_META = {
     successMessage: 'Facture abandonnée, stock restitué',
     run: (inv, reason) => abandonInvoice(inv.id, reason),
   },
+  reopen: {
+    title: 'Annuler l\'abandon',
+    confirmLabel: 'Rouvrir la facture',
+    warning: (inv) => `La facture ${inv.ref} sera remise dans les créances sous son numéro d'origine `
+      + '— aucun nouveau numéro n\'est consommé. Si l\'abandon avait restitué des exemplaires au stock, '
+      + 'ils en ressortent. Une facture que ses règlements couvrent déjà repart directement en « Payée ». '
+      + 'Refusé si la facture a été remplacée par une autre ou déjà passée en comptabilité.',
+    danger: false,
+    successMessage: 'Facture rouverte',
+    run: (inv, reason) => reopenInvoice(inv.id, reason),
+  },
 };
 
 function actionLabel(action) {
@@ -1322,6 +1338,8 @@ function actionLabel(action) {
     deposit_create: 'Acompte créé',
     apply_credit: 'Acompte / avoir imputé',
     correct_payment_method: 'Moyen de paiement corrigé',
+    abandon: 'Facture abandonnée',
+    reopen: 'Abandon annulé (facture rouverte)',
   }[action] || action;
 }
 

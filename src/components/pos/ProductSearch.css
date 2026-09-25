@@ -186,6 +186,17 @@
   color: #c0392b;
 }
 
+/* Réserve = exemplaires présents en dépôt mais pas en rayon : non vendables
+   en l'état à la caisse, mais utiles à signaler au vendeur. */
+.pos-search-result-reserve {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #fff7ed;
+  color: #b45309;
+}
+
 .pos-search-empty {
   padding: 24px;
   text-align: center;

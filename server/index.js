@@ -17,13 +17,12 @@ import crypto from 'crypto';
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import mysql from 'mysql2/promise';
 import sharp from 'sharp';
-import axios from 'axios';
 import { dolibarrApi } from './dolibarr-client.js';
 import { adminApi } from './dolibarr-admin-client.js';
 import { recordEcommerceInvoicePayment } from './dolibarr-payments.js';
 import { fetchOrderDetail } from './order-detail.js';
 import { ensureAuthorTier } from './author-tier.js';
-import { cache, getSyncStatus, syncProducts, syncCategories, syncStock } from './sync.js';
+import { cache, getSyncStatus, syncProducts, syncCategories, syncStock, getProductDocuments, invalidateProductDocuments } from './sync.js';
 import { EXCLUDED_CATEGORIES_SET, excludedCategorySqlList } from '../src/utils/excludedCategories.js';
 import {
   buildPreorderCancellationEmail,
@@ -53,7 +52,9 @@ const dolibarrPool = mysql.createPool({
   password: process.env.MYSQL_PASSWORD,
   database: process.env.MYSQL_DATABASE,
   waitForConnections: true,
-  connectionLimit: 5,
+  // Le dashboard stock émet jusqu'à 7 agrégats en parallèle ; avec 5 connexions
+  // il se sérialisait sur le pool et bloquait le POS pendant ce temps.
+  connectionLimit: 10,
 });
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -799,7 +800,16 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
     const productRef = product.ref || '—';
     console.log(`[WEBHOOK] ${event} — produit ${productRef} (ID: ${productId})`);
 
-    // ── Invalidate relevant caches ──
+    // Répondre IMMÉDIATEMENT : le trigger senharmattansync appelle ce webhook de
+    // façon SYNCHRONE pendant la transaction Dolibarr (validation de facture au
+    // POS déclenche STOCK_MOVEMENT). Tant qu'on n'a pas répondu, Dolibarr attend
+    // (curl, timeout 10 s) → l'encaissement s'allonge d'autant, par article. On
+    // accuse réception tout de suite et on invalide le cache en arrière-plan.
+    res.json({ status: 'accepted', event, product_id: productId });
+
+    // ── Invalidation du cache + journal, hors du chemin de réponse ──
+    setImmediate(() => {
+    try {
     const cleared = [];
 
     // Single product cache
@@ -827,6 +837,8 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
 
     // Image events: clear image caches
     if (event.includes('image')) {
+      invalidateProductDocuments(productId);
+      cleared.push(`docs:produit:${productId}`);
       if (productRef) {
         cache.del(`img:${productRef}`);
         cache.del(`realcover:${productRef}`);
@@ -869,17 +881,19 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
     );
 
     console.log(`[WEBHOOK] Cache invalidé: ${cleared.length} entrées (${cleared.slice(0, 5).join(', ')}${cleared.length > 5 ? '...' : ''})`);
-
-    res.json({
-      status: 'ok',
-      event,
-      product_id: productId,
-      caches_cleared: cleared.length,
+    } catch (bgErr) {
+      // La réponse est déjà partie : on ne peut que journaliser l'échec.
+      console.error('[WEBHOOK] Invalidation async KO:', bgErr.message);
+      try {
+        db.prepare(`INSERT INTO webhook_sync_log (event, product_id, status, detail) VALUES (?, ?, 'error', ?)`).run(
+          event, productId, bgErr.message,
+        );
+      } catch { /* ignore logging errors */ }
+    }
     });
   } catch (err) {
+    // Erreur AVANT l'accusé de réception (validation, parsing).
     console.error('[WEBHOOK] Error:', err);
-
-    // Log the error
     try {
       db.prepare(`INSERT INTO webhook_sync_log (event, product_id, status, detail) VALUES (?, ?, 'error', ?)`).run(
         req.body?.event || 'unknown',
@@ -887,8 +901,7 @@ app.post('/api/webhooks/dolibarr', (req, res) => {
         err.message
       );
     } catch { /* ignore logging errors */ }
-
-    res.status(500).json({ error: 'Internal webhook processing error' });
+    if (!res.headersSent) res.status(500).json({ error: 'Internal webhook processing error' });
   }
 });
 
@@ -2060,6 +2073,12 @@ app.get('/api/search/suggest', async (req, res) => {
   }
 });
 
+// Tri « date de parution » du catalogue. Seules les années plausibles comptent ; une
+// année absente ou aberrante vaut NULL et le livre est relégué en fin de liste.
+const PUBLICATION_YEAR_SORT = 'pe.publication_year';
+const PUBLICATION_YEAR_SQL =
+  'CASE WHEN pe.publication_year BETWEEN 1400 AND YEAR(CURDATE()) + 2 THEN pe.publication_year END';
+
 // Products listing with cache
 app.get('/api/products', async (req, res) => {
   try {
@@ -2078,8 +2097,11 @@ app.get('/api/products', async (req, res) => {
 
     // Use MySQL for advanced search (author, description, price range)
     const hasAdvancedFilters = author || price_min || price_max || in_stock || with_cover || (q && q.length > 1);
+    // Tri par date de parution : l'API Dolibarr ne sait trier que sur llx_product,
+    // or publication_year est un extrafield — on passe donc par MySQL.
+    const isYearSort = sort === PUBLICATION_YEAR_SORT;
 
-    if (hasAdvancedFilters || category) {
+    if (hasAdvancedFilters || category || isYearSort) {
       // Build MySQL query for advanced filtering
       // tosell=1 : exclure les produits masqués par l'admin
       const conditions = ['p.entity = 1', 'p.fk_product_type = 0', 'p.tosell = 1'];
@@ -2135,8 +2157,12 @@ app.get('/api/products', async (req, res) => {
         't.rowid': 'p.rowid', 't.ref': 'p.ref', 't.label': 'p.label',
         't.price': 'p.price', 't.stock_reel': 'p.stock',
       };
-      const sortCol = sortMap[sort] || 'p.rowid';
       const sortDir = order === 'DESC' ? 'DESC' : 'ASC';
+      // Année de parution absente ou non numérique => toujours en fin de liste, quel
+      // que soit le sens du tri ; à année égale, le dernier ajouté au catalogue d'abord.
+      const orderBy = isYearSort
+        ? `pub_year_sort IS NULL, pub_year_sort ${sortDir}, p.rowid DESC`
+        : `${sortMap[sort] || 'p.rowid'} ${sortDir}`;
 
       const joinParts = [
         'FROM llx_product p',
@@ -2158,6 +2184,7 @@ app.get('/api/products', async (req, res) => {
           p.datec AS date_creation, p.tms AS date_modification, p.weight, p.tosell AS status,
           pe.longdescript, pe.auteur, pe.soustitre,
           pe.publication_year, pe.nombre_pages, pe.editeur,
+          ${PUBLICATION_YEAR_SQL} AS pub_year_sort,
           (SELECT c.label FROM llx_categorie c
            INNER JOIN llx_categorie_product cp2 ON cp2.fk_categorie = c.rowid
            WHERE cp2.fk_product = p.rowid
@@ -2165,7 +2192,7 @@ app.get('/api/products', async (req, res) => {
            LIMIT 1) AS genre_category
         ${joinParts.join(' ')}
         WHERE ${conditions.join(' AND ')}
-        ORDER BY ${sortCol} ${sortDir}
+        ORDER BY ${orderBy}
         LIMIT ? OFFSET ?
       `;
       params.push(limitInt, pageInt * limitInt);
@@ -2478,12 +2505,10 @@ app.get('/api/products/:id', async (req, res) => {
     const pid = req.params.id;
 
     // Fetch product, stock, and images in parallel
-    const [prodRes, stockResult, docResult] = await Promise.all([
+    const [prodRes, stockResult, docs] = await Promise.all([
       dolibarrApi.get(`/products/${pid}`),
       dolibarrApi.get(`/products/${pid}/stock`).catch(() => null),
-      dolibarrApi.get('/documents', {
-        params: { modulepart: 'produit', id: parseInt(pid) },
-      }).catch(() => null),
+      getProductDocuments(pid).catch(() => []),
     ]);
 
     const p = prodRes.data;
@@ -2504,7 +2529,7 @@ app.get('/api/products/:id', async (req, res) => {
     }
 
     // Ordre : recto (non-verso, plus récent en 1er) puis verso
-    const rawImgs = (docResult?.data || [])
+    const rawImgs = docs
       .filter((d) => /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover'));
     const isVerso = (n) => /(^|-|_)(verso|back)(-|_|\.)/i.test(n);
     const rectoList = rawImgs.filter((d) => !isVerso(d.name)).sort((a, b) => (b.date || 0) - (a.date || 0));
@@ -2572,11 +2597,7 @@ app.get('/api/image/:productId', async (req, res) => {
     }
 
     // Find product documents
-    const docRes = await dolibarrApi.get('/documents', {
-      params: { modulepart: 'produit', id: parseInt(productId) },
-    });
-
-    const images = (docRes.data || []).filter((d) =>
+    const images = (await getProductDocuments(productId)).filter((d) =>
       /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name)
     );
 
@@ -2748,10 +2769,7 @@ app.get('/api/categories/:id/image', async (req, res) => {
     // Try to find a product with an image
     for (const p of products) {
       try {
-        const docRes = await dolibarrApi.get('/documents', {
-          params: { modulepart: 'produit', id: parseInt(p.id) },
-        });
-        const images = (docRes.data || []).filter((d) =>
+        const images = (await getProductDocuments(p.id)).filter((d) =>
           /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name)
         );
         if (images.length > 0) {
@@ -3636,9 +3654,13 @@ if (IS_PROD) {
   // La racine est servie explicitement, AVANT express.static : sinon un client
   // envoyant un « Range » hors limites reçoit 416, donc une page blanche.
   // Une page HTML se sert entière — les assets, eux, gardent le support Range.
-  app.get('/', (req, res) =>
-    res.sendFile(join(distPath, 'index.html'), { acceptRanges: false })
-  );
+  const sendAppShell = (res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    // acceptRanges:false — un client envoyant un « Range » hors limites recevait
+    // 416, donc une page blanche. Une page HTML se sert entière.
+    return res.sendFile(join(distPath, 'index.html'), { acceptRanges: false });
+  };
+  app.get('/', (req, res) => sendAppShell(res));
   app.use(express.static(distPath, {
     setHeaders: (res, filePath) => {
       // index.html ne doit jamais être caché : sinon les anciens hash d'assets
@@ -3667,9 +3689,7 @@ if (IS_PROD) {
     try {
       html = readFileSync(join(distPath, 'index.html'), 'utf-8');
     } catch {
-      // acceptRanges:false — un client envoyant un « Range » hors limites
-      // recevait 416, donc une page blanche. Une page HTML se sert entière.
-      return res.sendFile(join(distPath, 'index.html'), { acceptRanges: false });
+      return sendAppShell(res);
     }
     const desc = ogEscape(String(description || '').replace(/\s+/g, ' ').trim().slice(0, 280));
     const tags = [
@@ -3696,12 +3716,12 @@ if (IS_PROD) {
       if (!pid) return next();
       let product = cache.get(`product:${pid}`);
       if (!product) {
-        const [prodRes, docResult] = await Promise.all([
+        const [prodRes, docs] = await Promise.all([
           dolibarrApi.get(`/products/${pid}`),
-          dolibarrApi.get('/documents', { params: { modulepart: 'produit', id: pid } }).catch(() => null),
+          getProductDocuments(pid).catch(() => []),
         ]);
         const p = prodRes.data;
-        const imgs = (docResult?.data || []).filter((d) => /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover') && !/(^|-|_)(verso|back)(-|_|\.)/i.test(d.name));
+        const imgs = docs.filter((d) => /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover') && !/(^|-|_)(verso|back)(-|_|\.)/i.test(d.name));
         product = {
           label: p.label,
           description: resolveDescription(p),
@@ -3753,7 +3773,7 @@ if (IS_PROD) {
     if (req.path.startsWith('/assets/') || /\.(js|mjs|css|map|json|woff2?|ttf|png|jpe?g|gif|svg|webp|ico)$/i.test(req.path)) {
       return res.status(404).type('text/plain').send('Not found');
     }
-    res.sendFile(join(distPath, 'index.html'), { acceptRanges: false });
+    sendAppShell(res);
   });
 }
 

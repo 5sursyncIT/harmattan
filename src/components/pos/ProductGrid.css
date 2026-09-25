@@ -74,6 +74,7 @@
 }
 
 .pos-product-badge-out,
+.pos-product-badge-reserve,
 .pos-product-badge-low {
   position: absolute;
   top: 6px;
@@ -89,6 +90,12 @@
 
 .pos-product-badge-out {
   background: #b91c1c;
+  color: #fff;
+}
+
+/* Rien en rayon mais du stock en réserve : ce n'est pas une rupture. */
+.pos-product-badge-reserve {
+  background: #b45309;
   color: #fff;
 }
 

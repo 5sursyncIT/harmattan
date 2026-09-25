@@ -44,6 +44,39 @@ class SimpleCache {
 
 export const cache = new SimpleCache();
 
+// ─── DOCUMENTS PRODUIT (avec cache négatif) ─────────────────
+// Dolibarr répond 404 quand un produit n'a aucun document — c'est le cas de la
+// majorité du catalogue, et chaque appel coûte un bootstrap Dolibarr complet
+// (2 799 requêtes pour rien en 7 jours). On mémorise la réponse, liste vide
+// comprise, pour ne pas la redemander à chaque affichage de fiche.
+const PRODUCT_DOCS_TTL = 3600;
+
+export async function getProductDocuments(productId) {
+  const id = parseInt(productId);
+  if (!id) return [];
+  const key = `docs:produit:${id}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+
+  let docs = [];
+  try {
+    const res = await dolibarrApi.get('/documents', {
+      params: { modulepart: 'produit', id },
+    });
+    docs = Array.isArray(res.data) ? res.data : [];
+  } catch (err) {
+    // 404 = « aucun document », réponse légitime : on la met en cache comme
+    // les autres. Toute autre erreur reste transitoire, on ne la fige pas.
+    if (err.response?.status !== 404) throw err;
+  }
+  cache.set(key, docs, PRODUCT_DOCS_TTL);
+  return docs;
+}
+
+export function invalidateProductDocuments(productId) {
+  cache.del(`docs:produit:${parseInt(productId)}`);
+}
+
 // ─── SYNC STATE ─────────────────────────────────────────────
 
 const syncState = {
@@ -123,14 +156,12 @@ export async function syncProducts() {
         allRefs.push(p.ref);
         // Check if product has images in Dolibarr documents
         try {
-          const docRes = await dolibarrApi.get('/documents', {
-            params: { modulepart: 'produit', id: parseInt(p.id) },
-          });
+          const docs = await getProductDocuments(p.id);
           // Real cover = any image that is NOT default_cover.*
-          const hasRealCover = (docRes.data || []).some((d) =>
+          const hasRealCover = docs.some((d) =>
             /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name) && !d.name.startsWith('default_cover')
           );
-          const hasAnyImage = (docRes.data || []).some((d) =>
+          const hasAnyImage = docs.some((d) =>
             /\.(jpg|jpeg|png|gif|webp)$/i.test(d.name)
           );
           cache.set(`img:${p.ref}`, hasAnyImage, 86400);

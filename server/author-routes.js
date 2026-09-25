@@ -5,7 +5,7 @@ import { mkdirSync, existsSync, renameSync } from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
-import { generateManuscriptRef, transition, STAGE_LABELS, MANUSCRIPT_EVENTS, promoteLatestCorrectionAsAuthorFinal } from './manuscript-workflow.js';
+import { generateManuscriptRef, transition, STAGE_LABELS, promoteLatestCorrectionAsAuthorFinal } from './manuscript-workflow.js';
 import { notifyTransition, sendTransitionEmail, getAuthorPreferences } from './manuscript-emails.js';
 import { addManuscriptVersion } from './manuscript-versions.js';
 import { computeRoyaltyBreakdown } from './royalties.js';
@@ -569,25 +569,22 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
   router.get('/manuscripts/:id', requireAuthorAuth, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ? AND author_id = ?').get(req.params.id, req.author.id);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    const stages = db.prepare('SELECT * FROM manuscript_stages WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
+    // La frise d'historique n'est plus exposée à l'auteur : même filtrées sur
+    // `authorVisible`, les transitions de stage véhiculaient l'acteur interne
+    // (« diallo » / admin) et des notes de pilotage (« Assignation évaluateur
+    // (intervenant #5) », « Contrat Dolibarr #118 créé (harmattan_2024) »).
+    // L'auteur garde son statut courant (`stage_label`), ses évaluations et ses
+    // fichiers. L'historique complet reste consultable côté admin.
     // L'auteur voit uniquement les fichiers qui lui sont destinés
-    const visibleKinds = "('original','correction','author_final','bat_cover')";
+    // `author_review` = le fichier que l'auteur a lui-même joint à sa relecture :
+    // il doit pouvoir le retrouver et le retélécharger.
+    const visibleKinds = "('original','correction','author_final','bat_cover','author_review')";
     const files = db.prepare(`SELECT id, kind, version, file_name, file_size, uploaded_at FROM manuscript_files WHERE manuscript_id = ? AND kind IN ${visibleKinds} ORDER BY uploaded_at ASC`).all(manuscript.id);
     const validations = db.prepare('SELECT * FROM manuscript_validations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     // L'auteur voit le verdict (positive/negative) mais pas les notes internes
     const evaluations = db.prepare('SELECT verdict, recommendation, created_at FROM manuscript_evaluations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     res.json({
       manuscript: { ...manuscript, stage_label: STAGE_LABELS[manuscript.current_stage] || manuscript.current_stage },
-      stages: stages
-        // L'auteur ne voit que les transitions de stage + les évènements qui le concernent
-        // (devis envoyé, contrat transmis) — pas les actions internes (devis généré/supprimé).
-        .filter((s) => !s.event || MANUSCRIPT_EVENTS[s.event]?.authorVisible)
-        .map((s) => ({
-          ...s,
-          stage_label: s.event
-            ? (MANUSCRIPT_EVENTS[s.event]?.label || s.event)
-            : (STAGE_LABELS[s.to_stage] || s.to_stage),
-        })),
       files,
       validations,
       evaluations,
@@ -602,7 +599,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     ).get(req.params.fileId, req.params.id, req.author.id);
     if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
     // L'auteur ne voit que certains kinds
-    if (!['original', 'correction', 'author_final', 'bat_cover'].includes(file.kind)) {
+    if (!['original', 'correction', 'author_final', 'bat_cover', 'author_review'].includes(file.kind)) {
       return res.status(403).json({ error: 'Fichier non accessible' });
     }
     // Dépôt par lien externe (> 20 Mo) : pas de fichier local, on redirige.
@@ -675,32 +672,82 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
   });
 
   // ─── VALIDATIONS AUTEUR ───────────────────────────────────
+  // Relecture des corrections par l'auteur. Il peut JOINDRE un fichier
+  // (facultatif) : sa version annotée / réamendée, que le correcteur retrouve
+  // dans « Documents » du panneau Corrections. Sans fichier, le comportement
+  // est strictement l'ancien.
+  const reviewUpload = createManuscriptMulter('author_review', 20, /\.(pdf|doc|docx|odt|rtf)$/i);
   router.post('/manuscripts/:id/validate-correction', requireAuthorAuth, csrfProtection, (req, res) => {
-    const { decision, comment } = req.body;
-    if (!['approved', 'changes_requested'].includes(decision)) {
-      return res.status(400).json({ error: 'Décision invalide' });
-    }
-    const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ? AND author_id = ?').get(req.params.id, req.author.id);
-    if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (manuscript.current_stage !== 'correction_author_review') {
-      return res.status(400).json({ error: `Validation impossible à ce stade (${manuscript.current_stage})` });
-    }
-    db.prepare(
-      `INSERT INTO manuscript_validations (manuscript_id, kind, decision, comment, author_id)
-       VALUES (?, 'correction', ?, ?, ?)`
-    ).run(manuscript.id, decision, comment || null, req.author.id);
-    const nextStage = decision === 'approved' ? 'in_editorial' : 'in_correction';
-    const actor = { role: 'author', id: req.author.id, label: `${req.author.firstname} ${req.author.lastname}` };
-    if (decision === 'approved') {
-      promoteLatestCorrectionAsAuthorFinal(db, manuscript.id, actor);
-    }
-    const updated = transition(db, manuscript.id, nextStage, actor, { note: `Validation correction : ${decision}${comment ? ' — ' + comment : ''}` });
-    // L'auteur vient de valider lui-même : on ne lui renvoie pas le message
-    // « validation éditoriale » (redondant). Il sera prévenu sur sa demande
-    // uniquement (cf. bouton « Notifier l'auteur » côté admin).
-    notifyTransition(db, transporter, updated, nextStage, actor, siteUrl,
-      decision === 'approved' ? { skipAuthorNotification: true } : {});
-    res.json({ success: true, stage: nextStage });
+    reviewUpload.single('file')(req, res, (uploadErr) => {
+      if (uploadErr) {
+        const msg = uploadErr.code === 'LIMIT_FILE_SIZE'
+          ? 'Fichier trop volumineux (max 20 Mo)'
+          : (uploadErr.message || 'Fichier invalide');
+        return res.status(400).json({ error: msg });
+      }
+      try {
+        const { decision, comment } = req.body;
+        if (!['approved', 'changes_requested'].includes(decision)) {
+          return res.status(400).json({ error: 'Décision invalide' });
+        }
+        // multer écarte silencieusement une extension non autorisée (fileFilter
+        // renvoie false sans erreur) : sans ce contrôle, l'auteur croirait avoir
+        // joint son fichier alors qu'il a été jeté.
+        if (String(req.body?.file_attached || '') === '1' && !req.file) {
+          return res.status(400).json({ error: 'Format de fichier non accepté (PDF, DOC, DOCX, ODT ou RTF)' });
+        }
+        const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ? AND author_id = ?').get(req.params.id, req.author.id);
+        if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
+        if (manuscript.current_stage !== 'correction_author_review') {
+          return res.status(400).json({ error: `Validation impossible à ce stade (${manuscript.current_stage})` });
+        }
+
+        const actor = { role: 'author', id: req.author.id, label: `${req.author.firstname} ${req.author.lastname}` };
+
+        // Le fichier est enregistré AVANT la transition pour que la frise le
+        // montre en amont de la décision qu'il justifie.
+        let attachedVersion = null;
+        if (req.file) {
+          try {
+            ({ version: attachedVersion } = addManuscriptVersion(db, {
+              manuscriptId: manuscript.id,
+              kind: 'author_review',
+              file: req.file,
+              actor,
+              uploadedByRole: 'author',
+              uploadedById: req.author.id,
+              note: comment || null,
+              eventNote: (v) => `Retour de l'auteur v${v} — ${req.file.originalname || req.file.filename}`,
+            }));
+          } catch (e) {
+            if (e.code === 'DUPLICATE_VERSION') {
+              return res.status(409).json({ error: 'Ce fichier est identique à celui que vous avez déjà envoyé.' });
+            }
+            throw e;
+          }
+        }
+
+        db.prepare(
+          `INSERT INTO manuscript_validations (manuscript_id, kind, decision, comment, author_id)
+           VALUES (?, 'correction', ?, ?, ?)`
+        ).run(manuscript.id, decision, comment || null, req.author.id);
+        const nextStage = decision === 'approved' ? 'in_editorial' : 'in_correction';
+        if (decision === 'approved') {
+          promoteLatestCorrectionAsAuthorFinal(db, manuscript.id, actor);
+        }
+        const fileNote = attachedVersion ? ` — fichier joint (v${attachedVersion})` : '';
+        const updated = transition(db, manuscript.id, nextStage, actor, { note: `Validation correction : ${decision}${comment ? ' — ' + comment : ''}${fileNote}` });
+        // L'auteur vient de valider lui-même : on ne lui renvoie pas le message
+        // « validation éditoriale » (redondant). Il sera prévenu sur sa demande
+        // uniquement (cf. bouton « Notifier l'auteur » côté admin).
+        notifyTransition(db, transporter, updated, nextStage, actor, siteUrl,
+          decision === 'approved' ? { skipAuthorNotification: true } : {});
+        res.json({ success: true, stage: nextStage, version: attachedVersion });
+      } catch (e) {
+        console.error('[AUTHOR] validate-correction error:', e.message);
+        res.status(500).json({ error: e.message || 'Erreur lors de la validation' });
+      }
+    });
   });
 
   // ─── NOTIFICATIONS IN-APP (cloche) ──────────────────────────

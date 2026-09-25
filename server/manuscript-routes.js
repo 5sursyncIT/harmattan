@@ -7,7 +7,8 @@ import { notifyTransition, sendAssignmentEmail, sendAuthorRevisionRequestEmail, 
 import { revokeFileTokens } from './manuscript-file-tokens.js';
 import { addManuscriptVersion, getFinalVersion, createDepositToken, getActiveDepositToken, revokeDepositTokens } from './manuscript-versions.js';
 import { createManuscriptMulter } from './author-routes.js';
-import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS } from './intervenants.js';
+import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS, intervenantIdsForAdmin } from './intervenants.js';
+import { listDuplicateGroups, ensureDuplicateSchema, normalizePerson, duplicateDeletionBlockers, deleteDuplicateManuscript } from './manuscript-duplicates.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
@@ -73,26 +74,60 @@ function extPattern(ext) {
 // Libellé lisible d'un type de fichier, pour la frise et les listes.
 function fileKindLabel(kind) {
   if (PRODUCTION_FILE_KINDS[kind]) return PRODUCTION_FILE_KINDS[kind].label;
-  return { correction: 'Document corrigé', original: 'Manuscrit original' }[kind] || kind;
+  return {
+    correction: 'Document corrigé',
+    original: 'Manuscrit original',
+    author_review: "Retour de l'auteur",
+  }[kind] || kind;
 }
 
 function describeManuscript(row) {
   return row ? { ...row, stage_label: STAGE_LABELS[row.current_stage] || row.current_stage } : null;
 }
 
-function roleCanAccessManuscript(admin, manuscript) {
+// Familles d'étapes de la vue globale : 19 étapes dans un menu déroulant ne
+// répondent pas à « où en est le pipeline ? ». Les puces de la liste s'appuient
+// dessus ; le filtre étape par étape reste disponible.
+export const MANUSCRIPT_STAGE_GROUPS = [
+  { value: 'a_traiter',  label: 'À traiter',          stages: ['submitted'] },
+  { value: 'evaluation', label: 'Évaluation',         stages: ['in_evaluation', 'evaluation_rework', 'evaluation_positive'] },
+  { value: 'contrat',    label: 'Contrat & paiement', stages: ['contract_pending', 'contract_signed', 'payment_pending'] },
+  { value: 'production', label: 'Production',         stages: ['in_correction', 'correction_author_review', 'in_editorial', 'editorial_validated', 'cover_design', 'bat_author_review', 'print_preparation', 'printing'] },
+  { value: 'diffusion',  label: 'Diffusion',          stages: ['printed', 'in_communication', 'published'] },
+  { value: 'rejete',     label: 'Rejetés',            stages: ['evaluation_negative'] },
+];
+// Garde-fou : une étape ajoutée au workflow sans être classée resterait
+// invisible dans les familles. On la rattache à « Autres » plutôt que la perdre.
+{
+  const grouped = new Set(MANUSCRIPT_STAGE_GROUPS.flatMap((g) => g.stages));
+  const orphans = MANUSCRIPT_STAGES.filter((s) => !grouped.has(s));
+  if (orphans.length) MANUSCRIPT_STAGE_GROUPS.push({ value: 'autres', label: 'Autres étapes', stages: orphans });
+}
+
+// Colonnes d'affectation d'un métier : l'ancienne (compte `admin_users`) et
+// celle du carnet d'intervenants, alimentée par /assign depuis la bascule
+// « semi-automatique ». Les deux doivent être interrogées : les manuscrits
+// historiques portent la première, les nouveaux la seconde.
+const METIER_ASSIGN_COLUMNS = {
+  evaluateur:   { adminCol: 'assigned_evaluator_id',    contactCol: 'assigned_evaluator_contact_id' },
+  correcteur:   { adminCol: 'assigned_corrector_id',    contactCol: 'assigned_corrector_contact_id' },
+  infographiste:{ adminCol: 'assigned_infographist_id', contactCol: 'assigned_infographist_contact_id' },
+  imprimeur:    { adminCol: 'assigned_printer_id',      contactCol: 'assigned_printer_contact_id' },
+};
+
+function roleCanAccessManuscript(admin, manuscript, db = null) {
   if (!admin || !manuscript) return false;
   if (['super_admin', 'admin'].includes(admin.role)) return true;
   if (admin.role === 'editor') return true;
   if (admin.role === 'production') return true;   // pilote du pipeline éditorial + couvertures
-  const mapping = {
-    evaluateur: 'assigned_evaluator_id',
-    correcteur: 'assigned_corrector_id',
-    infographiste: 'assigned_infographist_id',
-    imprimeur: 'assigned_printer_id',
-  };
-  const col = mapping[admin.role];
-  return col ? manuscript[col] === admin.id : false;
+  const cols = METIER_ASSIGN_COLUMNS[admin.role];
+  if (!cols) return false;
+  if (manuscript[cols.adminCol] === admin.id) return true;
+  // Affectation par le carnet : la fiche d'intervenant et le compte connecté
+  // sont la même personne (appariement par email).
+  const contactId = manuscript[cols.contactCol];
+  if (!db || !contactId) return false;
+  return intervenantIdsForAdmin(db, admin).includes(contactId);
 }
 
 export function createManuscriptRouter({ db, csrfProtection, adminAuth, transporter, siteUrl, hooks = {} }) {
@@ -105,6 +140,8 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     ensureIntervenantsSchema(db);
     seedIntervenants(db);
   } catch (err) { console.warn('[INTERVENANTS] init warning:', err.message); }
+  // Colonnes de marquage des doublons (idempotent, également posé par admin-routes).
+  try { ensureDuplicateSchema(db); } catch (err) { console.warn('[DOUBLONS] init warning:', err.message); }
   const auth = adminAuth;
 
   // Garde-fou : routes carnet/affectation réservées au pilote éditorial.
@@ -115,6 +152,24 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     next();
   };
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  // Clause SQL « mes dossiers » pour un acteur métier connecté. Son compte peut
+  // être désigné par l'ancienne colonne (`assigned_*_id`) OU par la fiche du
+  // carnet (`assigned_*_contact_id`) que /assign alimente désormais. Filtrer sur
+  // la seule colonne compte vidait l'espace du correcteur : il était affecté
+  // (carnet), notifié par email, mais son écran restait « Aucune correction ».
+  const myAssignmentsClause = (admin, alias = 'm') => {
+    const cols = METIER_ASSIGN_COLUMNS[admin.role];
+    if (!cols) return { clause: '1 = 0', params: [] };   // rôle sans dossier propre
+    const parts = [`${alias}.${cols.adminCol} = ?`];
+    const params = [admin.id];
+    const contactIds = intervenantIdsForAdmin(db, admin);
+    if (contactIds.length) {
+      parts.push(`${alias}.${cols.contactCol} IN (${contactIds.map(() => '?').join(',')})`);
+      params.push(...contactIds);
+    }
+    return { clause: `(${parts.join(' OR ')})`, params };
+  };
 
   // ─── CARNET D'INTERVENANTS ───────────────────────────────
   router.get('/intervenants', auth, editorOnly, (req, res) => {
@@ -203,25 +258,428 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     res.json({ success: true, softDeleted: false });
   });
 
-  // ─── LISTE GLOBALE ────────────────────────────────────────
-  router.get('/manuscripts/v2', auth, (req, res) => {
-    const { stage, q } = req.query || {};
-    let sql = `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name, a.email AS author_email
-               FROM manuscripts m JOIN authors a ON a.id = m.author_id WHERE 1=1`;
-    const params = [];
-    if (stage) { sql += ' AND m.current_stage = ?'; params.push(stage); }
-    if (q) {
-      sql += ' AND (m.title LIKE ? OR m.ref LIKE ? OR a.firstname LIKE ? OR a.lastname LIKE ? OR a.email LIKE ?)';
-      const like = `%${q}%`;
-      params.push(like, like, like, like, like);
+  // ─── LISTE GLOBALE : recherche avancée, filtres, tri, pagination ───
+  // La vue globale se limitait à `q` (5 colonnes) + une étape, avec un
+  // LIMIT 200 muet : au-delà, les manuscrits les plus anciens disparaissaient
+  // sans le dire, et aucune question de pilotage courante n'avait de réponse
+  // (« que traîne-t-il en évaluation depuis un mois ? », « lesquels n'ont pas
+  // d'évaluateur ? »). Paramètres acceptés :
+  //   q            recherche multi-mots — chaque mot doit matcher un champ
+  //                (titre, sous-titre, réf, série, genre, ISBN, auteur en
+  //                « Prénom Nom » ou « Nom Prénom », email, téléphone)
+  //   stage        une étape (rétro-compatible)  |  stages : plusieurs (CSV)
+  //   group        famille d'étapes (a_traiter, evaluation, contrat, …)
+  //   genre        genre exact
+  //   intervenant  id du carnet, sur les 4 colonnes *_contact_id
+  //   metier       restreint `intervenant` à un métier
+  //   unassigned   evaluateur|correcteur|imprimeur|any — aucun acteur affecté
+  //   contract     with|without — contrat d'édition rattaché ou non
+  //   series       only|single — tomes d'une série ou ouvrages simples
+  //   date_field   created|updated (défaut created) + date_from / date_to
+  //   stale        entier : jours sans mouvement (>=)
+  //   sort/order   voir MANUSCRIPT_SORTS ; page/limit (défaut 25, max 200)
+  // Réponse : { rows, total, page, pages, limit, stage_counts }
+
+  // Ancienneté dans l'étape COURANTE : une seule et même expression sert la
+  // colonne affichée, le tri et le filtre d'immobilisation — sinon l'écran
+  // trierait sur une grandeur différente de celle qu'il montre. Repli sur
+  // updated_at/created_at pour les manuscrits antérieurs à la frise.
+  const STAGE_SINCE_SQL = `COALESCE((SELECT MAX(s.created_at) FROM manuscript_stages s
+      WHERE s.manuscript_id = m.id AND s.to_stage = m.current_stage
+        AND (s.event IS NULL OR s.event = '')), m.updated_at, m.created_at)`;
+  const DAYS_IN_STAGE_SQL = `julianday('now') - julianday(${STAGE_SINCE_SQL})`;
+
+  // Une entrée = la liste des expressions SQL à ordonner (le sens ASC/DESC est
+  // ajouté à chacune). Liste d'expressions, pas une chaîne à découper : une
+  // virgule interne à COALESCE(...) casserait un split.
+  const MANUSCRIPT_SORTS = {
+    ref: ['m.ref'],
+    title: ['m.title COLLATE NOCASE'],
+    author: ['a.lastname COLLATE NOCASE', 'a.firstname COLLATE NOCASE'],
+    genre: ['m.genre COLLATE NOCASE'],
+    // Tri « étape » = progression dans le workflow, pas ordre alphabétique du
+    // libellé : « Reçu » doit précéder « En évaluation », pas l'inverse.
+    stage: [`CASE m.current_stage ${MANUSCRIPT_STAGES.map((s, i) => `WHEN '${s}' THEN ${i}`).join(' ')} ELSE 999 END`],
+    created: ['m.created_at'],
+    updated: ['COALESCE(m.updated_at, m.created_at)'],
+    stale: [DAYS_IN_STAGE_SQL],
+  };
+
+  // Sens naturel de chaque tri au premier clic : alphabétique croissant pour le
+  // texte, workflow croissant pour l'étape, plus récent / plus immobilisé en
+  // tête pour les dates.
+  const MANUSCRIPT_SORT_DIR = {
+    ref: 'ASC', title: 'ASC', author: 'ASC', genre: 'ASC', stage: 'ASC',
+    created: 'DESC', updated: 'DESC', stale: 'DESC',
+  };
+
+  const CONTACT_COLUMNS = {
+    evaluateur: 'assigned_evaluator_contact_id',
+    correcteur: 'assigned_corrector_contact_id',
+    infographiste: 'assigned_infographist_contact_id',
+    imprimeur: 'assigned_printer_contact_id',
+  };
+
+  // Colonnes à tester pour « aucun acteur affecté » : le carnet ET l'ancienne
+  // colonne compte, sinon un manuscrit historique remonterait à tort.
+  const UNASSIGNED_COLUMNS = {
+    evaluateur: ['assigned_evaluator_contact_id', 'assigned_evaluator_id'],
+    correcteur: ['assigned_corrector_contact_id', 'assigned_corrector_id'],
+    imprimeur: ['assigned_printer_contact_id', 'assigned_printer_id'],
+    any: Object.values(CONTACT_COLUMNS),
+  };
+
+  // Étape → métier qui a la main : sert à n'afficher dans la liste que
+  // l'intervenant réellement concerné (pas les quatre affectations).
+  const STAGE_OWNER_METIER = {
+    in_evaluation: 'evaluateur', evaluation_rework: 'evaluateur',
+    evaluation_positive: 'evaluateur', evaluation_negative: 'evaluateur',
+    in_correction: 'correcteur', correction_author_review: 'correcteur',
+    in_editorial: 'editeur', editorial_validated: 'editeur',
+    cover_design: 'editeur', bat_author_review: 'editeur',
+    print_preparation: 'imprimeur', printing: 'imprimeur', printed: 'imprimeur',
+  };
+  const METIER_LABELS = {
+    evaluateur: 'Évaluateur', correcteur: 'Correcteur',
+    editeur: 'Éditeur', imprimeur: 'Imprimeur',
+  };
+
+  // → { stages, impossible } : `impossible` distingue « famille et étape se
+  // contredisent » (résultat vide, littéral) d'« étape ou famille inconnue »
+  // (paramètre ignoré) — sans quoi une faute de frappe dans l'URL viderait
+  // silencieusement l'écran.
+  function stagesFromQuery(query) {
+    const asked = [];
+    for (const raw of [query.stage, query.stages]) {
+      if (!raw) continue;
+      for (const s of String(raw).split(',')) {
+        const v = s.trim();
+        if (v && MANUSCRIPT_STAGES.includes(v)) asked.push(v);
+      }
     }
-    sql += ' ORDER BY m.created_at DESC LIMIT 200';
-    const rows = db.prepare(sql).all(...params);
-    res.json(rows.map(describeManuscript));
+    const group = MANUSCRIPT_STAGE_GROUPS.find((g) => g.value === query.group);
+    if (!group) return { stages: asked, impossible: false };
+    if (!asked.length) return { stages: group.stages, impossible: false };
+    const inter = asked.filter((s) => group.stages.includes(s));
+    return { stages: inter, impossible: inter.length === 0 };
+  }
+
+  // Construit le WHERE partagé par la liste, le compte et l'export.
+  // skipStage : pour les compteurs par étape (chaque puce doit afficher son
+  // volume sous les AUTRES filtres, pas sous le filtre d'étape courant).
+  function buildManuscriptFilter(query = {}, { skipStage = false } = {}) {
+    const clauses = [];
+    const params = [];
+
+    if (!skipStage) {
+      const { stages, impossible } = stagesFromQuery(query);
+      if (impossible) {
+        clauses.push('1=0');              // famille ∩ étape : aucune étape commune
+      } else if (stages.length === 1) {
+        clauses.push('m.current_stage = ?'); params.push(stages[0]);
+      } else if (stages.length > 1) {
+        clauses.push(`m.current_stage IN (${stages.map(() => '?').join(',')})`); params.push(...stages);
+      }
+    }
+
+    const q = (query.q || '').trim();
+    if (q) {
+      // Multi-mots : « konate roman » ou « Ndeye Fatou » doivent aboutir.
+      // Chaque mot doit matcher un champ (ET entre mots, OU entre champs) ;
+      // 6 mots suffisent largement et bornent la taille de la requête.
+      const tokens = q.split(/\s+/).filter(Boolean).slice(0, 6);
+      for (const token of tokens) {
+        const like = `%${token}%`;
+        clauses.push(`(m.title LIKE ? OR m.subtitle LIKE ? OR m.ref LIKE ? OR m.series_title LIKE ?
+          OR m.genre LIKE ? OR m.isbn LIKE ? OR a.firstname LIKE ? OR a.lastname LIKE ?
+          OR a.email LIKE ? OR a.phone LIKE ?
+          OR (a.firstname || ' ' || a.lastname) LIKE ? OR (a.lastname || ' ' || a.firstname) LIKE ?)`);
+        params.push(...Array(12).fill(like));
+      }
+    }
+
+    if (query.genre) { clauses.push('m.genre = ?'); params.push(String(query.genre)); }
+
+    const intervenantId = parseInt(query.intervenant, 10);
+    if (Number.isInteger(intervenantId) && intervenantId > 0) {
+      const only = CONTACT_COLUMNS[query.metier];
+      const cols = only ? [only] : Object.values(CONTACT_COLUMNS);
+      clauses.push(`(${cols.map((c) => `m.${c} = ?`).join(' OR ')})`);
+      params.push(...cols.map(() => intervenantId));
+    }
+
+    const unassigned = UNASSIGNED_COLUMNS[query.unassigned];
+    if (unassigned) clauses.push(unassigned.map((c) => `m.${c} IS NULL`).join(' AND '));
+
+    // Doublons confirmés : hors listes et hors compteurs par défaut — ils
+    // fausseraient les volumes de pilotage (« 58 à traiter » dont 2 renvois du
+    // même texte). `include` les remet, `only` ne montre qu'eux.
+    if (query.duplicates === 'only') clauses.push('m.duplicate_of IS NOT NULL');
+    else if (query.duplicates !== 'include') clauses.push('m.duplicate_of IS NULL');
+
+    if (query.contract === 'with') clauses.push('m.contract_id IS NOT NULL');
+    if (query.contract === 'without') clauses.push('m.contract_id IS NULL');
+    if (query.series === 'only') clauses.push('m.series_ref IS NOT NULL');
+    if (query.series === 'single') clauses.push('m.series_ref IS NULL');
+
+    const dateCol = query.date_field === 'updated' ? "COALESCE(m.updated_at, m.created_at)" : 'm.created_at';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(query.date_from || '')) { clauses.push(`date(${dateCol}) >= ?`); params.push(query.date_from); }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(query.date_to || ''))   { clauses.push(`date(${dateCol}) <= ?`); params.push(query.date_to); }
+
+    const stale = parseInt(query.stale, 10);
+    if (Number.isInteger(stale) && stale > 0) {
+      clauses.push(`${DAYS_IN_STAGE_SQL} >= ?`);
+      params.push(stale);
+    }
+
+    return { where: clauses.length ? clauses.join(' AND ') : '1=1', params };
+  }
+
+  const MANUSCRIPT_SELECT = `
+    SELECT m.*, a.firstname || ' ' || a.lastname AS author_name, a.email AS author_email, a.phone AS author_phone,
+           COALESCE(ie.nom, ue.username) AS evaluateur_name,
+           COALESCE(ic.nom, uc.username) AS correcteur_name,
+           ued.username                  AS editeur_name,
+           COALESCE(ip.nom, up.username) AS imprimeur_name,
+           dup.ref   AS duplicate_of_ref,
+           dup.title AS duplicate_of_title,
+           ${STAGE_SINCE_SQL} AS stage_since
+      FROM manuscripts m
+      JOIN authors a       ON a.id = m.author_id
+      LEFT JOIN intervenants ie ON ie.id = m.assigned_evaluator_contact_id
+      LEFT JOIN intervenants ic ON ic.id = m.assigned_corrector_contact_id
+      LEFT JOIN intervenants ip ON ip.id = m.assigned_printer_contact_id
+      LEFT JOIN admin_users  ue ON ue.id = m.assigned_evaluator_id
+      LEFT JOIN admin_users  uc ON uc.id = m.assigned_corrector_id
+      LEFT JOIN admin_users  up ON up.id = m.assigned_printer_id
+      LEFT JOIN admin_users ued ON ued.id = m.assigned_editor_id
+      LEFT JOIN manuscripts  dup ON dup.id = m.duplicate_of`;
+
+  const daysSince = (value) => {
+    if (!value) return null;
+    const ts = Date.parse(String(value).replace(' ', 'T') + (String(value).endsWith('Z') ? '' : 'Z'));
+    if (Number.isNaN(ts)) return null;
+    return Math.max(0, Math.floor((Date.now() - ts) / 86400000));
+  };
+
+  // Enrichit une ligne pour la liste : ancienneté, acteur qui a la main.
+  function describeManuscriptRow(row) {
+    const metier = STAGE_OWNER_METIER[row.current_stage] || null;
+    const assignee = metier ? row[`${metier}_name`] || null : null;
+    return {
+      ...describeManuscript(row),
+      stage_since: row.stage_since || row.updated_at || row.created_at,
+      days_in_stage: daysSince(row.stage_since || row.updated_at || row.created_at),
+      days_since_update: daysSince(row.updated_at || row.created_at),
+      owner_metier: metier,
+      owner_metier_label: metier ? METIER_LABELS[metier] : null,
+      assignee_name: assignee,
+      has_contract: !!row.contract_id,
+    };
+  }
+
+  function orderByFor(query) {
+    const sort = MANUSCRIPT_SORTS[query.sort] ? query.sort : 'created';
+    const asked = String(query.order || '').toUpperCase();
+    const dir = asked === 'ASC' || asked === 'DESC' ? asked : MANUSCRIPT_SORT_DIR[sort];
+    // m.id en second critère : ordre stable d'une page à l'autre quand deux
+    // manuscrits partagent la même date (import du même jour).
+    return `${MANUSCRIPT_SORTS[sort].map((c) => `${c} ${dir}`).join(', ')}, m.id DESC`;
+  }
+
+  router.get('/manuscripts/v2', auth, (req, res) => {
+    const query = req.query || {};
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(5, parseInt(query.limit, 10) || 25));
+    const { where, params } = buildManuscriptFilter(query);
+
+    const total = db.prepare(
+      `SELECT COUNT(*) AS n FROM manuscripts m JOIN authors a ON a.id = m.author_id WHERE ${where}`
+    ).get(...params).n;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const offset = (Math.min(page, pages) - 1) * limit;
+
+    const rows = db.prepare(
+      `${MANUSCRIPT_SELECT} WHERE ${where} ORDER BY ${orderByFor(query)} LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset);
+
+    // Compteurs par étape sous les autres filtres (puces de la barre d'étapes).
+    const bare = buildManuscriptFilter(query, { skipStage: true });
+    const counts = db.prepare(
+      `SELECT m.current_stage AS stage, COUNT(*) AS n
+         FROM manuscripts m JOIN authors a ON a.id = m.author_id
+        WHERE ${bare.where} GROUP BY m.current_stage`
+    ).all(...bare.params);
+    const stageCounts = Object.fromEntries(counts.map((c) => [c.stage, c.n]));
+
+    res.json({
+      rows: rows.map(describeManuscriptRow),
+      total,
+      page: Math.min(page, pages),
+      pages,
+      limit,
+      stage_counts: stageCounts,
+      // Volume par famille, dérivé des compteurs d'étapes (aucune requête de plus).
+      group_counts: Object.fromEntries(MANUSCRIPT_STAGE_GROUPS.map((g) => [
+        g.value, g.stages.reduce((sum, s) => sum + (stageCounts[s] || 0), 0),
+      ])),
+    });
+  });
+
+  // Référentiel des filtres : étapes, familles, genres réellement présents et
+  // intervenants affectés — évite au front de deviner ou de tout charger.
+  router.get('/manuscripts/v2/filters', auth, (req, res) => {
+    const genres = db.prepare(
+      "SELECT genre, COUNT(*) AS n FROM manuscripts WHERE genre IS NOT NULL AND genre <> '' GROUP BY genre ORDER BY n DESC"
+    ).all();
+    let intervenants = [];
+    try {
+      intervenants = db.prepare(
+        `SELECT id, nom, metier FROM intervenants
+          WHERE id IN (SELECT assigned_evaluator_contact_id FROM manuscripts WHERE assigned_evaluator_contact_id IS NOT NULL
+                       UNION SELECT assigned_corrector_contact_id FROM manuscripts WHERE assigned_corrector_contact_id IS NOT NULL
+                       UNION SELECT assigned_infographist_contact_id FROM manuscripts WHERE assigned_infographist_contact_id IS NOT NULL
+                       UNION SELECT assigned_printer_contact_id FROM manuscripts WHERE assigned_printer_contact_id IS NOT NULL)
+          ORDER BY nom COLLATE NOCASE`
+      ).all();
+    } catch (e) { void e; }
+    res.json({
+      stages: MANUSCRIPT_STAGES,
+      labels: STAGE_LABELS,
+      groups: MANUSCRIPT_STAGE_GROUPS,
+      genres,
+      intervenants,
+      sorts: Object.keys(MANUSCRIPT_SORTS),
+    });
+  });
+
+  // Export CSV du résultat courant (mêmes filtres, sans pagination).
+  // Déclaré avant /manuscripts/v2/:id, sinon « export.csv » serait pris pour un id.
+  // editorOnly : le fichier sort de l'application avec les coordonnées des
+  // auteurs — même périmètre que l'export des contrats.
+  router.get('/manuscripts/v2/export.csv', auth, editorOnly, (req, res) => {
+    const { where, params } = buildManuscriptFilter(req.query || {});
+    const rows = db.prepare(`${MANUSCRIPT_SELECT} WHERE ${where} ORDER BY ${orderByFor(req.query || {})} LIMIT 5000`)
+      .all(...params).map(describeManuscriptRow);
+    const esc = (v) => {
+      const s = v === null || v === undefined ? '' : String(v);
+      return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const fmt = (d) => (d ? String(d).slice(0, 10) : '');
+    const header = ['Réf.', 'Titre', 'Sous-titre', 'Série', 'Tome', 'Auteur', 'Email', 'Téléphone',
+      'Genre', 'Étape', 'Acteur', 'Contrat', 'ISBN', 'Reçu le', 'Dernière MAJ', "Jours dans l'étape"];
+    const lines = rows.map((m) => [
+      m.ref, m.title, m.subtitle || '', m.series_title || '', m.tome_number || '',
+      m.author_name, m.author_email || '', m.author_phone || '', m.genre || '', m.stage_label,
+      m.assignee_name || '', m.has_contract ? 'oui' : 'non', m.isbn || '',
+      fmt(m.created_at), fmt(m.updated_at), m.days_in_stage ?? '',
+    ].map(esc).join(';'));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="manuscrits-${new Date().toISOString().slice(0, 10)}.csv"`);
+    // BOM UTF-8 : sans lui Excel affiche « Réf. » en « RÃ©f. ».
+    res.send('﻿' + [header.join(';'), ...lines].join('\n'));
+  });
+
+  // ─── DOUBLONS ─────────────────────────────────────────────
+  // Le barrage de la soumission publique (manuscript-duplicates.js) arrête ce
+  // qui est certain ; ce qui reste — e-mail retapé avec une typo, titre commun,
+  // dossiers déjà engagés avant la mise en place du barrage — ne peut être
+  // tranché que par un humain. Ces trois routes servent cet arbitrage. Rien
+  // n'est supprimé : le doublon est relié à l'original et sort des listes.
+  // Déclarées avant /manuscripts/v2/:id, sinon « duplicates » passerait pour un id.
+  router.get('/manuscripts/v2/duplicates', auth, editorOnly, (req, res) => {
+    const includeResolved = req.query?.resolved === '1' || req.query?.resolved === 'true';
+    const groups = listDuplicateGroups(db, { includeResolved }).map((g) => ({
+      ...g,
+      members: g.members.map((m) => ({
+        ...m,
+        stage_label: STAGE_LABELS[m.current_stage] || m.current_stage,
+        author_name: `${m.firstname || ''} ${m.lastname || ''}`.trim(),
+      })),
+    }));
+    res.json({
+      groups,
+      total: groups.length,
+      // Volume ouvert : ce que la pastille de l'écran doit afficher.
+      unresolved: groups.filter((g) => !g.resolved).length,
+    });
+  });
+
+  router.post('/manuscripts/v2/:id/duplicate', auth, editorOnly, csrfProtection, (req, res) => {
+    const target = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!target) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    const originalId = parseInt(req.body?.of, 10);
+    if (!Number.isInteger(originalId)) return res.status(400).json({ error: 'Manuscrit original manquant' });
+    if (originalId === target.id) return res.status(400).json({ error: 'Un manuscrit ne peut pas être son propre doublon' });
+    const original = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(originalId);
+    if (!original) return res.status(404).json({ error: 'Manuscrit original introuvable' });
+    // Interdit la chaîne A→B→C : l'original doit être un vrai original, sinon
+    // « doublon de » ne désigne plus rien de stable.
+    if (original.duplicate_of) {
+      const root = db.prepare('SELECT ref FROM manuscripts WHERE id = ?').get(original.duplicate_of);
+      return res.status(409).json({
+        error: `${original.ref} est lui-même marqué comme doublon${root ? ` de ${root.ref}` : ''} — désignez l'original.`,
+      });
+    }
+    // Un manuscrit qui a déjà des doublons rattachés est un original : le
+    // marquer à son tour laisserait ses copies orphelines.
+    const attached = db.prepare('SELECT COUNT(*) AS n FROM manuscripts WHERE duplicate_of = ?').get(target.id).n;
+    if (attached) {
+      return res.status(409).json({ error: `${target.ref} est l'original de ${attached} doublon(s) — détachez-les d'abord.` });
+    }
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    db.transaction(() => {
+      db.prepare("UPDATE manuscripts SET duplicate_of = ?, duplicate_marked_at = datetime('now'), duplicate_marked_by = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(original.id, req.admin.username || null, target.id);
+      logManuscriptEvent(db, target.id, 'duplicate_marked', actor,
+        `Doublon de ${original.ref} — « ${original.title} »${req.body?.reason ? ` (${String(req.body.reason).slice(0, 200)})` : ''}`);
+      // Trace aussi sur l'original : sa frise doit dire qu'un renvoi a eu lieu.
+      logManuscriptEvent(db, original.id, 'duplicate_marked', actor,
+        `${target.ref} identifié comme doublon de ce manuscrit`);
+    })();
+    res.json({ success: true, duplicate_of: original.id, original_ref: original.ref });
+  });
+
+  router.delete('/manuscripts/v2/:id/duplicate', auth, editorOnly, csrfProtection, (req, res) => {
+    const target = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!target) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    if (!target.duplicate_of) return res.status(409).json({ error: "Ce manuscrit n'est pas marqué comme doublon" });
+    const original = db.prepare('SELECT ref FROM manuscripts WHERE id = ?').get(target.duplicate_of);
+    db.prepare("UPDATE manuscripts SET duplicate_of = NULL, duplicate_marked_at = NULL, duplicate_marked_by = NULL, updated_at = datetime('now') WHERE id = ?")
+      .run(target.id);
+    logManuscriptEvent(db, target.id, 'duplicate_unmarked',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      original ? `N'est plus considéré comme doublon de ${original.ref}` : null);
+    res.json({ success: true });
+  });
+
+  // Suppression définitive d'un doublon marqué (voir deleteDuplicateManuscript
+  // pour les garde-fous). Motif facultatif, repris dans la frise de l'original.
+  router.delete('/manuscripts/v2/:id', auth, editorOnly, csrfProtection, (req, res) => {
+    const target = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+    if (!target) return res.status(404).json({ error: 'Manuscrit introuvable' });
+    const blockers = duplicateDeletionBlockers(db, target);
+    if (blockers.length) {
+      return res.status(409).json({ error: `Suppression impossible : ${blockers.join(' ; ')}.`, blockers });
+    }
+    const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
+    try {
+      const result = deleteDuplicateManuscript(db, target, {
+        manuscriptsDir: MANUSCRIPTS_DIR,
+        actor,
+        reason: String(req.body?.reason || '').trim().slice(0, 200),
+        logEvent: logManuscriptEvent,
+      });
+      console.log(`[DOUBLONS] ${target.ref} supprimé par ${req.admin.username} (original ${result.original?.ref}) → ${result.trashDir}`);
+      res.json({ success: true, ref: target.ref, original_id: result.original?.id, original_ref: result.original?.ref });
+    } catch (err) {
+      console.error('[DOUBLONS] suppression échouée:', err.message);
+      res.status(500).json({ error: 'La suppression a échoué — rien n\'a été effacé en base' });
+    }
   });
 
   router.get('/manuscripts/v2/stages', auth, (req, res) => {
-    res.json({ stages: MANUSCRIPT_STAGES, labels: STAGE_LABELS });
+    res.json({ stages: MANUSCRIPT_STAGES, labels: STAGE_LABELS, groups: MANUSCRIPT_STAGE_GROUPS });
   });
 
   router.get('/manuscripts/v2/:id', auth, async (req, res) => {
@@ -230,7 +688,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
        FROM manuscripts m JOIN authors a ON a.id = m.author_id WHERE m.id = ?`
     ).get(req.params.id);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
 
     // Résout les ids d'assignation en noms lisibles (pour l'affichage du panneau).
     //  - colonnes *_id          → admin_users (éditeur interne + historique)
@@ -258,6 +716,94 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     const stages = db.prepare('SELECT * FROM manuscript_stages WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     const evaluations = db.prepare('SELECT * FROM manuscript_evaluations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
     const validations = db.prepare('SELECT * FROM manuscript_validations WHERE manuscript_id = ? ORDER BY created_at ASC').all(manuscript.id);
+
+    // Doublons : l'original dont ce manuscrit est la copie, et les copies
+    // rattachées à celui-ci — de quoi afficher le bandeau dans les deux sens.
+    manuscript.duplicate_of_ref = null;
+    manuscript.duplicate_of_title = null;
+    if (manuscript.duplicate_of) {
+      const orig = db.prepare('SELECT ref, title FROM manuscripts WHERE id = ?').get(manuscript.duplicate_of);
+      if (orig) { manuscript.duplicate_of_ref = orig.ref; manuscript.duplicate_of_title = orig.title; }
+    }
+    const duplicates = db.prepare(
+      "SELECT id, ref, title, current_stage, created_at, duplicate_marked_at FROM manuscripts WHERE duplicate_of = ? ORDER BY created_at"
+    ).all(manuscript.id).map((d) => ({ ...d, stage_label: STAGE_LABELS[d.current_stage] || d.current_stage }));
+
+    // ─── RÉSUMÉ AUTEUR ────────────────────────────────────────
+    // La fiche ne montrait qu'un nom et un e-mail : impossible de savoir, sans
+    // quitter l'écran, que l'auteur du manuscrit en cours a déjà deux autres
+    // dossiers chez nous — dont un en attente de paiement. On assemble ici, en
+    // SQLite seul (aucune dépendance à Dolibarr : la fiche doit rester
+    // consultable même Dolibarr éteint), de quoi situer la personne.
+    // Réservé aux pilotes du dossier : un évaluateur ou un correcteur affecté
+    // n'a pas à connaître le reste du portefeuille de l'auteur ni l'état de son
+    // compte. Les autres rôles reçoivent author:null et la carte ne s'affiche pas.
+    let authorSummary = null;
+    try {
+      if (!['super_admin', 'admin', 'editor', 'production'].includes(req.admin?.role)) throw new Error('skip');
+      const a = db.prepare(
+        `SELECT id, firstname, lastname, display_name, email, phone, bio, photo_url, slug,
+                public_listed, created_at, dolibarr_thirdparty_id,
+                (password IS NOT NULL AND password <> '') AS has_account
+           FROM authors WHERE id = ?`
+      ).get(manuscript.author_id);
+      if (a) {
+        // Les autres dossiers de l'auteur, celui-ci exclu : c'est l'information
+        // qui manquait le plus (antériorité, dossier déjà engagé, renvoi).
+        const others = db.prepare(
+          `SELECT m.id, m.ref, m.title, m.current_stage, m.created_at, m.duplicate_of,
+                  m.contract_id, dup.ref AS duplicate_of_ref
+             FROM manuscripts m
+             LEFT JOIN manuscripts dup ON dup.id = m.duplicate_of
+            WHERE m.author_id = ? AND m.id <> ?
+            ORDER BY m.created_at DESC LIMIT 20`
+        ).all(a.id, manuscript.id).map((m) => ({
+          ...m,
+          stage_label: STAGE_LABELS[m.current_stage] || m.current_stage,
+          group: (MANUSCRIPT_STAGE_GROUPS.find((g) => g.stages.includes(m.current_stage)) || {}).value || null,
+        }));
+
+        // Volumes par famille d'étapes — mêmes familles que les puces de la vue
+        // globale, pour que « Production 2 » veuille dire la même chose partout.
+        const all = [...others, { current_stage: manuscript.current_stage, duplicate_of: manuscript.duplicate_of }];
+        const byGroup = {};
+        for (const g of MANUSCRIPT_STAGE_GROUPS) {
+          byGroup[g.value] = all.filter((m) => !m.duplicate_of && g.stages.includes(m.current_stage)).length;
+        }
+
+        let booksCount = 0;
+        try {
+          booksCount = db.prepare('SELECT COUNT(*) AS n FROM book_authors WHERE author_id = ?').get(a.id).n;
+        } catch (e) { void e; /* table absente sur d'anciennes bases */ }
+
+        // Homonymes : une même personne revient parfois avec un e-mail retapé
+        // (typo), ce qui crée une seconde fiche auteur et casse tout l'historique.
+        // On les signale ici — c'est le pendant, côté auteur, de l'écran doublons.
+        const wanted = normalizePerson(a.firstname, a.lastname);
+        const namesakes = wanted
+          ? db.prepare('SELECT id, firstname, lastname, email FROM authors WHERE id <> ?').all(a.id)
+              .filter((o) => normalizePerson(o.firstname, o.lastname) === wanted)
+              .slice(0, 5)
+              .map((o) => ({ id: o.id, email: o.email, name: `${o.firstname || ''} ${o.lastname || ''}`.trim() }))
+          : [];
+
+        authorSummary = {
+          ...a,
+          has_account: !!a.has_account,
+          // Biographie transmise AVEC ce manuscrit (champ obligatoire du
+          // formulaire) : elle n'était affichée nulle part.
+          submitted_biography: manuscript.biography || null,
+          manuscripts_total: all.length,
+          manuscripts_by_group: byGroup,
+          contracts_count: others.filter((m) => m.contract_id).length + (manuscript.contract_id ? 1 : 0),
+          books_count: booksCount,
+          other_manuscripts: others,
+          namesakes,
+        };
+      }
+    } catch (err) {
+      if (err.message !== 'skip') console.warn('[WORKFLOW] résumé auteur:', err.message);
+    }
 
     // Tomes frères (même série) pour le bandeau de navigation entre tomes.
     let series = null;
@@ -290,6 +836,8 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       validations,
       series,
       contract,
+      duplicates,
+      author: authorSummary,
       // Lien de dépôt auteur encore actif (demande de révision en cours), pour
       // l'affichage sur la carte « Fichier manuscrit ».
       deposit_request: getActiveDepositToken(db, manuscript.id) || null,
@@ -332,26 +880,21 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
 
   // ─── MANUSCRITS ASSIGNÉS (dashboard par rôle) ────────────
   router.get('/manuscripts/assigned', auth, (req, res) => {
-    const roleColumns = {
-      evaluateur: 'assigned_evaluator_id',
-      correcteur: 'assigned_corrector_id',
-      infographiste: 'assigned_infographist_id',
-      imprimeur: 'assigned_printer_id',
-    };
-    const col = roleColumns[req.admin.role];
-    if (!col) return res.json([]); // super_admin/admin/editor n'utilisent pas cet endpoint
+    // super_admin/admin/editor n'utilisent pas cet endpoint
+    if (!METIER_ASSIGN_COLUMNS[req.admin.role]) return res.json([]);
+    const scope = myAssignmentsClause(req.admin);
     const rows = db.prepare(
       `SELECT m.id, m.ref, m.title, m.subtitle, m.current_stage, m.created_at, m.updated_at,
               a.firstname || ' ' || a.lastname AS author_name
        FROM manuscripts m JOIN authors a ON a.id = m.author_id
-       WHERE m.${col} = ? ORDER BY m.updated_at DESC`
-    ).all(req.admin.id);
+       WHERE ${scope.clause} ORDER BY m.updated_at DESC`
+    ).all(...scope.params);
     res.json(rows.map(describeManuscript));
   });
 
   router.get('/manuscripts/v2/:id/files/:fileId/download', auth, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
-    if (!manuscript || !roleCanAccessManuscript(req.admin, manuscript)) {
+    if (!manuscript || !roleCanAccessManuscript(req.admin, manuscript, db)) {
       return res.status(403).json({ error: 'Accès refusé' });
     }
     const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ?').get(req.params.fileId, req.params.id);
@@ -474,7 +1017,22 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
             }
           } else {
             const next = resolveRecipient(user_id);
-            if (next) sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned');
+            if (next) {
+              // Trace l'annonce d'affectation dans la frise, APRÈS confirmation
+              // SMTP (même règle que les emails auteur) : sans elle, un
+              // intervenant qui dit « je n'ai rien reçu » était invérifiable —
+              // seul le journal système en gardait la trace.
+              const taskStage = (METIER_TASK_STAGES[role] || [])[0];
+              const whenLabel = taskStage ? ` — dossier transmis à l'étape « ${STAGE_LABELS[taskStage] || taskStage} »` : '';
+              sendAssignmentEmail(transporter, manuscript, role, next, siteUrl, 'assigned')
+                .then((info) => {
+                  if (!info) return;
+                  try {
+                    logManuscriptEvent(db, msId, 'email_sent', wfActor,
+                      `Affectation ${roleLabel.toLowerCase()} → ${next.label} (${next.email})${whenLabel}`);
+                  } catch (e) { console.warn('[WORKFLOW] log email_sent (affectation) warning:', e.message); }
+                });
+            }
           }
           // Cas auto-transition évaluateur exclu : la transition « En évaluation »
           // trace déjà l'affectation, inutile de la dédoubler.
@@ -533,7 +1091,10 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   // (force) pour atteindre N'IMPORTE quel état — y compris depuis un état terminal
   // (Rejeté / Imprimé). Contrairement à la transition normale :
   //   • un MOTIF est obligatoire (tracé dans la frise) ;
-  //   • AUCUN email n'est envoyé (correction interne, pas un vrai franchissement).
+  //   • les emails ne partent QUE si la correction fait avancer le dossier
+  //     (cf. `avance` plus bas) : remettre un manuscrit rejeté par erreur en
+  //     « Évaluation favorable » doit saisir le comptable et l'auteur ; rectifier
+  //     un état saisi trop loin ne doit relancer personne.
   router.post('/manuscripts/v2/:id/override-stage', auth, csrfProtection, (req, res) => {
     if (!['super_admin', 'admin'].includes(req.admin.role)) {
       return res.status(403).json({ error: 'Correction de l\'état réservée aux administrateurs' });
@@ -559,7 +1120,21 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
         force: true,
         note: `Correction manuelle de l'état : ${fromLabel} → ${toLabel}. Motif : ${reason}`,
       });
-      res.json({ success: true, manuscript: describeManuscript(updated) });
+      // Une correction qui fait AVANCER le dossier n'est pas qu'un ajustement de
+      // registre : l'étape est réellement atteinte pour la première fois et ceux
+      // qui attendent doivent l'apprendre (cas typique : un manuscrit rejeté par
+      // erreur remis en « Évaluation favorable » — sans cela le comptable n'est
+      // jamais saisi et le devis ne part pas). Une correction en ARRIÈRE reste
+      // muette : elle rectifie un état saisi à tort, personne n'a à être relancé.
+      const avance = MANUSCRIPT_STAGES.indexOf(to_stage) > MANUSCRIPT_STAGES.indexOf(current.current_stage);
+      if (avance) {
+        try {
+          notifyTransition(db, transporter, updated, to_stage, actor, siteUrl);
+        } catch (err) {
+          console.warn('[MANUSCRIPT] override-stage notify error:', err.message);
+        }
+      }
+      res.json({ success: true, manuscript: describeManuscript(updated), notified: avance });
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
@@ -747,8 +1322,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
                WHERE m.current_stage = 'in_evaluation'`;
     const params = [];
     if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
-      sql += ' AND m.assigned_evaluator_id = ?';
-      params.push(req.admin.id);
+      const scope = myAssignmentsClause(req.admin);
+      sql += ` AND ${scope.clause}`;
+      params.push(...scope.params);
     }
     sql += ' ORDER BY m.created_at ASC';
     res.json(db.prepare(sql).all(...params).map(describeManuscript));
@@ -765,7 +1341,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       }
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
       if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
       if (manuscript.current_stage !== 'in_evaluation') {
         return res.status(400).json({ error: `Évaluation impossible au stade ${manuscript.current_stage}` });
       }
@@ -809,17 +1385,43 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     });
 
   // ─── CORRECTIONS ─────────────────────────────────────────
+  // Étapes situées AVANT la correction : un correcteur y est souvent affecté
+  // très tôt (dès le contrat), bien avant que le manuscrit ne lui parvienne.
+  const PRE_CORRECTION_STAGES = MANUSCRIPT_STAGES
+    .slice(0, MANUSCRIPT_STAGES.indexOf('in_correction'))
+    .filter((s) => s !== 'evaluation_negative');   // rejeté : ne viendra jamais
+
   router.get('/corrections', auth, (req, res) => {
+    const isPilot = ['super_admin', 'admin', 'editor'].includes(req.admin.role);
     let sql = `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name
                FROM manuscripts m JOIN authors a ON a.id = m.author_id
                WHERE m.current_stage IN ('in_correction', 'correction_author_review')`;
     const params = [];
-    if (!['super_admin', 'admin', 'editor'].includes(req.admin.role)) {
-      sql += ' AND m.assigned_corrector_id = ?';
-      params.push(req.admin.id);
+    if (!isPilot) {
+      const scope = myAssignmentsClause(req.admin);
+      sql += ` AND ${scope.clause}`;
+      params.push(...scope.params);
     }
     sql += ' ORDER BY m.updated_at DESC';
-    res.json(db.prepare(sql).all(...params).map(describeManuscript));
+    const rows = db.prepare(sql).all(...params).map(describeManuscript);
+
+    // Dossiers déjà confiés au correcteur mais pas encore parvenus à son étape :
+    // sans eux, son espace affiche « Aucune correction en cours » alors qu'il a
+    // reçu un e-mail d'affectation — il n'a aucun moyen de savoir ce qui l'attend.
+    // Lecture seule : le travail ne commence qu'à l'étape « En correction ».
+    let upcoming = [];
+    if (!isPilot && METIER_ASSIGN_COLUMNS[req.admin.role]) {
+      const scope = myAssignmentsClause(req.admin);
+      upcoming = db.prepare(
+        `SELECT m.*, a.firstname || ' ' || a.lastname AS author_name
+         FROM manuscripts m JOIN authors a ON a.id = m.author_id
+         WHERE ${scope.clause}
+           AND m.current_stage IN (${PRE_CORRECTION_STAGES.map(() => '?').join(',')})
+         ORDER BY m.updated_at DESC`
+      ).all(...scope.params, ...PRE_CORRECTION_STAGES)
+        .map((row) => ({ ...describeManuscript(row), upcoming: true }));
+    }
+    res.json([...rows, ...upcoming]);
   });
 
   router.post('/corrections/:manuscriptId/upload',
@@ -830,7 +1432,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       if (!req.file) return res.status(400).json({ error: 'Fichier requis' });
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
       if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
       const last = db.prepare(`SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = 'correction'`).get(manuscript.id);
       const version = (last?.v || 0) + 1;
       db.prepare(
@@ -858,7 +1460,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   router.get('/corrections/:manuscriptId/files', auth, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     const files = db.prepare(
       `SELECT id, kind, version, file_name, file_size, external_url, uploaded_at, uploaded_by_role
        FROM manuscript_files WHERE manuscript_id = ? ORDER BY uploaded_at DESC, id DESC`
@@ -894,7 +1496,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       if (!files.length) return res.status(400).json({ error: 'Aucun fichier reçu' });
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
       if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
 
       const last = db.prepare(
         'SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = ?'
@@ -931,7 +1533,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
 
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
 
     const last = db.prepare(
       'SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = ?'
@@ -955,7 +1557,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   router.delete('/corrections/:manuscriptId/production-files/:fileId', auth, csrfProtection, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ?')
       .get(req.params.fileId, manuscript.id);
     if (!file) return res.status(404).json({ error: 'Fichier introuvable' });
@@ -974,7 +1576,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   router.post('/corrections/:manuscriptId/submit-to-author', auth, csrfProtection, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     if (manuscript.current_stage !== 'in_correction') {
       return res.status(400).json({ error: `Envoi impossible au stade ${manuscript.current_stage}` });
     }
@@ -1054,7 +1656,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     }
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     if (manuscript.current_stage !== 'in_correction') {
       return res.status(400).json({ error: `Transmission impossible au stade ${manuscript.current_stage}` });
     }
@@ -1111,7 +1713,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     }
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     // La correction doit avoir été validée (manuscrit en production éditoriale ou au-delà).
     if (!CORRECTION_VALIDATED_STAGES.includes(manuscript.current_stage)) {
       return res.status(400).json({ error: 'La correction n\'a pas encore été validée pour ce manuscrit.' });
@@ -1184,8 +1786,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
                WHERE m.current_stage IN ('cover_design', 'bat_author_review')`;
     const params = [];
     if (req.admin.role === 'infographiste') {
-      sql += ' AND m.assigned_infographist_id = ?';
-      params.push(req.admin.id);
+      const scope = myAssignmentsClause(req.admin);
+      sql += ` AND ${scope.clause}`;
+      params.push(...scope.params);
     }
     sql += ' ORDER BY m.updated_at DESC';
     res.json(db.prepare(sql).all(...params).map(describeManuscript));
@@ -1197,7 +1800,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       if (!req.file) return res.status(400).json({ error: 'Fichier requis' });
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
       if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
       const last = db.prepare(`SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = 'cover_artwork'`).get(manuscript.id);
       const version = (last?.v || 0) + 1;
       db.prepare(
@@ -1216,7 +1819,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       if (!req.file) return res.status(400).json({ error: 'BAT PDF requis' });
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
       if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
       if (manuscript.current_stage !== 'cover_design') {
         return res.status(400).json({ error: `BAT impossible au stade ${manuscript.current_stage}` });
       }
@@ -1242,8 +1845,9 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
                WHERE m.current_stage IN ('print_preparation', 'printing', 'printed')`;
     const params = [];
     if (req.admin.role === 'imprimeur') {
-      sql += ' AND m.assigned_printer_id = ?';
-      params.push(req.admin.id);
+      const scope = myAssignmentsClause(req.admin);
+      sql += ` AND ${scope.clause}`;
+      params.push(...scope.params);
     }
     sql += ' ORDER BY m.updated_at DESC';
     res.json(db.prepare(sql).all(...params).map(describeManuscript));
@@ -1260,7 +1864,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       if (!req.file) return res.status(400).json({ error: 'Fichier PDF prêt à imprimer requis' });
       const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
       if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-      if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+      if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
       if (!['print_preparation', 'printing'].includes(manuscript.current_stage)) {
         return res.status(400).json({
           error: `Upload impossible au stade ${STAGE_LABELS[manuscript.current_stage] || manuscript.current_stage}`,
@@ -1302,7 +1906,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     if (!qty || qty < 1) return res.status(400).json({ error: 'Quantité invalide' });
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     if (manuscript.current_stage !== 'print_preparation') {
       return res.status(400).json({ error: `Préparation impossible au stade ${manuscript.current_stage}` });
     }
@@ -1360,7 +1964,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   router.post('/printing/:manuscriptId/mark-printed', auth, csrfProtection, (req, res) => {
     const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.manuscriptId);
     if (!manuscript) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    if (!roleCanAccessManuscript(req.admin, manuscript)) return res.status(403).json({ error: 'Accès refusé' });
+    if (!roleCanAccessManuscript(req.admin, manuscript, db)) return res.status(403).json({ error: 'Accès refusé' });
     if (manuscript.current_stage !== 'printing') {
       return res.status(400).json({ error: `Marquage impossible au stade ${manuscript.current_stage}` });
     }

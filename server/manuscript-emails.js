@@ -1036,9 +1036,18 @@ export function notifyTransition(db, transporter, manuscript, toStage, actor, si
   let notifiedContact = false;
   if (contactCol && manuscript[contactCol]) {
     try {
+      // Pas de filtre `is_active` : la désactivation d'une fiche est un acte de
+      // carnet d'adresses (on ne la propose plus à l'affectation), pas une
+      // révocation des dossiers déjà confiés — et la suppression d'un
+      // intervenant référencé se fait justement par désactivation. Filtrer ici
+      // faisait arriver le manuscrit « En correction » sans prévenir personne,
+      // ni e-mail ni trace : c'est exactement le silence qu'on cherche à éviter.
       const intervenant = db.prepare(
-        'SELECT id, nom, email, metier FROM intervenants WHERE id = ? AND is_active = 1'
+        'SELECT id, nom, email, metier, is_active FROM intervenants WHERE id = ?'
       ).get(manuscript[contactCol]);
+      if (intervenant && !intervenant.is_active) {
+        console.warn(`[WORKFLOW] Intervenant #${intervenant.id} (${intervenant.nom}) désactivé mais toujours affecté au manuscrit ${manuscript.ref} — notifié quand même`);
+      }
       if (intervenant?.email) {
         // Pièce jointe + lien tokenisé + trace de frise : cf. notifyIntervenantTask.
         notifyIntervenantTask(db, transporter, { manuscript, toStage, intervenant, siteUrl, actor });

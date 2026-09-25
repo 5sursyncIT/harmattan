@@ -252,45 +252,53 @@ export function generateAlerts(products) {
  * Calcule les KPIs exécutifs de santé stock.
  */
 export async function calculateStockKPIs(dolibarrPool) {
-  // Stock total par dépôt
-  const [stockByWarehouse] = await dolibarrPool.query(
-    `SELECT e.ref AS warehouse, e.rowid AS warehouse_id,
-            COUNT(DISTINCT ps.fk_product) AS products,
-            COALESCE(SUM(ps.reel), 0) AS total_units
-     FROM llx_product_stock ps
-     JOIN llx_entrepot e ON e.rowid = ps.fk_entrepot
-     WHERE e.statut = 1
-     GROUP BY e.rowid`
-  );
-
-  // Valeur stock au prix public — basé sur p.stock global (source de vérité unique).
-  // Évite les doublons que produisait l'agrégat depuis llx_product_stock (un produit
-  // présent dans N dépôts y apparaît N fois), et garde les KPIs cohérents avec les
-  // requêtes ruptures/stock_bas plus bas qui interrogent aussi p.stock.
-  const [[stockValue]] = await dolibarrPool.query(
-    `SELECT COALESCE(SUM(p.stock * p.price_ttc), 0) AS value_public,
-            COUNT(*) AS total_products,
-            COALESCE(SUM(p.stock), 0) AS total_units
-     FROM llx_product p
-     WHERE p.tosell = 1 AND p.stock > 0`
-  );
-
-  // Produits en rupture
-  const [[ruptures]] = await dolibarrPool.query(
-    `SELECT COUNT(*) AS count FROM llx_product p
-     WHERE p.tosell = 1 AND p.stock <= 0`
-  );
-
-  // Produits en stock bas (< 5 unités mais > 0)
-  const [[stockBas]] = await dolibarrPool.query(
-    `SELECT COUNT(*) AS count FROM llx_product p
-     WHERE p.tosell = 1 AND p.stock > 0 AND p.stock < 5`
-  );
-
-  // Total actifs
-  const [[totalActifs]] = await dolibarrPool.query(
-    `SELECT COUNT(*) AS count FROM llx_product WHERE tosell = 1`
-  );
+  // Ces cinq agrégats sont indépendants : les enchaîner en séquence additionnait
+  // leurs latences pour rien. Les quatre requêtes sur llx_product s'appuient sur
+  // l'index couvrant idx_product_tosell_stock (tosell, stock, price_ttc) —
+  // cf. scripts/optimize-stock-indexes.mjs.
+  const [
+    [stockByWarehouse],
+    [[stockValue]],
+    [[ruptures]],
+    [[stockBas]],
+    [[totalActifs]],
+  ] = await Promise.all([
+    // Stock total par dépôt
+    dolibarrPool.query(
+      `SELECT e.ref AS warehouse, e.rowid AS warehouse_id,
+              COUNT(DISTINCT ps.fk_product) AS products,
+              COALESCE(SUM(ps.reel), 0) AS total_units
+       FROM llx_product_stock ps
+       JOIN llx_entrepot e ON e.rowid = ps.fk_entrepot
+       WHERE e.statut = 1
+       GROUP BY e.rowid`
+    ),
+    // Valeur stock au prix public — basé sur p.stock global (source de vérité unique).
+    // Évite les doublons que produisait l'agrégat depuis llx_product_stock (un produit
+    // présent dans N dépôts y apparaît N fois), et garde les KPIs cohérents avec les
+    // requêtes ruptures/stock_bas plus bas qui interrogent aussi p.stock.
+    dolibarrPool.query(
+      `SELECT COALESCE(SUM(p.stock * p.price_ttc), 0) AS value_public,
+              COUNT(*) AS total_products,
+              COALESCE(SUM(p.stock), 0) AS total_units
+       FROM llx_product p
+       WHERE p.tosell = 1 AND p.stock > 0`
+    ),
+    // Produits en rupture
+    dolibarrPool.query(
+      `SELECT COUNT(*) AS count FROM llx_product p
+       WHERE p.tosell = 1 AND p.stock <= 0`
+    ),
+    // Produits en stock bas (< 5 unités mais > 0)
+    dolibarrPool.query(
+      `SELECT COUNT(*) AS count FROM llx_product p
+       WHERE p.tosell = 1 AND p.stock > 0 AND p.stock < 5`
+    ),
+    // Total actifs
+    dolibarrPool.query(
+      `SELECT COUNT(*) AS count FROM llx_product WHERE tosell = 1`
+    ),
+  ]);
 
   // Taux de rupture
   const tauxRupture = totalActifs.count > 0

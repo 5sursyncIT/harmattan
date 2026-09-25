@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { FiUpload, FiLink, FiTrash2 } from 'react-icons/fi';
+import {
+  FiUpload, FiLink, FiTrash2, FiEye, FiPaperclip, FiSend, FiCheck, FiLayers, FiRotateCcw,
+  FiDownload,
+} from 'react-icons/fi';
 import { manuscriptsApi } from '../../../api/manuscripts';
 import { safeHttpUrl } from '../../../utils/safeUrl';
 import useAdminRole from '../../../hooks/useAdminRole.js';
@@ -56,6 +59,13 @@ export default function CorrectionsPanel() {
       .catch((err) => toast.error(err.response?.data?.error || 'Erreur'))
       .finally(() => setLoading(false));
   };
+
+  // Le serveur renvoie deux natures de dossiers : ceux à corriger maintenant, et
+  // ceux déjà confiés au correcteur mais encore en amont du workflow (contrat,
+  // paiement…). Les seconds ne sont pas actionnables — ils sont là pour que
+  // l'intervenant sache ce qui lui arrive.
+  const active = rows.filter((m) => !m.upcoming);
+  const upcoming = rows.filter((m) => m.upcoming);
 
   useEffect(() => { load(); }, []);
 
@@ -187,7 +197,7 @@ export default function CorrectionsPanel() {
       <h2>Corrections</h2>
       <p className="ms-subtitle">Manuscrits en correction ou en attente de validation auteur.</p>
 
-      {loading ? <p>Chargement...</p> : !rows.length ? (
+      {loading ? <p>Chargement...</p> : !active.length ? (
         <div className="ms-empty">Aucune correction en cours.</div>
       ) : (
         <table className="ms-table">
@@ -195,52 +205,94 @@ export default function CorrectionsPanel() {
             <tr><th>Réf.</th><th>Titre</th><th>Auteur</th><th>Étape</th><th>Actions</th></tr>
           </thead>
           <tbody>
-            {rows.map((m) => (
+            {active.map((m) => (
               <tr key={m.id}>
                 <td>{m.ref}</td>
                 <td>{m.title}</td>
                 <td>{m.author_name}</td>
                 <td><span className={`ms-stage-badge ms-stage-${m.current_stage}`}>{m.stage_label}</span></td>
                 <td>
-                  <button className="ms-btn" onClick={() => navigate(`/admin/manuscripts/${m.id}`)}>Détail</button>
-                  {m.current_stage === 'in_correction' && (
-                    <>
-                      <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => openUpload(m.id)}>
-                        Documents
+                  {/* Une seule action primaire par ligne — l'étape suivante attendue.
+                      Les autres restent en secondaire pour ne pas se disputer l'œil. */}
+                  <div className="ms-actions-cell">
+                    <button className="ms-btn" onClick={() => navigate(`/admin/manuscripts/${m.id}`)}>
+                      <FiEye aria-hidden="true" /> Détail
+                    </button>
+                    {(m.current_stage === 'in_correction'
+                      || (m.current_stage === 'correction_author_review' && isAdmin)) && (
+                      <button className="ms-btn" onClick={() => openUpload(m.id)}>
+                        <FiPaperclip aria-hidden="true" /> Documents
                       </button>
-                      <button className="ms-btn ms-btn-primary" style={{ marginLeft: 6 }} onClick={() => sendToAuthor(m.id)}>
-                        Envoyer à l'auteur
-                      </button>
-                      {isAdmin && (
-                        <button className="ms-btn ms-btn-success" style={{ marginLeft: 6 }} onClick={() => validateCorrection(m.id, 'approved')}>
-                          Valider la correction
+                    )}
+
+                    {m.current_stage === 'in_correction' && (
+                      <>
+                        <span className="ms-actions-sep" aria-hidden="true" />
+                        <button className="ms-btn ms-btn-primary" onClick={() => sendToAuthor(m.id)}>
+                          <FiSend aria-hidden="true" /> Envoyer à l&apos;auteur
                         </button>
-                      )}
-                      {canSendEditorial && (
-                        <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => openEditorial(m.id)}>
-                          → Production éditoriale
+                        {isAdmin && (
+                          <button className="ms-btn" onClick={() => validateCorrection(m.id, 'approved')}>
+                            <FiCheck aria-hidden="true" /> Valider
+                          </button>
+                        )}
+                        {canSendEditorial && (
+                          <button className="ms-btn" onClick={() => openEditorial(m.id)}>
+                            <FiLayers aria-hidden="true" /> Production éditoriale
+                          </button>
+                        )}
+                      </>
+                    )}
+
+                    {m.current_stage === 'correction_author_review' && isAdmin && (
+                      <>
+                        <span className="ms-actions-sep" aria-hidden="true" />
+                        <button className="ms-btn ms-btn-primary" onClick={() => validateCorrection(m.id, 'approved')}>
+                          <FiCheck aria-hidden="true" /> Valider la correction
                         </button>
-                      )}
-                    </>
-                  )}
-                  {m.current_stage === 'correction_author_review' && isAdmin && (
-                    <>
-                      <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => openUpload(m.id)}>
-                        Documents
-                      </button>
-                      <button className="ms-btn ms-btn-primary" style={{ marginLeft: 6 }} onClick={() => validateCorrection(m.id, 'approved')}>
-                        Valider la correction
-                      </button>
-                      <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => validateCorrection(m.id, 'changes_requested')}>
-                        Renvoyer en correction
-                      </button>
-                    </>
-                  )}
+                        <button className="ms-btn" onClick={() => validateCorrection(m.id, 'changes_requested')}>
+                          <FiRotateCcw aria-hidden="true" /> Renvoyer en correction
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+
+      {!loading && upcoming.length > 0 && (
+        <>
+          <h3 style={{ marginTop: 28 }}>Dossiers qui vous sont confiés ({upcoming.length})</h3>
+          <p className="ms-subtitle">
+            Ces manuscrits vous sont déjà affectés mais ne sont pas encore parvenus à l'étape
+            « En correction ». Vous recevrez le texte par e-mail dès qu'ils y arriveront.
+          </p>
+          <table className="ms-table">
+            <thead>
+              <tr><th>Réf.</th><th>Titre</th><th>Auteur</th><th>Étape actuelle</th><th></th></tr>
+            </thead>
+            <tbody>
+              {upcoming.map((m) => (
+                <tr key={m.id}>
+                  <td>{m.ref}</td>
+                  <td>{m.title}</td>
+                  <td>{m.author_name}</td>
+                  <td><span className={`ms-stage-badge ms-stage-${m.current_stage}`}>{m.stage_label}</span></td>
+                  <td>
+                    <div className="ms-actions-cell">
+                      <button className="ms-btn" onClick={() => navigate(`/admin/manuscripts/${m.id}`)}>
+                        <FiEye aria-hidden="true" /> Détail
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
 
       {modal && (
@@ -325,17 +377,19 @@ export default function CorrectionsPanel() {
                         {f.external_url && <em> (lien)</em>}
                         {f.file_size ? <small> · {formatSize(f.file_size)}</small> : null}
                       </div>
-                      <div>
+                      <div className="ms-actions-cell">
                         {safeHttpUrl(f.external_url) ? (
-                          <a className="ms-btn" href={safeHttpUrl(f.external_url)} target="_blank" rel="noopener noreferrer">Ouvrir</a>
+                          <a className="ms-btn" href={safeHttpUrl(f.external_url)} target="_blank" rel="noopener noreferrer">
+                            <FiLink aria-hidden="true" /> Ouvrir
+                          </a>
                         ) : (
                           <a className="ms-btn" href={manuscriptsApi.downloadUrl(modal, f.id)} target="_blank" rel="noopener noreferrer">
-                            Télécharger
+                            <FiDownload aria-hidden="true" /> Télécharger
                           </a>
                         )}
                         {f.kind?.startsWith('production_') && (
-                          <button className="ms-btn" style={{ marginLeft: 6 }} onClick={() => removeFile(f.id)} title="Retirer">
-                            <FiTrash2 />
+                          <button className="ms-btn" onClick={() => removeFile(f.id)} title="Retirer" aria-label="Retirer ce fichier">
+                            <FiTrash2 aria-hidden="true" />
                           </button>
                         )}
                       </div>

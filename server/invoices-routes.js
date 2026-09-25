@@ -154,6 +154,40 @@ async function pendingInvoiceStock(dolibarrPool, id) {
   }));
 }
 
+
+// Inverse de pendingInvoiceStock : exemplaires que la facture devrait avoir
+// sortis mais qui sont revenus en rayon (l'abandon les a restitués). Rouvrir la
+// facture doit les ressortir, faute de quoi la créance vivrait sur des livres
+// comptés deux fois — une fois en stock, une fois chez le client.
+//
+// On ne regarde QUE les produits ayant déjà bougé pour cette facture : une
+// facture ancienne, antérieure à la gestion du stock, n'a aucun mouvement et ne
+// doit surtout pas en générer à la réouverture. Le calcul (quantité facturée +
+// solde net) rend l'appel idempotent : stock encore sorti → rien à faire.
+async function missingInvoiceStock(dolibarrPool, id) {
+  const [rows] = await dolibarrPool.query(
+    `SELECT m.fk_product,
+            SUM(m.value) AS net,
+            CAST(SUBSTRING_INDEX(GROUP_CONCAT(m.fk_entrepot ORDER BY m.rowid DESC), ',', 1)
+                 AS UNSIGNED) AS entrepot,
+            (SELECT COALESCE(SUM(fd.qty), 0)
+               FROM llx_facturedet fd
+               JOIN llx_product p ON p.rowid = fd.fk_product
+              WHERE fd.fk_facture = m.fk_origin
+                AND fd.fk_product = m.fk_product
+                AND p.fk_product_type = 0) AS facture_qty
+       FROM llx_stock_mouvement m
+      WHERE m.origintype = 'facture' AND m.fk_origin = ?
+      GROUP BY m.fk_product`, [id]
+  );
+  return rows
+    .map(r => ({
+      fk_product: Number(r.fk_product),
+      fk_entrepot: Number(r.entrepot) || STOCK_WAREHOUSE_ID,
+      qty: Number(r.facture_qty) + Number(r.net), // sorti net = -net
+    }))
+    .filter(m => m.qty > 0);
+}
 // Utilisateur Dolibarr derrière la clé API admin (pour fk_user_closing).
 let dolibarrUserId = null;
 async function getDolibarrUserId() {
@@ -1125,6 +1159,125 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] abandon error:', msg);
       res.status(500).json({ error: 'Erreur abandon facture', detail: msg });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // RÉOUVERTURE — annuler l'abandon d'une facture
+  //
+  // Une facture peut avoir été classée « abandonnée » à tort : lot de nettoyage
+  // trop large, ou créance jugée irrécouvrable que le client vient finalement
+  // solder. La rouvrir la remet dans les créances sous son numéro d'origine —
+  // aucun nouveau numéro n'est consommé, la séquence légale reste intacte.
+  //
+  // Symétrique exact de /abandon : si l'abandon avait restitué le stock, la
+  // réouverture le ressort ; si la facture a été fermée sans y toucher (lot SQL
+  // de migration), il n'y a rien à bouger. Le solde net des mouvements face aux
+  // quantités facturées tranche, ce qui rend l'appel idempotent.
+  //
+  // Réservé à la direction : rouvrir une créance abandonnée change l'encours
+  // client et peut porter sur un exercice déjà arrêté.
+  // ═══════════════════════════════════════════════════════════
+  router.post('/:id/reopen', auth, noCsrf, async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = parseInt(req.params.id);
+    const reason = nonEmptyReason(req.body?.reason);
+    if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+
+    try {
+      const before = await loadInvoiceRow(dolibarrPool, id);
+      if (!before) return res.status(404).json({ error: 'Facture introuvable' });
+      if (before.fk_statut !== 3) {
+        return res.status(409).json({ error: 'Facture non abandonnée — rien à rouvrir' });
+      }
+
+      const [[closing]] = await dolibarrPool.query(
+        'SELECT close_code, close_note FROM llx_facture WHERE rowid = ?', [id]
+      );
+      // « replaced » = la facture a été refaite ailleurs. La rouvrir ferait vivre
+      // deux créances pour une seule vente.
+      if (closing?.close_code === 'replaced') {
+        return res.status(409).json({
+          error: 'Facture remplacée par une autre — la rouvrir créerait une créance en double',
+        });
+      }
+      // Une facture déjà journalisée ne se rouvre pas à la volée : l'écriture
+      // comptable existante deviendrait fausse. Le sujet passe par le comptable.
+      const [[bk]] = await dolibarrPool.query(
+        'SELECT COUNT(*) AS n FROM llx_accounting_bookkeeping WHERE doc_ref = ?', [before.ref]
+      );
+      if (Number(bk.n) > 0) {
+        return res.status(409).json({
+          error: `Facture déjà passée en comptabilité (${bk.n} écriture(s)) — à traiter avec le comptable`,
+        });
+      }
+
+      // Le stock rendu lors de l'abandon doit repartir avec la créance.
+      const reissued = [];
+      for (const m of await missingInvoiceStock(dolibarrPool, id)) {
+        await adminApi.post('/stockmovements', {
+          product_id: m.fk_product,
+          warehouse_id: m.fk_entrepot,
+          qty: -m.qty, // NÉGATIF obligatoire : l'API retourne un type 2 en type 3 (entrée) si qty ≥ 0
+          type: 2,     // sortie
+          price: 0,    // prix nul → le PMP n'est pas altéré
+          movementlabel: `Facture ${before.ref} rouverte — sortie stock`,
+          origin_type: 'facture',
+          origin_id: id,
+        });
+        reissued.push({ fk_product: m.fk_product, fk_entrepot: m.fk_entrepot, qty: m.qty });
+      }
+
+      // Statut cible : une facture que ses règlements couvrent déjà repart en
+      // « Payée » (Facture::setPaid), sinon elle redevient une créance ouverte.
+      const { paid } = await sumPayments(dolibarrPool, id);
+      const credits = await sumAppliedCredits(dolibarrPool, id);
+      const due = Number(before.total_ttc) - paid - credits.total;
+      const settled = due <= 0;
+      const closingUser = await getDolibarrUserId();
+
+      const [r] = settled
+        ? await dolibarrPool.query(
+            `UPDATE llx_facture
+                SET fk_statut = 2, paye = 1, close_code = NULL, close_note = NULL,
+                    date_closing = NOW(), fk_user_closing = ?, fk_user_modif = ?, tms = NOW()
+              WHERE rowid = ? AND fk_statut = 3`,
+            [closingUser, closingUser, id]
+          )
+        : await dolibarrPool.query(
+            `UPDATE llx_facture
+                SET fk_statut = 1, paye = 0, close_code = NULL, close_note = NULL,
+                    date_closing = NULL, fk_user_closing = NULL, fk_user_modif = ?, tms = NOW()
+              WHERE rowid = ? AND fk_statut = 3`,
+            [closingUser, id]
+          );
+      if (r.affectedRows !== 1) {
+        return res.status(409).json({ error: 'Statut modifié entre-temps — rechargez la liste' });
+      }
+
+      writeAudit(db, {
+        admin: req.admin, fk_facture: id, ref_facture: before.ref,
+        action: 'reopen', reason,
+        before: {
+          fk_statut: before.fk_statut, paye: before.paye,
+          close_code: closing?.close_code || null, close_note: closing?.close_note || null,
+          total_ttc: Number(before.total_ttc),
+        },
+        after: {
+          fk_statut: settled ? 2 : 1, paye: settled ? 1 : 0,
+          deja_regle: paid + credits.total, reste_a_encaisser: settled ? 0 : due,
+          stock_reissued: reissued,
+        },
+      });
+      res.json({
+        success: true, ref: before.ref,
+        status: settled ? 2 : 1, due: settled ? 0 : due,
+        stock_reissued: reissued,
+      });
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.error('[INVOICES] reopen error:', msg);
+      res.status(500).json({ error: 'Erreur réouverture facture', detail: msg });
     }
   });
 

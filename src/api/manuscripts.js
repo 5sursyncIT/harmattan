@@ -1,10 +1,30 @@
 import api from './dolibarr';
 
 export const manuscriptsApi = {
-  // Vue globale
+  // Vue globale — réponse paginée { rows, total, page, pages, limit,
+  // stage_counts, group_counts }. Filtres acceptés : q, stage(s), group, genre,
+  // intervenant (+ metier), unassigned, contract, series, date_field +
+  // date_from/date_to, stale (jours sans mouvement), sort/order, page/limit.
   list: (params = {}) => api.get('/admin/manuscripts/v2', { params }),
   get: (id) => api.get(`/admin/manuscripts/v2/${id}`),
   stages: () => api.get('/admin/manuscripts/v2/stages'),
+  // Référentiel des filtres : étapes, familles, genres présents, intervenants affectés.
+  filters: () => api.get('/admin/manuscripts/v2/filters'),
+  // ── Doublons ──────────────────────────────────────────────────────────────
+  // Groupes de manuscrits soupçonnés d'être le même ouvrage (même fichier, même
+  // auteur + titre, même nom avec un e-mail retapé…). Le barrage de la
+  // soumission publique arrête les cas certains ; ceux-ci demandent un arbitrage.
+  duplicateGroups: (params = {}) => api.get('/admin/manuscripts/v2/duplicates', { params }),
+  // Relie une copie à son original — réversible, sans suppression ni changement
+  // d'étape ; le doublon sort simplement des listes et des compteurs.
+  markDuplicate: (id, originalId, reason = '') =>
+    api.post(`/admin/manuscripts/v2/${id}/duplicate`, { of: originalId, reason }),
+  unmarkDuplicate: (id) => api.delete(`/admin/manuscripts/v2/${id}/duplicate`),
+  // Suppression définitive d'un doublon DÉJÀ marqué (refusée s'il porte un
+  // contrat, un ISBN ou un produit). Fichiers + instantané archivés côté serveur.
+  deleteDuplicate: (id, reason = '') => api.delete(`/admin/manuscripts/v2/${id}`, { data: { reason } }),
+  // Export CSV du résultat courant (mêmes filtres, sans pagination).
+  exportCsv: (params = {}) => api.get('/admin/manuscripts/v2/export.csv', { params, responseType: 'blob' }),
   assignedToMe: () => api.get('/admin/manuscripts/assigned'),
   assign: (id, role, userId, applyToSeries = false) =>
     api.post(`/admin/manuscripts/v2/${id}/assign`, { role, user_id: userId, apply_to_series: applyToSeries }),

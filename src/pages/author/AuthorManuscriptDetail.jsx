@@ -4,7 +4,6 @@ import { FiArrowLeft, FiDownload, FiCheck, FiX, FiExternalLink, FiUpload } from 
 import toast from 'react-hot-toast';
 import { authorApi } from '../../api/author';
 import { safeHttpUrl } from '../../utils/safeUrl';
-import ManuscriptTimeline from '../../components/common/ManuscriptTimeline';
 import NotificationBell from '../../components/author/NotificationBell';
 import './AuthorPages.css';
 
@@ -13,6 +12,7 @@ const KIND_LABELS = {
   correction: 'Manuscrit corrigé',
   author_final: 'Version finale auteur',
   bat_cover: 'BAT couverture',
+  author_review: 'Votre retour de relecture',
 };
 
 function formatSize(bytes) {
@@ -32,6 +32,8 @@ export default function AuthorManuscriptDetail() {
   const [comment, setComment] = useState('');
   const [reworkFile, setReworkFile] = useState(null);
   const [reworkNote, setReworkNote] = useState('');
+  // Fichier facultatif joint à la relecture des corrections (version annotée).
+  const [reviewFile, setReviewFile] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -50,7 +52,7 @@ export default function AuthorManuscriptDetail() {
     setActionLoading(true);
     try {
       if (modal === 'correction') {
-        await authorApi.validateCorrection(id, decision, comment);
+        await authorApi.validateCorrection(id, decision, comment, reviewFile);
       } else {
         await authorApi.validateBat(id, decision, comment);
       }
@@ -58,6 +60,7 @@ export default function AuthorManuscriptDetail() {
       setModal(null);
       setComment('');
       setDecision('approved');
+      setReviewFile(null);
       load();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur');
@@ -87,7 +90,7 @@ export default function AuthorManuscriptDetail() {
 
   if (loading) return <div className="author-page"><div className="container"><p>Chargement...</p></div></div>;
   if (!data) return null;
-  const { manuscript, stages, files, evaluations } = data;
+  const { manuscript, files, evaluations } = data;
 
   const canValidateCorrection = manuscript.current_stage === 'correction_author_review';
   const canValidateBat = manuscript.current_stage === 'bat_author_review';
@@ -137,17 +140,12 @@ export default function AuthorManuscriptDetail() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => { setModal(canValidateCorrection ? 'correction' : 'bat'); setDecision('approved'); setComment(''); }}
+              onClick={() => { setModal(canValidateCorrection ? 'correction' : 'bat'); setDecision('approved'); setComment(''); setReviewFile(null); }}
             >
               Donner mon avis
             </button>
           </div>
         )}
-
-        <section className="author-section">
-          <h2>Suivi du manuscrit</h2>
-          <ManuscriptTimeline stages={stages} />
-        </section>
 
         {evaluations?.length > 0 && (
           <section className="author-section">
@@ -265,8 +263,22 @@ export default function AuthorManuscriptDetail() {
                 <label>Commentaire {decision === 'changes_requested' && <span style={{ color: '#dc2626' }}>*</span>}</label>
                 <textarea value={comment} onChange={(e) => setComment(e.target.value)} rows={4} />
               </div>
+              {modal === 'correction' && (
+                <div className="form-group">
+                  <label>Joindre votre version <span style={{ color: '#64748b', fontWeight: 400 }}>(facultatif)</span></label>
+                  <input
+                    type="file"
+                    accept=".pdf,.doc,.docx,.odt,.rtf"
+                    onChange={(e) => setReviewFile(e.target.files?.[0] || null)}
+                  />
+                  <small style={{ color: '#64748b' }}>
+                    Si vous avez annoté ou retravaillé le document, joignez-le ici : le correcteur
+                    le recevra avec votre avis. PDF, DOC, DOCX, ODT ou RTF — 20 Mo maximum.
+                  </small>
+                </div>
+              )}
               <div className="author-modal-actions">
-                <button type="button" className="btn btn-ghost" onClick={() => setModal(null)} disabled={actionLoading}>Annuler</button>
+                <button type="button" className="btn btn-ghost" onClick={() => { setModal(null); setReviewFile(null); }} disabled={actionLoading}>Annuler</button>
                 <button
                   type="button"
                   className="btn btn-primary"

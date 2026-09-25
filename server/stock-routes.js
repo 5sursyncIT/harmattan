@@ -19,6 +19,7 @@ import {
   createStockJournal, classifyMovement, resolveActor, decodeDolibarrLabel,
   MOVEMENT_KINDS, kindSqlPredicate,
 } from './stock-journal.js';
+import { cache } from './sync.js';
 
 export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   const router = Router();
@@ -26,11 +27,35 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
   // Attribution des mouvements de stock aux utilisateurs de l'app (cf. stock-journal.js).
   const journal = createStockJournal(db);
 
+  // Dépôt de vente au comptoir : c'est le SEUL stock que la caisse peut vendre
+  // (le POS décrémente ce dépôt). Le reste dort en réserve.
+  const SHOP_WAREHOUSE = 4;
+
   // Libraire = lecture seule sur le module stock
   function blockLibrarianWrite(req, res, next) {
     if (req.admin?.role === 'librarian') return res.status(403).json({ error: 'Accès en lecture seule pour votre profil' });
     next();
   }
+
+  // Cache du dashboard : les KPIs coûtent ~7 agrégats MySQL sur tout le catalogue,
+  // pour des données qui ne bougent qu'au rythme des mouvements de stock et du
+  // batch quotidien. Toute écriture sur le module purge l'entrée (middleware
+  // ci-dessous), donc le TTL n'est qu'un filet de sécurité pour les mouvements
+  // faits hors de l'app (Dolibarr, POS).
+  const DASHBOARD_CACHE_KEY = 'stock:dashboard';
+  const DASHBOARD_CACHE_TTL = 90; // secondes
+
+  router.use((req, res, next) => {
+    if (req.method === 'GET') return next();
+    // Purge à l'entrée ET à la sortie : à l'entrée seulement, un GET /dashboard
+    // concurrent pourrait repeupler le cache avec l'état d'avant la mutation et
+    // le figer 90 s.
+    cache.del(DASHBOARD_CACHE_KEY);
+    res.on('finish', () => {
+      if (res.statusCode < 400) cache.del(DASHBOARD_CACHE_KEY);
+    });
+    next();
+  });
 
   // ─── SQLite tables ────────────────────────────────────────
 
@@ -182,7 +207,26 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
 
   router.get('/dashboard', auth, async (req, res) => {
     try {
-      const kpis = await calculateStockKPIs(dolibarrPool);
+      const cached = cache.get(DASHBOARD_CACHE_KEY);
+      if (cached) return res.json(cached);
+
+      // Les trois blocs MySQL sont indépendants : on les lance en parallèle
+      // plutôt que d'additionner leurs latences (le pool absorbe 3 connexions).
+      // `top_products` n'affiche que 20 lignes — inutile d'en calculer 50.
+      const [kpis, topProducts, [[dormant]]] = await Promise.all([
+        calculateStockKPIs(dolibarrPool),
+        calculateCoverageAndRotation(dolibarrPool, 20),
+        // Stock dormant (produits avec stock > 0 et 0 ventes 180j)
+        dolibarrPool.query(
+          `SELECT COUNT(*) AS count FROM llx_product p
+           WHERE p.tosell = 1 AND p.stock > 0
+           AND p.rowid NOT IN (
+             SELECT DISTINCT fd.fk_product FROM llx_facturedet fd
+             JOIN llx_facture f ON f.rowid = fd.fk_facture
+             WHERE f.fk_statut > 0 AND fd.qty > 0 AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 180 DAY)
+           )`
+        ),
+      ]);
 
       // Alertes ouvertes par type
       const alertCounts = db.prepare(
@@ -193,52 +237,24 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
       ).all();
 
       // Couverture moyenne sur top références
-      const topProducts = await calculateCoverageAndRotation(dolibarrPool, 50);
       const avgCoverage = topProducts.length > 0
         ? Math.round(topProducts.reduce((s, p) => s + Math.min(p.coverage_days, 365), 0) / topProducts.length)
         : 0;
 
-      // Stock par éditeur
-      const [byPublisher] = await dolibarrPool.query(
-        `SELECT COALESCE(pe.editeur, 'Non qualifié') AS editeur,
-                COUNT(*) AS products,
-                COALESCE(SUM(CASE WHEN p.stock <= 0 THEN 1 ELSE 0 END), 0) AS ruptures,
-                COALESCE(SUM(p.stock), 0) AS units
-         FROM llx_product p
-         LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
-         WHERE p.tosell = 1
-         GROUP BY pe.editeur
-         ORDER BY products DESC`
-      );
-
-      // Stock dormant (produits avec stock > 0 et 0 ventes 180j)
-      const [[dormant]] = await dolibarrPool.query(
-        `SELECT COUNT(*) AS count FROM llx_product p
-         WHERE p.tosell = 1 AND p.stock > 0
-         AND p.rowid NOT IN (
-           SELECT DISTINCT fd.fk_product FROM llx_facturedet fd
-           JOIN llx_facture f ON f.rowid = fd.fk_facture
-           WHERE f.fk_statut > 0 AND fd.qty > 0 AND f.datef >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 180 DAY)
-         )`
-      );
-
       // Sous point de commande
       const sousRop = db.prepare(`SELECT COUNT(*) AS count FROM stock_alerts WHERE alert_type = 'sous_point_de_commande' AND status = 'open'`).get();
 
-      res.json({
+      const payload = {
         ...kpis,
         avg_coverage_days: avgCoverage,
         dormant_count: dormant.count,
         sous_rop_count: sousRop?.count || 0,
         alert_summary: alertCounts,
-        by_publisher: byPublisher.map(p => ({
-          editeur: p.editeur,
-          products: p.products,
-          ruptures: p.ruptures,
-          units: p.units,
-        })),
-        top_products: topProducts.slice(0, 20),
-      });
+        top_products: topProducts,
+      };
+
+      cache.set(DASHBOARD_CACHE_KEY, payload, DASHBOARD_CACHE_TTL);
+      res.json(payload);
     } catch (err) {
       console.error('[STOCK] Dashboard error:', err.message);
       res.status(500).json({ error: 'Erreur chargement dashboard stock' });
@@ -363,6 +379,29 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
       const limitInt = Math.min(parseInt(limit) || 50, 200);
       const pageInt = Math.max(1, parseInt(page));
       const paginated = enriched.slice((pageInt - 1) * limitInt, pageInt * limitInt);
+
+      // Ventilation par dépôt des lignes affichées : `stock` est le TOTAL tous
+      // dépôts (llx_product.stock) alors que la caisse ne vend que le Rayon.
+      // Sans cette ventilation, back-office et POS semblent se contredire
+      // (ex. 28 au total dont 4 seulement en rayon).
+      if (paginated.length) {
+        const ids = paginated.map(p => p.product_id);
+        const [whRows] = await dolibarrPool.query(
+          `SELECT fk_product, fk_entrepot, reel FROM llx_product_stock
+           WHERE fk_product IN (${ids.map(() => '?').join(',')})`,
+          ids
+        );
+        const byProduct = new Map();
+        for (const r of whRows) {
+          if (!byProduct.has(r.fk_product)) byProduct.set(r.fk_product, {});
+          byProduct.get(r.fk_product)[r.fk_entrepot] = Number(r.reel) || 0;
+        }
+        for (const p of paginated) {
+          const per = byProduct.get(p.product_id) || {};
+          p.stock_shop = per[SHOP_WAREHOUSE] || 0;
+          p.stock_reserve = Math.max(0, (Number(p.stock) || 0) - p.stock_shop);
+        }
+      }
 
       res.json({ products: paginated, total, page: pageInt, pages: Math.ceil(total / limitInt) });
     } catch (err) {
@@ -689,8 +728,11 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
       if (pid) {
         // Tous les entrepôts actifs + stock courant du produit dans chacun
         // (LEFT JOIN : un dépôt sans ligne de stock pour ce produit → reel 0).
+        // NB : llx_entrepot n'a pas de colonne `label` (le nom du dépôt est dans
+        // `ref`) — la sélectionner faisait échouer toute la requête en erreur 1054
+        // et l'écran d'ajustement affichait « Impossible de charger les dépôts ».
         const [rows] = await dolibarrPool.query(
-          `SELECT e.rowid AS id, e.ref, e.label, e.lieu, COALESCE(ps.reel, 0) AS reel
+          `SELECT e.rowid AS id, e.ref, e.lieu, COALESCE(ps.reel, 0) AS reel
            FROM llx_entrepot e
            LEFT JOIN llx_product_stock ps ON ps.fk_entrepot = e.rowid AND ps.fk_product = ?
            WHERE e.statut = 1 ORDER BY e.ref`, [pid]
@@ -698,7 +740,7 @@ export function createStockRouter({ db, dolibarrPool, auth, csrfProtection }) {
         return res.json({ warehouses: rows, default_warehouse: 4 });
       }
       const [rows] = await dolibarrPool.query(
-        `SELECT rowid AS id, ref, label, lieu FROM llx_entrepot WHERE statut = 1 ORDER BY ref`
+        `SELECT rowid AS id, ref, lieu FROM llx_entrepot WHERE statut = 1 ORDER BY ref`
       );
       res.json({ warehouses: rows, default_warehouse: 4 });
     } catch (err) {

@@ -57,7 +57,15 @@ export default function ProductGrid({ category }) {
             <span className="pos-product-price">
               {parseInt(p.price_ttc).toLocaleString('fr-FR')} XOF
             </span>
-            {p.stock_reel <= 0 && <span className="pos-product-badge-out">Rupture</span>}
+            {p.stock_reel <= 0 && (
+              Number(p.stock_total || 0) > 0 ? (
+                <span className="pos-product-badge-reserve" title={`Rien en rayon, ${p.stock_total} en réserve — à descendre avant de vendre`}>
+                  Réserve {p.stock_total}
+                </span>
+              ) : (
+                <span className="pos-product-badge-out">Rupture</span>
+              )
+            )}
             {p.stock_reel > 0 && p.stock_reel <= 3 && (
               <span className="pos-product-badge-low">{p.stock_reel}</span>
             )}

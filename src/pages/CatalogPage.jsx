@@ -8,9 +8,14 @@ import './CatalogPage.css';
 
 const ITEMS_PER_PAGE = 20;
 
+// Tri par défaut : date de parution décroissante. Les livres sans année de parution
+// renseignée sont relégués en fin de liste par le serveur, du plus récemment ajouté
+// au plus ancien.
+const DEFAULT_SORT = 'pe.publication_year-DESC';
+
 const SORT_OPTIONS = [
-  { value: 't.rowid-DESC', label: 'Plus récents' },
-  { value: 't.rowid-ASC', label: 'Plus anciens' },
+  { value: 'pe.publication_year-DESC', label: 'Plus récents' },
+  { value: 'pe.publication_year-ASC', label: 'Plus anciens' },
   { value: 't.label-ASC', label: 'Titre A-Z' },
   { value: 't.label-DESC', label: 'Titre Z-A' },
   { value: 't.price-ASC', label: 'Prix croissant' },
@@ -33,7 +38,11 @@ export default function CatalogPage() {
   const page = parseInt(searchParams.get('page') || '1');
   const query = searchParams.get('q') || '';
   const categoryId = searchParams.get('category') || '';
-  const sortParam = searchParams.get('sort') || 't.rowid-DESC';
+  // Un lien partagé ou un favori peut porter un ancien tri (`t.rowid-DESC`, retiré
+  // quand le catalogue est passé au tri par parution) : sans repli, le <select>
+  // s'affiche vide et le serveur retombe sur l'ordre d'ajout.
+  const rawSort = searchParams.get('sort');
+  const sortParam = SORT_OPTIONS.some((o) => o.value === rawSort) ? rawSort : DEFAULT_SORT;
   const author = searchParams.get('author') || '';
   const priceMin = searchParams.get('price_min') || '';
   const priceMax = searchParams.get('price_max') || '';
@@ -220,7 +229,7 @@ export default function CatalogPage() {
 
   const selectedCategory = categories.find((c) => c.id == categoryId);
   const totalPages = Math.ceil(totalProducts / ITEMS_PER_PAGE);
-  const hasFilters = query || categoryId || sortParam !== 't.rowid-DESC' || author || priceMin || priceMax || inStock || withCover;
+  const hasFilters = query || categoryId || sortParam !== DEFAULT_SORT || author || priceMin || priceMax || inStock || withCover;
 
   const activeFilterCount = [query, categoryId, author, priceMin || priceMax, inStock, withCover].filter(Boolean).length;
 

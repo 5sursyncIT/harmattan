@@ -107,6 +107,14 @@ export const MANUSCRIPT_EVENTS = {
   comm_checklist:         { label: 'Checklist parution',  authorVisible: false },
   communication_brief_ready: { label: 'Brief communication prêt', authorVisible: false },
   launch_prepared:        { label: 'Lancement commercial préparé', authorVisible: false },
+  // Doublons : un même ouvrage soumis deux fois. Le marquage relie la copie à
+  // l'original (colonne duplicate_of) sans rien supprimer ni changer d'étape ;
+  // il est réversible. Interne — l'auteur n'a pas à voir cette cuisine.
+  duplicate_marked:       { label: 'Marqué comme doublon',   authorVisible: false },
+  duplicate_unmarked:     { label: 'Doublon annulé',         authorVisible: false },
+  // Suppression définitive d'une copie marquée — tracée sur l'ORIGINAL, puisque
+  // la frise de la copie disparaît avec elle.
+  duplicate_deleted:      { label: 'Doublon supprimé',       authorVisible: false },
 };
 
 export const STAGE_ACTORS = {

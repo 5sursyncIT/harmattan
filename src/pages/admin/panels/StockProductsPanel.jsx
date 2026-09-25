@@ -168,7 +168,7 @@ export default function StockProductsPanel() {
                   <th>Réf.</th>
                   <th>Titre</th>
                   <th>ABC</th>
-                  <SortHeader col="stock">Stock</SortHeader>
+                  <SortHeader col="stock">Stock total</SortHeader>
                   <SortHeader col="sold">Ventes 30j</SortHeader>
                   <SortHeader col="coverage">Couverture</SortHeader>
                   <th>Sécurité</th>
@@ -210,7 +210,15 @@ export default function StockProductsPanel() {
                       <td className="mono">{p.ref}</td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</td>
                       <td>{p.abc_class && <span className={`sk-abc sk-abc-${p.abc_class}`}>{p.abc_class}</span>}</td>
-                      <td style={{ fontWeight: 700, color: p.stock <= 0 ? '#dc2626' : p.stock < 5 ? '#f59e0b' : '#0f172a' }}>{p.stock}</td>
+                      <td style={{ fontWeight: 700, color: p.stock <= 0 ? '#dc2626' : p.stock < 5 ? '#f59e0b' : '#0f172a' }}>
+                        {p.stock}
+                        {p.stock_shop != null && (
+                          <div style={{ fontWeight: 500, fontSize: '0.72rem', color: '#64748b' }}
+                            title="Exemplaires en rayon — c'est le seul stock que la caisse peut vendre ; le reste est en réserve">
+                            dont {p.stock_shop} rayon
+                          </div>
+                        )}
+                      </td>
                       <td>{p.sold_30d}</td>
                       <td><CoverageBar days={p.coverage_days} /></td>
                       <td style={{ color: '#64748b' }}>{p.safety_stock}</td>

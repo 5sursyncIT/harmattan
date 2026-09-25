@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { FiArrowLeft, FiDownload, FiUser, FiPlus, FiExternalLink, FiFileText, FiLink2, FiEdit3, FiUpload, FiSend, FiLock, FiUnlock, FiStar } from 'react-icons/fi';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { FiAlertTriangle, FiArrowLeft, FiDownload, FiUser, FiPlus, FiExternalLink, FiFileText, FiLink2, FiEdit3, FiUpload, FiSend, FiLock, FiUnlock, FiStar, FiTrash2 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { manuscriptsApi, intervenantsApi } from '../../../api/manuscripts';
 import { getContracts, signContractPhysical, validateContract } from '../../../api/contracts';
@@ -47,13 +47,133 @@ const LEGACY_COL = {
   assigned_printer_contact_id: 'assigned_printer_id',
 };
 
+// ─── RÉSUMÉ AUTEUR ────────────────────────────────────────────
+// Libellés des familles d'étapes, alignés sur les puces de la vue globale :
+// « Production » doit désigner la même chose sur les deux écrans.
+const AUTHOR_GROUP_LABELS = {
+  a_traiter: 'à traiter', evaluation: 'en évaluation', contrat: 'contrat',
+  production: 'en production', diffusion: 'paru', rejete: 'rejeté', autres: 'autres',
+};
+
+function AuthorSummaryCard({ author }) {
+  const [showBio, setShowBio] = useState(false);
+  const name = author.display_name || `${author.firstname || ''} ${author.lastname || ''}`.trim();
+  const bio = author.submitted_biography || author.bio || '';
+  const LONG_BIO = 260;
+  const since = author.created_at
+    ? new Date(String(author.created_at).replace(' ', 'T') + 'Z')
+      .toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+    : null;
+  const groups = Object.entries(author.manuscripts_by_group || {}).filter(([, n]) => n > 0);
+
+  return (
+    <div className="ms-card ms-author-card">
+      <div className="ms-author-head">
+        {author.photo_url
+          ? <img src={author.photo_url} alt="" className="ms-author-photo" />
+          : <span className="ms-author-photo ms-author-photo-empty"><FiUser size={20} /></span>}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h3 style={{ margin: 0 }}>{name}</h3>
+          {since && <div className="ms-author-since">Auteur chez nous depuis {since}</div>}
+        </div>
+        <Link className="ms-btn" to={`/admin/authors?author=${author.id}`}>
+          <FiUser size={13} /> Fiche auteur
+        </Link>
+      </div>
+
+      <div className="ms-author-contact">
+        {author.email && <a href={`mailto:${author.email}`}>{author.email}</a>}
+        {author.phone && <a href={`tel:${author.phone}`}>{author.phone}</a>}
+      </div>
+
+      <div className="ms-author-tags">
+        <span className={`ms-author-tag ${author.has_account ? 'ok' : 'off'}`}>
+          {author.has_account ? 'Espace auteur activé' : 'Espace auteur jamais activé'}
+        </span>
+        {author.books_count > 0 && (
+          <span className="ms-author-tag ok">{author.books_count} livre{author.books_count > 1 ? 's' : ''} au catalogue</span>
+        )}
+        {author.contracts_count > 0 && (
+          <span className="ms-author-tag">{author.contracts_count} contrat{author.contracts_count > 1 ? 's' : ''}</span>
+        )}
+      </div>
+
+      {/* Volume déposé : le chiffre qui manquait pour situer l'auteur. */}
+      <div className="ms-author-stats">
+        <strong>{author.manuscripts_total}</strong> manuscrit{author.manuscripts_total > 1 ? 's' : ''} déposé{author.manuscripts_total > 1 ? 's' : ''}
+        {groups.length > 0 && (
+          <span className="ms-author-stats-detail">
+            {groups.map(([k, n]) => `${n} ${AUTHOR_GROUP_LABELS[k] || k}`).join(' · ')}
+          </span>
+        )}
+      </div>
+
+      {bio && (
+        <div className="ms-author-bio">
+          <dt>Biographie {author.submitted_biography ? '(transmise avec ce manuscrit)' : '(profil public)'}</dt>
+          <p>
+            {showBio || bio.length <= LONG_BIO ? bio : `${bio.slice(0, LONG_BIO).trimEnd()}…`}
+            {bio.length > LONG_BIO && (
+              <button type="button" className="ms-link-btn" onClick={() => setShowBio((v) => !v)}>
+                {showBio ? 'réduire' : 'lire la suite'}
+              </button>
+            )}
+          </p>
+        </div>
+      )}
+
+      {author.other_manuscripts?.length > 0 && (
+        <div className="ms-author-others">
+          <dt>Autres manuscrits de cet auteur ({author.other_manuscripts.length})</dt>
+          <ul>
+            {author.other_manuscripts.map((m) => (
+              <li key={m.id}>
+                <Link to={`/admin/manuscripts/${m.id}`}>
+                  <span className="ms-cell-ref">{m.ref}</span>
+                  <span className="ms-author-other-title">{m.title}</span>
+                </Link>
+                <span className={`ms-stage-badge ms-stage-${m.current_stage}`}>{m.stage_label}</span>
+                {m.duplicate_of_ref && <span className="ms-flag-badge ms-flag-dup">doublon de {m.duplicate_of_ref}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Une même personne revenue avec un e-mail retapé = deux fiches auteur,
+          donc un historique coupé en deux. Le signaler ici évite de le
+          découvrir six mois plus tard. */}
+      {author.namesakes?.length > 0 && (
+        <div className="ms-author-namesake">
+          <FiAlertTriangle size={13} />
+          <div>
+            <strong>{author.namesakes.length} autre{author.namesakes.length > 1 ? 's' : ''} fiche{author.namesakes.length > 1 ? 's' : ''} auteur au même nom</strong>
+            {' '}— e-mail différent, peut-être la même personne :
+            <div>
+              {author.namesakes.map((n) => (
+                <Link key={n.id} to={`/admin/authors?author=${n.id}`} className="ms-author-namesake-link">{n.email}</Link>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ManuscriptDetailPanel() {
   const { id } = useParams();
+  // Filtres/tri/page de la liste, passés par celle-ci à l'ouverture de la fiche :
+  // le retour ramène l'écran filtré, pas la liste complète. Vide quand la fiche
+  // est ouverte depuis un autre panneau (évaluations, corrections…).
+  const location = useLocation();
+  const backToList = location.state?.fromList ? `?${location.state.fromList}` : '';
   // Actions « éditeur » (affecter des intervenants, créer/rattacher/signer un
   // contrat, confirmer un paiement) : réservées côté backend à super_admin/admin/
   // editor (editorOnly). Les autres profils qui ouvrent cette fiche (Production
   // éditoriale, évaluateur, correcteur, imprimeur) la consultent en lecture seule
   // — on masque donc ces boutons pour eux (sinon ils s'affichent mais renvoient 403).
+  const navigate = useNavigate();
   const role = useAdminRole();
   const canEditWorkflow = ['super_admin', 'admin', 'editor'].includes(role);
   const isAdmin = ['super_admin', 'admin'].includes(role);
@@ -98,6 +218,39 @@ export default function ManuscriptDetailPanel() {
   const [unlockModal, setUnlockModal] = useState(false);
   const [unlockReason, setUnlockReason] = useState('');
   const [finalBusy, setFinalBusy] = useState(false);
+
+  // Annule le marquage : le manuscrit revient dans les listes et les compteurs.
+  const unmarkDuplicate = async () => {
+    if (!window.confirm('Rétablir ce manuscrit comme dossier autonome ?')) return;
+    try {
+      await manuscriptsApi.unmarkDuplicate(id);
+      toast.success('Le manuscrit reprend sa place dans les listes');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur');
+    }
+  };
+
+  // Suppression définitive du doublon marqué ; on bascule ensuite sur l'original.
+  const deleteDuplicate = async () => {
+    const m = data?.manuscript;
+    if (!m) return;
+    const reason = window.prompt(
+      `Supprimer définitivement ${m.ref} ?\n\n`
+      + `La fiche, sa frise et ses fichiers disparaissent de l'application. L'original `
+      + `${m.duplicate_of_ref} est conservé et la suppression est tracée dans sa frise.\n\n`
+      + 'Motif (facultatif) :',
+      '',
+    );
+    if (reason === null) return;
+    try {
+      await manuscriptsApi.deleteDuplicate(id, reason);
+      toast.success(`${m.ref} supprimé`);
+      navigate(`/admin/manuscripts/${m.duplicate_of}`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de la suppression');
+    }
+  };
 
   const load = () => {
     setLoading(true);
@@ -442,7 +595,9 @@ export default function ManuscriptDetailPanel() {
 
   if (loading) return <p>Chargement...</p>;
   if (!data) return null;
-  const { manuscript, stages, files, evaluations, validations, series } = data;
+  const { manuscript, stages, files, evaluations, validations, series, duplicates } = data;
+  const authorSummary = data.author || null;
+  const attachedDuplicates = Array.isArray(duplicates) ? duplicates : [];
   const seriesTomes = Array.isArray(series) ? series : [];
   const isSeries = Boolean(manuscript.series_ref) && seriesTomes.length > 1;
 
@@ -466,9 +621,46 @@ export default function ManuscriptDetailPanel() {
 
   return (
     <div className="ms-panel">
-      <Link to="/admin/manuscripts" className="back-link" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16, color: '#10531a', textDecoration: 'none' }}>
+      <Link to={`/admin/manuscripts${backToList}`} className="back-link" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16, color: '#10531a', textDecoration: 'none' }}>
         <FiArrowLeft /> Retour à la liste
       </Link>
+      {/* Doublon : la fiche doit le dire d'emblée, sinon deux personnes
+          travaillent en parallèle sur le même ouvrage sans le savoir. */}
+      {manuscript.duplicate_of_ref && (
+        <div className="ms-dup-banner">
+          <div>
+            <strong>Ce manuscrit est marqué comme doublon de {manuscript.duplicate_of_ref}</strong>
+            {manuscript.duplicate_of_title ? <> — « {manuscript.duplicate_of_title} »</> : null}
+            <div className="ms-dup-banner-sub">
+              Il n'apparaît plus dans les listes ni dans les compteurs. Le suivi se poursuit sur {manuscript.duplicate_of_ref}.
+              {manuscript.duplicate_marked_by ? ` Marqué par ${manuscript.duplicate_marked_by}.` : ''}
+            </div>
+          </div>
+          <div className="ms-actions-cell">
+            <Link className="ms-btn" to={`/admin/manuscripts/${manuscript.duplicate_of}`}>Ouvrir l'original</Link>
+            {canEditWorkflow && (
+              <>
+                <button type="button" className="ms-btn" onClick={unmarkDuplicate}>Ce n'est pas un doublon</button>
+                <button type="button" className="ms-btn ms-btn-danger" onClick={deleteDuplicate}>
+                  <FiTrash2 size={13} /> Supprimer ce doublon
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+      {attachedDuplicates.length > 0 && (
+        <div className="ms-dup-banner ms-dup-banner-original">
+          <div>
+            <strong>Original — {attachedDuplicates.length} envoi{attachedDuplicates.length > 1 ? 's' : ''} en double rattaché{attachedDuplicates.length > 1 ? 's' : ''}</strong>
+            <div className="ms-dup-banner-sub">
+              {attachedDuplicates.map((d) => (
+                <Link key={d.id} to={`/admin/manuscripts/${d.id}`} className="ms-dup-link">{d.ref}</Link>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <h2>{manuscript.title}</h2>
       {manuscript.subtitle && (
         <p style={{ margin: '-6px 0 8px', fontSize: '1.05rem', fontStyle: 'italic', color: '#475569' }}>{manuscript.subtitle}</p>
@@ -655,6 +847,13 @@ export default function ManuscriptDetailPanel() {
               </>
             )}
           </div>
+
+
+          {/* Résumé auteur : qui est cette personne, que nous a-t-elle déjà
+              confié, et où en sont ces dossiers. Sans cette carte, il fallait
+              quitter l'écran pour découvrir qu'un autre manuscrit du même
+              auteur attend un paiement. */}
+          {authorSummary && <AuthorSummaryCard author={authorSummary} />}
 
           <div className="ms-card">
             <h3><FiFileText style={{ verticalAlign: 'middle', marginRight: 6 }} />Contrat &amp; Devis</h3>

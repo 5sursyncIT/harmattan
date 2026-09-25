@@ -364,6 +364,7 @@ export function createBookRouter({ dolibarrPool, auth, csrfProtection, cache, db
   function invalidateProductCache(productId, ref = null) {
     if (!cache) return;
     cache.del(`product:${productId}`);
+    cache.del(`docs:produit:${productId}`);     // liste des documents (cache négatif)
     cache.del('price-range');
     cache.del('categories:all');
     cache.del('refs-with-real-covers');

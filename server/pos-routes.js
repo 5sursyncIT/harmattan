@@ -25,6 +25,19 @@ const adminApi = (await import('axios')).default.create({
   timeout: 30000,
 });
 
+// Dolibarr répond 304 « Not Modified » à settopaid quand la facture porte déjà
+// paye=1 — c'est le résultat voulu, pas une erreur. axios rejette pourtant tout
+// statut hors 2xx : on l'absorbe ici plutôt que dans chaque appelant (109 faux
+// « settopaid échoué » en 7 jours dans les logs).
+async function settleAsPaid(invoiceId, body) {
+  try {
+    return await adminApi.post(`/invoices/${invoiceId}/settopaid`, body);
+  } catch (err) {
+    if (err.response?.status === 304) return err.response;
+    throw err;
+  }
+}
+
 // POS Configuration
 const POS_CONFIG = {
   defaultTerminal: 3,
@@ -383,11 +396,87 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     return POS_CONFIG.defaultTerminal;
   }
 
+  // Paiements RÉELLEMENT enregistrés dans Dolibarr pour une facture.
+  // Indispensable après un timeout : l'API peut avoir créé le paiement puis mis
+  // trop longtemps à répondre (génération ODT + événement agenda sur BILL_PAYED).
+  // Sans cette relecture, on croit à un échec et on annule une vente encaissée.
+  async function fetchRecordedPayments(invoiceId) {
+    const [rows] = await dolibarrPool.query(
+      `SELECT pf.fk_paiement AS id, pf.amount
+       FROM llx_paiement_facture pf WHERE pf.fk_facture = ?
+       ORDER BY pf.fk_paiement`,
+      [invoiceId]
+    );
+    return rows.map(r => ({ id: Number(r.id), amount: parseFloat(r.amount) || 0 }));
+  }
+
+  // Le paiement a-t-il atterri malgré l'erreur réseau ? On laisse à Dolibarr le
+  // temps de committer (plusieurs tentatives espacées) avant de conclure à un
+  // échec. Sous forte charge (LibreOffice + agenda sur BILL_PAYED), le commit
+  // peut arriver bien après le timeout HTTP — d'où une fenêtre élargie.
+  async function findLandedPayment(invoiceId, amount, knownIds) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 2500));
+      try {
+        const rows = await fetchRecordedPayments(invoiceId);
+        const hit = rows.find(r => !knownIds.includes(r.id) && Math.abs(r.amount - amount) < 1);
+        if (hit) return hit.id;
+      } catch { /* base momentanément indisponible : on retente */ }
+    }
+    return null;
+  }
+
+  // Issue RÉELLE d'une vente, lue en base (rapide, MySQL direct). La lenteur de
+  // Dolibarr peut faire échouer la RÉPONSE HTTP alors que la facture a bel et
+  // bien été validée ET soldée (le paiement a atterri + closepaidinvoices l'a
+  // passée à payé). Ce contrôle distingue un vrai échec d'un faux-négatif AVANT
+  // tout rollback — sans lui, on annule/rejette une vente réussie et le caissier
+  // la ressaisit → doublon payé (cas des 21/08 et 24/08).
+  async function verifySaleOutcome(invoiceId) {
+    const [[inv]] = await dolibarrPool.query(
+      'SELECT ref, total_ttc, fk_statut, paye FROM llx_facture WHERE rowid = ?', [invoiceId],
+    );
+    if (!inv) return { exists: false, settled: false };
+    const [[agg]] = await dolibarrPool.query(
+      'SELECT COALESCE(SUM(amount),0) AS s FROM llx_paiement_facture WHERE fk_facture = ?', [invoiceId],
+    );
+    const total = Number(inv.total_ttc) || 0;
+    const paidSum = Number(agg.s) || 0;
+    const payments = (await fetchRecordedPayments(invoiceId)).map(p => ({ payment_id: p.id, amount: p.amount }));
+    return {
+      exists: true,
+      ref: inv.ref,
+      total,
+      statut: Number(inv.fk_statut),
+      paye: Number(inv.paye),
+      paidSum,
+      payments,
+      // Validée (statut ≠ brouillon) et intégralement réglée.
+      settled: Number(inv.fk_statut) !== 0 && paidSum + 1 >= total,
+    };
+  }
+
   // Annule une vente échouée selon l'étape atteinte — ne laisse jamais de
   // facture validée impayée « fantôme » dans Dolibarr. Ne lève jamais d'erreur.
   async function rollbackSale(sale) {
     if (!sale.invoiceId) return; // rien n'a été créé dans Dolibarr
     const tag = sale.invoiceRef || `#${sale.invoiceId}`;
+
+    // Garde-fou : le compteur local peut sous-estimer la réalité (réponse perdue
+    // après enregistrement). On relit Dolibarr, sinon le cas 2 repasse la facture
+    // en brouillon SANS pouvoir la supprimer (paiement présent) et laisse un
+    // paiement fantôme en caisse.
+    if (sale.validated) {
+      try {
+        const recorded = await fetchRecordedPayments(sale.invoiceId);
+        if (recorded.length > sale.paymentsRecorded) {
+          console.error(`[POS ROLLBACK] ${tag} : ${recorded.length} paiement(s) réellement enregistré(s) (compteur local ${sale.paymentsRecorded}) — bascule en annulation par avoir`);
+          sale.paymentsRecorded = recorded.length;
+        }
+      } catch (e) {
+        console.error(`[POS ROLLBACK] ${tag} : relecture des paiements impossible:`, e.message);
+      }
+    }
 
     // Cas 1 — facture restée au brouillon (échec avant/pendant validation).
     //         Aucun mouvement de stock : suppression directe.
@@ -436,7 +525,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       });
       await adminApi.post(`/invoices/${creditRes.data}/validate`, { idwarehouse: POS_CONFIG.warehouse });
       try {
-        await adminApi.post(`/invoices/${sale.invoiceId}/settopaid`, {
+        await settleAsPaid(sale.invoiceId, {
           close_code: 'abandon',
           close_note: `Vente POS annulée — avoir automatique ${tag}`,
         });
@@ -628,7 +717,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const [rows] = await dolibarrPool.query(
         `SELECT p.rowid AS id, p.ref, p.label, p.price_ttc, p.barcode,
                 pe.soustitre,
-                COALESCE(ps.reel, 0) AS stock_reel
+                COALESCE(ps.reel, 0) AS stock_reel,
+                COALESCE(p.stock, 0) AS stock_total
          FROM llx_product p
          LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
          LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = ${POS_CONFIG.warehouse}
@@ -651,7 +741,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const [rows] = await dolibarrPool.query(
         `SELECT p.rowid AS id, p.ref, p.label, p.price_ttc, p.barcode,
                 pe.soustitre,
-                COALESCE(ps.reel, 0) AS stock_reel
+                COALESCE(ps.reel, 0) AS stock_reel,
+                COALESCE(p.stock, 0) AS stock_total
          FROM llx_product p
          LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
          LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = ${POS_CONFIG.warehouse}
@@ -1321,7 +1412,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         // aucune ligne de paiement (cohérent avec l'historique TakePOS natif :
         // fk_statut=2, paye=1, llx_paiement_facture vide).
         try {
-          await adminApi.post(`/invoices/${invoiceId}/settopaid`);
+          await settleAsPaid(invoiceId);
         } catch (paidErr) {
           console.error(`[POS] Service presse : facture ${invoiceRef} non classée payée:`, paidErr.response?.data || paidErr.message);
         }
@@ -1364,19 +1455,33 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           const { code, mapping, amount, cheque_issuer } = cappedPayments[i];
           const isLast = i === cappedPayments.length - 1;
           const paymentId = await resolvePaymentId(dolibarrPool, code, mapping.paymentId);
-          const payId = await recordInvoicePayment(adminApi, {
-            invoiceId,
-            amount,
-            paymentId,
-            accountId: mapping.bankAccount,
-            datepaye: Math.floor(Date.now() / 1000),
-            isLast,
-            numPayment: invoiceRef,
-            comment: `POS T${terminal} - ${mapping.label}`,
-            ...(code === 'CHQ'
-              ? { chqemetteur: String(cheque_issuer || '').trim() || chequeIssuerDefault }
-              : {}),
-          });
+          let payId;
+          try {
+            payId = await recordInvoicePayment(adminApi, {
+              invoiceId,
+              amount,
+              paymentId,
+              accountId: mapping.bankAccount,
+              datepaye: Math.floor(Date.now() / 1000),
+              isLast,
+              numPayment: invoiceRef,
+              comment: `POS T${terminal} - ${mapping.label}`,
+              ...(code === 'CHQ'
+                ? { chqemetteur: String(cheque_issuer || '').trim() || chequeIssuerDefault }
+                : {}),
+            });
+          } catch (payErr) {
+            // Timeout / coupure : Dolibarr a pu enregistrer le paiement avant de
+            // répondre. On vérifie en base avant de déclarer la vente échouée —
+            // sinon on annule une vente encaissée et le caissier la ressaisit,
+            // d'où un doublon + un paiement fantôme non supprimable.
+            const landed = await findLandedPayment(
+              invoiceId, amount, paymentResults.map(pr => pr.payment_id),
+            );
+            if (landed == null) throw payErr;
+            payId = landed;
+            console.error(`[POS] ${invoiceRef} : réponse Dolibarr perdue (${payErr.message}) mais paiement ${landed} bien enregistré — vente poursuivie`);
+          }
           paymentResults.push({ code, amount, payment_id: payId });
           sale.paymentsRecorded++;
         }
@@ -1386,7 +1491,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         const recordedSum = paymentResults.reduce((s, p) => s + p.amount, 0);
         if (recordedSum + 1 >= totalTtc) {
           try {
-            await adminApi.post(`/invoices/${invoiceId}/settopaid`);
+            await settleAsPaid(invoiceId);
           } catch (paidErr) {
             console.error(`[POS] Paiement enregistré mais facture ${invoiceRef} non marquée payée:`, paidErr.response?.data || paidErr.message);
           }
@@ -1420,12 +1525,56 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       res.json(responsePayload);
     } catch (err) {
       console.error('POS sale error:', JSON.stringify(err.response?.data || err.message), 'status:', err.response?.status);
-      // Rollback : annuler proprement la facture selon l'étape atteinte
-      // (brouillon supprimé, facture validée repassée en brouillon, ou avoir).
+
+      const csid = req.body?.client_sale_id;
+      // Une vente à crédit/service de presse n'a pas de paiement à vérifier ici.
+      const creditSale = req.body?.unpaid === true || req.body?.service_presse === true;
+
+      // AVANT tout rollback : la vente a-t-elle en réalité abouti ? Sous forte
+      // charge, Dolibarr peut avoir validé + encaissé la facture puis dépassé le
+      // timeout HTTP. Annuler ici puis renvoyer une erreur pousserait le caissier
+      // à ressaisir → doublon payé. On lit l'état réel et, si la vente est passée,
+      // on renvoie un SUCCÈS (le faux-négatif est neutralisé à la source).
+      if (sale.invoiceId && !creditSale) {
+        try {
+          const outcome = await verifySaleOutcome(sale.invoiceId);
+          if (outcome.settled) {
+            // Poser le flag payé s'il manque (paiement soldé mais settopaid non joué).
+            if (outcome.paye !== 1) {
+              try { await settleAsPaid(sale.invoiceId); } catch { /* déjà soldée via le paiement */ }
+            }
+            const payload = {
+              invoice_id: sale.invoiceId,
+              invoice_ref: outcome.ref || sale.invoiceRef,
+              total_ttc: outcome.total,
+              payments: outcome.payments,
+              unpaid: false,
+              service_presse: false,
+              staff: req.posStaff.name,
+              terminal: getTerminal(req),
+              recovered_after_timeout: true,
+            };
+            if (csid) {
+              try {
+                db.prepare(
+                  "INSERT INTO pos_sale_idempotency (client_sale_id, status, response) VALUES (?, 'done', ?)"
+                  + " ON CONFLICT(client_sale_id) DO UPDATE SET status='done', response=excluded.response",
+                ).run(csid, JSON.stringify(payload));
+              } catch { /* ignore */ }
+            }
+            console.error(`[POS] Vente ${payload.invoice_ref} RÉCUPÉRÉE après timeout — succès renvoyé, aucun doublon.`);
+            return res.json(payload);
+          }
+        } catch (vErr) {
+          console.error('[POS] Vérification post-échec impossible:', vErr.message);
+        }
+      }
+
+      // Vrai échec : rollback ciblé (brouillon supprimé, facture validée repassée
+      // en brouillon, ou avoir), puis on libère l'idempotence (vente relançable).
       try { await rollbackSale(sale); } catch (rbErr) { console.error('[POS ROLLBACK] erreur inattendue:', rbErr.message); }
-      // Libère la réservation d'idempotence — une vente échouée doit être relançable.
-      if (req.body?.client_sale_id) {
-        try { db.prepare('DELETE FROM pos_sale_idempotency WHERE client_sale_id = ?').run(req.body.client_sale_id); } catch { /* ignore */ }
+      if (csid) {
+        try { db.prepare('DELETE FROM pos_sale_idempotency WHERE client_sale_id = ?').run(csid); } catch { /* ignore */ }
       }
       const msg = sale.paymentsRecorded > 0
         ? 'Échec de la vente après encaissement partiel. Un avoir a été créé — vérifiez le remboursement du client.'
@@ -1474,13 +1623,47 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     }
   });
 
+  // Sérialise les règlements portant sur une MÊME facture. Sans ça, deux
+  // requêtes concurrentes lisent toutes deux « reste à payer » AVANT que la
+  // première n'ait committé → double encaissement du montant plein (incidents
+  // des 28 et 29/08/2026, cf. scripts/fix-pos-double-settle-20260829.mjs).
+  // Le cas se produit sans double-clic : `paymentsdistributed` avec
+  // closepaidinvoices garde sa transaction ouverte jusqu'à ~2 min (soldage +
+  // régénération ODT + agenda) ; l'écran figé, le caissier recharge la page —
+  // ce qui remet le garde-fou `busy` de POSSettleUnpaid à false — et relance.
+  // La garde anti-sur-paiement de Dolibarr ne protège pas : en REPEATABLE READ
+  // elle ne voit pas encore le paiement non committé de l'autre requête.
+  // Mutex par facture (le process est unique — cf. senharmattan-shop.service).
+  const settleLocks = new Map(); // fk_facture → { tail: Promise, pending: number }
+  function acquireSettleLock(invoiceId) {
+    const key = String(invoiceId);
+    let entry = settleLocks.get(key);
+    if (!entry) { entry = { tail: Promise.resolve(), pending: 0 }; settleLocks.set(key, entry); }
+    entry.pending += 1;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const myTurn = entry.tail;                          // mon tour : fin de la section critique précédente
+    entry.tail = myTurn.then(() => held, () => held);   // la suivante attend que je rende la main
+    return myTurn.then(() => function releaseSettle() { // le `finally` de la route l'appelle toujours
+      release();
+      entry.pending -= 1;
+      if (entry.pending === 0 && settleLocks.get(key) === entry) settleLocks.delete(key);
+    });
+  }
+
   // Règlement (total ou partiel) d'une facture impayée existante.
   router.post('/invoices/:id/settle', requirePosAuth, saleLimiter, csrfProtection, async (req, res) => {
+    let releaseSettleLock = null;
     try {
       const id = parseInt(req.params.id, 10);
       const { payments } = req.body;
       if (!id) return res.status(400).json({ error: 'Facture invalide' });
       if (!payments?.length) return res.status(400).json({ error: 'Aucun paiement' });
+
+      // À partir d'ici toute la section est sérialisée par facture : la relecture
+      // du reste à payer ci-dessous et l'enregistrement des paiements forment un
+      // tout indivisible.
+      releaseSettleLock = await acquireSettleLock(id);
 
       const norm = payments.map(p => ({ ...p, code: normalizePaymentCode(p.code) }));
       const unknown = norm.filter(p => !PAYMENT_MAP[p.code]);
@@ -1538,7 +1721,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       const recorded = results.reduce((s, p) => s + p.amount, 0);
       const fullyPaid = recorded + 1 >= remaining;
       if (fullyPaid) {
-        try { await adminApi.post(`/invoices/${id}/settopaid`); }
+        try { await settleAsPaid(id); }
         catch (e) { console.error(`[POS] règlement ${inv.ref} : settopaid échoué`, e.response?.data || e.message); }
       }
 
@@ -1551,6 +1734,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     } catch (err) {
       console.error('[POS] settle error:', err.response?.data || err.message);
       res.status(500).json({ error: 'Erreur lors du règlement' });
+    } finally {
+      releaseSettleLock?.();
     }
   });
 
@@ -2042,6 +2227,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
   router.get('/sales/today', requirePosAuth, async (req, res) => {
     try {
       const terminal = getTerminal(req);
+      // `datef` est une colonne DATE, pas un timestamp : la comparaison directe
+      // est à la fois correcte (DATE(FROM_UNIXTIME(datef)) renvoyait 1970) et
+      // indexable via idx_facture_pos_source. Date UTC = date Dakar.
       const today = new Date().toISOString().split('T')[0];
       const [rows] = await dolibarrPool.query(
         `SELECT f.rowid AS id, f.ref, f.total_ttc, f.datef AS date,
@@ -2051,7 +2239,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
          LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
          WHERE f.module_source = 'takepos'
            AND f.pos_source = ?
-           AND DATE(FROM_UNIXTIME(f.datef)) = ?
+           AND f.datef = ?
          ORDER BY f.rowid DESC`,
         [String(terminal), today]
       );
@@ -2083,12 +2271,14 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         where.push('(f.ref LIKE ? OR s.nom LIKE ?)');
         params.push(`%${search}%`, `%${search}%`);
       }
+      // `datef` est une colonne DATE : comparaison directe (indexable) et non
+      // FROM_UNIXTIME, qui castait la date en entier et ne filtrait rien.
       if (dateFrom) {
-        where.push('DATE(FROM_UNIXTIME(f.datef)) >= ?');
+        where.push('f.datef >= ?');
         params.push(dateFrom);
       }
       if (dateTo) {
-        where.push('DATE(FROM_UNIXTIME(f.datef)) <= ?');
+        where.push('f.datef <= ?');
         params.push(dateTo);
       }
       if (status === 'paid') where.push('f.paye = 1');

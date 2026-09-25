@@ -7,6 +7,9 @@ import StockNav from './StockNav';
 import StockAdjustModal from './StockAdjustModal';
 import './Stock.css';
 
+// Dépôt de vente au comptoir : le stock que la caisse vend (cf. StockAdjustModal).
+const SHOP_WAREHOUSE = 4;
+
 /**
  * Ajustement d'inventaire — écran de recherche rapide.
  * On tape un titre / ISBN / référence, on clique « Ajuster », on saisit la
@@ -34,9 +37,17 @@ export default function StockAdjustPanel() {
   }, [q]);
 
   // Met à jour le stock affiché localement après un ajustement réussi.
+  // L'ajustement porte sur UN dépôt : le total bouge de l'écart, et la colonne
+  // « dont rayon » ne change que si c'est bien le rayon qui a été corrigé.
   const handleDone = (res) => {
     if (!res || typeof res.counted !== 'number') return;
-    setProducts(ps => ps.map(p => p.product_id === adjust?.product_id ? { ...p, stock: res.counted } : p));
+    const delta = Number(res.delta) || 0;
+    setProducts(ps => ps.map(p => {
+      if (p.product_id !== adjust?.product_id) return p;
+      const next = { ...p, stock: Math.max(0, (Number(p.stock) || 0) + delta) };
+      if (res.warehouse_id === SHOP_WAREHOUSE) next.stock_shop = res.counted;
+      return next;
+    }));
   };
 
   return (
@@ -51,7 +62,11 @@ export default function StockAdjustPanel() {
       <StockNav />
 
       <p style={{ color: '#64748b', fontSize: '0.88rem', marginTop: 0 }}>
-        Cherchez un titre (titre, ISBN ou référence), puis saisissez la quantité <strong>physiquement présente</strong>. Le système calcule l'écart et corrige le stock.
+        Cherchez un titre (titre, ISBN ou référence), puis saisissez la quantité <strong>physiquement présente</strong>. Le système calcule l'écart et corrige le stock du dépôt choisi.
+        <br />
+        <span style={{ fontSize: '0.82rem' }}>
+          Le <strong>stock total</strong> additionne tous les dépôts ; la caisse (POS), elle, n'affiche et ne vend que les exemplaires <strong>en rayon</strong>.
+        </span>
       </p>
 
       {/* Recherche */}
@@ -84,7 +99,8 @@ export default function StockAdjustPanel() {
               <tr>
                 <th>Réf.</th>
                 <th>Titre</th>
-                <th style={{ textAlign: 'center' }}>Stock système</th>
+                <th style={{ textAlign: 'center' }}>Stock total</th>
+                <th style={{ textAlign: 'center' }}>Dont rayon (caisse)</th>
                 <th style={{ width: 120 }}>Action</th>
               </tr>
             </thead>
@@ -94,6 +110,10 @@ export default function StockAdjustPanel() {
                   <td className="mono">{p.ref}</td>
                   <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</td>
                   <td style={{ textAlign: 'center', fontWeight: 700, color: p.stock <= 0 ? '#dc2626' : p.stock < 5 ? '#f59e0b' : '#0f172a' }}>{p.stock}</td>
+                  <td style={{ textAlign: 'center', fontWeight: 700, color: (p.stock_shop ?? 0) <= 0 ? '#dc2626' : (p.stock_shop ?? 0) < 5 ? '#f59e0b' : '#0f172a' }}
+                    title="Exemplaires en rayon — c'est ce chiffre qu'affiche la caisse">
+                    {p.stock_shop ?? '—'}
+                  </td>
                   <td>
                     <button onClick={() => setAdjust(p)} className="sk-alert-btn"
                       style={{ display: 'flex', alignItems: 'center', gap: 5, color: '#1e40af', borderColor: '#bfdbfe', background: '#eff6ff', fontSize: '0.78rem' }}>

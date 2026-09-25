@@ -45,8 +45,14 @@ dolibarrApi.interceptors.response.use(
       }
     }
 
+    // 404 sur /documents = « ce produit n'a aucun document » : réponse normale
+    // pour la majorité du catalogue, pas une anomalie à journaliser.
+    const expected404 = error.response?.status === 404 && error.config?.url === '/documents';
+
     if (error.response) {
-      console.error(`[DOLIBARR] ${error.config?.method?.toUpperCase()} ${error.config?.url} → ${error.response.status}`);
+      if (!expected404) {
+        console.error(`[DOLIBARR] ${error.config?.method?.toUpperCase()} ${error.config?.url} → ${error.response.status}`);
+      }
     } else {
       console.error(`[DOLIBARR] Request failed:`, error.message);
     }

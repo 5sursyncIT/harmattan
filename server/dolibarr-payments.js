@@ -36,11 +36,17 @@
  * @param {string} [p.comment]            note privée
  * @param {string} [p.chqemetteur]        émetteur du chèque (obligatoire si mode = CHQ)
  * @param {string} [p.chqbank]            banque émettrice (optionnel)
+ * @param {number} [p.timeoutMs=90000]    délai d'attente propre à cet appel
  * @returns {Promise<number>} id du paiement créé
  */
 export async function recordInvoicePayment(adminApi, {
   invoiceId, amount, paymentId, accountId, datepaye,
   isLast = true, numPayment, comment, chqemetteur, chqbank,
+  // Appel NON idempotent et le plus lent de la chaîne : avec closepaidinvoices,
+  // Dolibarr solde la facture, régénère le document ODT et crée l'événement
+  // agenda avant de répondre — au-delà de 30 s le client abandonnait alors que
+  // le paiement était bel et bien créé (doublons POS du 21/08/2026).
+  timeoutMs = 90000,
 }) {
   const body = {
     // Clé = id facture ; on fixe le montant EXACT (Dolibarr le respecte ici).
@@ -54,7 +60,7 @@ export async function recordInvoicePayment(adminApi, {
   };
   if (chqemetteur) body.chqemetteur = chqemetteur;
   if (chqbank) body.chqbank = chqbank;
-  const r = await adminApi.post('/invoices/paymentsdistributed', body);
+  const r = await adminApi.post('/invoices/paymentsdistributed', body, { timeout: timeoutMs });
   return r.data;
 }
 

@@ -53,3 +53,8 @@ export const deleteInvoiceDraft = (id, reason) => api.delete(`/admin/invoices/${
 // plus être supprimée sans trouer la numérotation. L'abandon la sort des créances
 // et restitue le stock qu'elle avait sorti.
 export const abandonInvoice = (id, reason) => api.post(`/admin/invoices/${id}/abandon`, { reason });
+
+// Annule l'abandon d'une facture classée à tort « abandonnée » : elle repart en
+// créance sous son numéro d'origine, et les exemplaires que l'abandon avait
+// restitués ressortent du stock. Réservé à la direction.
+export const reopenInvoice = (id, reason) => api.post(`/admin/invoices/${id}/reopen`, { reason });

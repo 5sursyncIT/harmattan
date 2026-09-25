@@ -5,8 +5,6 @@ import { getRoyalties, getRoyaltyDetails, exportAccounting, createRoyaltySupplie
 import { getPendingIsbnContracts } from '../../../api/contracts';
 import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
-import DolibarrLink from '../../../components/admin/DolibarrLink';
-import { dolibarrUrls } from '../../../utils/dolibarrLinks';
 import toast from 'react-hot-toast';
 import './Accounting.css';
 import { CONTRACT_TYPE_FILTER_GROUPS } from '../../../utils/contractTypes';
@@ -109,8 +107,7 @@ export default function AccountingRoyalties() {
           </h3>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <DolibarrLink href={dolibarrUrls.miscJournal()} title="Journal d'opérations diverses (OD)">Journal OD</DolibarrLink>
-          <DolibarrLink href={dolibarrUrls.importAccounting()} variant="ghost" title="Importer un fichier d'écritures">Importer écritures</DolibarrLink>
+          <Link className="btn btn-outline btn-sm" to="/admin/accounting/entries" title="Écritures comptables : saisie d'OD et transfert en comptabilité">Écritures / OD</Link>
           <button onClick={handleCreateSupplierInvoices} disabled={invoicing || loading || !data?.royalties?.length} className="btn btn-primary" title="Crée une facture fournisseur auteur par contrat, avec déduplication par référence fournisseur">
             <FiFilePlus size={14} /> {invoicing ? 'Création...' : 'Créer factures fournisseur'}
           </button>
@@ -232,14 +229,12 @@ export default function AccountingRoyalties() {
                 {data.royalties.map(r => (
                   <tr key={r.contract_id} onClick={() => openDetail(r)} style={{ cursor: 'pointer' }}>
                     <td className="ac-ref">
-                      <a
-                        href={dolibarrUrls.contract(r.contract_id)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title="Ouvrir le contrat dans Dolibarr"
+                      <Link
+                        to={`/admin/contracts/${r.contract_id}`}
+                        title="Ouvrir le contrat"
                         onClick={(e) => e.stopPropagation()}
                         style={{ color: '#10531a', textDecoration: 'none' }}
-                      >{r.contract_ref}</a>
+                      >{r.contract_ref}</Link>
                     </td>
                     <td style={{ fontWeight: 600 }}>{r.author_name}</td>
                     <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>{r.book_title}</td>

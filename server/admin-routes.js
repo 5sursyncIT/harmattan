@@ -10,6 +10,8 @@ import rateLimit from 'express-rate-limit';
 import { generateManuscriptRef } from './manuscript-workflow.js';
 import { notifyTransition, notifySeriesSubmission } from './manuscript-emails.js';
 import { ensureAuthorTier } from './author-tier.js';
+import { intervenantIdsForAdmin } from './intervenants.js';
+import { ensureDuplicateSchema, findSubmissionDuplicates, hashUploads } from './manuscript-duplicates.js';
 import { countSpecialOrderActionsRequired } from './special-orders-routes.js';
 import { countParutionsTodo } from './parutions-routes.js';
 import {
@@ -416,6 +418,8 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   try { db.exec('ALTER TABLE manuscripts ADD COLUMN tome_number INTEGER'); } catch (e) { void e; }
   try { db.exec('ALTER TABLE manuscripts ADD COLUMN tome_total INTEGER'); } catch (e) { void e; }
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_manuscripts_series ON manuscripts(series_ref)'); } catch (e) { void e; }
+  // Détection des doublons : colonne duplicate_of + index (voir manuscript-duplicates.js).
+  ensureDuplicateSchema(db);
 
   db.exec(`CREATE TABLE IF NOT EXISTS manuscript_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1128,6 +1132,49 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       const isSeries = tomeInputs.length > 1;
       const tomeTotal = tomeInputs.length;
 
+      // ─── BARRAGE ANTI-DOUBLON ───────────────────────────────
+      // Le même ouvrage arrivait plusieurs fois sans que rien ne le signale
+      // (double-clic, renvoi faute de réponse, e-mail retapé avec une typo qui
+      // crée un second compte auteur) : 8 groupes de doublons en base, dont
+      // certains engagés dans deux workflows parallèles. On refuse ce qui est
+      // certain — même fichier au bit près, ou même auteur + même titre sur un
+      // dossier encore ouvert — en rendant à l'auteur SA référence, ce qui vaut
+      // accusé de réception. Les cas douteux passent : c'est l'écran
+      // « Doublons » de l'administration qui les tranche.
+      const uploadHashes = hashUploads(tomeInputs.map((t) => t.file));
+      let duplicateCheck = { blocking: null, matches: [] };
+      try {
+        duplicateCheck = findSubmissionDuplicates(db, {
+          email: cleanEmail, firstname: cleanFirstname, lastname: cleanLastname,
+          title: cleanTitle, hashes: uploadHashes.filter(Boolean),
+        });
+      } catch (err) {
+        // Un défaut de la détection ne doit jamais empêcher une soumission.
+        console.error('[MANUSCRIPT] détection doublon:', err.message);
+      }
+      if (duplicateCheck.blocking) {
+        const dup = duplicateCheck.blocking;
+        const recu = new Date(String(dup.created_at).replace(' ', 'T') + 'Z')
+          .toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
+        const why = dup.reason === 'same_file'
+          ? 'Ce fichier est déjà arrivé chez nous'
+          : `Le manuscrit « ${cleanTitle} » est déjà enregistré à votre nom`;
+        console.warn(`[MANUSCRIPT] Doublon refusé — ${dup.ref} (${dup.reason}) — ${cleanEmail}`);
+        cleanupAll();
+        return res.status(409).json({
+          error: `${why} sous la référence ${dup.ref}, reçu le ${recu}. Inutile de le renvoyer : `
+            + `notre équipe éditoriale revient vers vous dès que son examen est terminé. `
+            + `Pour toute question, répondez à l'e-mail de confirmation en rappelant cette référence.`,
+          errors: { title: `Déjà enregistré sous la référence ${dup.ref}.` },
+          duplicate: { ref: dup.ref, received_at: dup.created_at },
+        });
+      }
+      if (duplicateCheck.matches.length) {
+        // Non bloquant, mais l'administration doit pouvoir le voir venir.
+        console.warn(`[MANUSCRIPT] Soumission proche d'existants (${cleanEmail}) : `
+          + duplicateCheck.matches.map((m) => `${m.ref}:${m.reason}`).join(', '));
+      }
+
       // 1. Find or create author
       let author = db.prepare('SELECT * FROM authors WHERE email = ?').get(cleanEmail);
       let isNewAuthor = false;
@@ -1191,10 +1238,13 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
               storedExternal = tome.externalUrl;
             }
 
+            // sha256 : empreinte du fichier reçu — c'est elle qui permettra de
+            // reconnaître un renvoi du même texte, même retitré.
             db.prepare(
-              `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id, external_url)
-               VALUES (?, 'original', 1, ?, ?, ?, ?, 'author', ?, ?)`
-            ).run(id, storedPath, storedName, storedSize, storedMime, author.id, storedExternal);
+              `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id, external_url, sha256)
+               VALUES (?, 'original', 1, ?, ?, ?, ?, 'author', ?, ?, ?)`
+            ).run(id, storedPath, storedName, storedSize, storedMime, author.id, storedExternal,
+              tome.file ? (uploadHashes[n] || null) : null);
 
             const stageNote = isSeries
               ? `Soumission formulaire public — Tome ${n + 1}/${tomeTotal}${isNewAuthor && n === 0 ? ' — compte créé' : ''}`
@@ -1407,14 +1457,14 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
 
           const [[todayStats]] = await dolibarrPool.query(
             `SELECT COUNT(*) as count, COALESCE(SUM(total_ttc), 0) as revenue
-             FROM llx_facture WHERE fk_statut > 0 AND DATE(FROM_UNIXTIME(datef)) = ?`, [today]
+             FROM llx_facture WHERE fk_statut > 0 AND datef = ?`, [today]
           );
           dolibarr.invoices_today = todayStats.count;
           dolibarr.revenue_today = Math.round(todayStats.revenue);
 
           const [[monthStats]] = await dolibarrPool.query(
             `SELECT COALESCE(SUM(total_ttc), 0) as revenue
-             FROM llx_facture WHERE fk_statut > 0 AND DATE(FROM_UNIXTIME(datef)) >= ?`, [monthStart]
+             FROM llx_facture WHERE fk_statut > 0 AND datef >= ?`, [monthStart]
           );
           dolibarr.revenue_month = Math.round(monthStats.revenue);
 
@@ -1435,7 +1485,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
              FROM llx_facturedet fd
              JOIN llx_product p ON p.rowid = fd.fk_product
              JOIN llx_facture f ON f.rowid = fd.fk_facture
-             WHERE f.fk_statut > 0 AND DATE(FROM_UNIXTIME(f.datef)) >= ?
+             WHERE f.fk_statut > 0 AND f.datef >= ?
              GROUP BY fd.fk_product ORDER BY total_qty DESC LIMIT 5`, [monthStart]
           );
           dolibarr.top_products = topProds.map(p => ({
@@ -1863,37 +1913,50 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         try { pendingManuscripts = db.prepare("SELECT COUNT(*) AS c FROM manuscript_submissions WHERE status = 'reçu'").get()?.c || 0; } catch { /* table may not exist */ }
       }
 
-      // Badges par rôle métier (filtrés sur l'utilisateur connecté)
+      // Badges par rôle métier (filtrés sur l'utilisateur connecté).
+      // Un acteur métier peut être désigné par son compte (`assigned_*_id`,
+      // manuscrits historiques) OU par sa fiche du carnet d'intervenants
+      // (`assigned_*_contact_id`, ce qu'écrit /assign aujourd'hui) : les deux
+      // doivent compter, sinon le badge reste à 0 sur un dossier bien affecté.
       const adminId = req.admin.id;
       const role = req.admin.role;
+      const contactIds = intervenantIdsForAdmin(db, req.admin);
+      // `mine` : dossier assigné au connecté, quelle que soit la colonne porteuse.
+      const mine = (adminCol, contactCol) => (contactIds.length
+        ? { sql: `(${adminCol} = ? OR ${contactCol} IN (${contactIds.map(() => '?').join(',')}))`, params: [adminId, ...contactIds] }
+        : { sql: `${adminCol} = ?`, params: [adminId] });
       let evaluations = 0, corrections = 0, editorial = 0, covers = 0, printing = 0;
       try {
         if (role === 'evaluateur' || role === 'super_admin' || role === 'admin') {
+          const m = mine('assigned_evaluator_id', 'assigned_evaluator_contact_id');
           evaluations = db.prepare(
             `SELECT COUNT(*) AS c FROM manuscripts
-             WHERE current_stage = 'in_evaluation' AND (? IN ('super_admin','admin') OR assigned_evaluator_id = ?)`
-          ).get(role, adminId)?.c || 0;
+             WHERE current_stage = 'in_evaluation' AND (? IN ('super_admin','admin') OR ${m.sql})`
+          ).get(role, ...m.params)?.c || 0;
         }
         if (role === 'correcteur' || role === 'super_admin' || role === 'admin') {
+          const m = mine('assigned_corrector_id', 'assigned_corrector_contact_id');
           corrections = db.prepare(
             `SELECT COUNT(*) AS c FROM manuscripts
-             WHERE current_stage = 'in_correction' AND (? IN ('super_admin','admin') OR assigned_corrector_id = ?)`
-          ).get(role, adminId)?.c || 0;
+             WHERE current_stage = 'in_correction' AND (? IN ('super_admin','admin') OR ${m.sql})`
+          ).get(role, ...m.params)?.c || 0;
         }
         if (role === 'editor' || role === 'production' || role === 'super_admin' || role === 'admin') {
           editorial = db.prepare("SELECT COUNT(*) AS c FROM manuscripts WHERE current_stage = 'in_editorial'").get()?.c || 0;
         }
         if (role === 'infographiste' || role === 'production' || role === 'super_admin' || role === 'admin') {
+          const m = mine('assigned_infographist_id', 'assigned_infographist_contact_id');
           covers = db.prepare(
             `SELECT COUNT(*) AS c FROM manuscripts
-             WHERE current_stage = 'cover_design' AND (? IN ('super_admin','admin','production') OR assigned_infographist_id = ?)`
-          ).get(role, adminId)?.c || 0;
+             WHERE current_stage = 'cover_design' AND (? IN ('super_admin','admin','production') OR ${m.sql})`
+          ).get(role, ...m.params)?.c || 0;
         }
         if (role === 'imprimeur' || role === 'super_admin' || role === 'admin') {
+          const m = mine('assigned_printer_id', 'assigned_printer_contact_id');
           printing = db.prepare(
             `SELECT COUNT(*) AS c FROM manuscripts
-             WHERE current_stage IN ('print_preparation','printing') AND (? IN ('super_admin','admin') OR assigned_printer_id = ?)`
-          ).get(role, adminId)?.c || 0;
+             WHERE current_stage IN ('print_preparation','printing') AND (? IN ('super_admin','admin') OR ${m.sql})`
+          ).get(role, ...m.params)?.c || 0;
         }
       } catch (err) { console.error('Workflow counts error:', err.message); }
 
