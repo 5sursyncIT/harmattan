@@ -29,6 +29,8 @@ const METHODS_CACHE_KEY = 'pos-payment-methods';
 export default function PaymentPanel({ onClose, onComplete, splitMode = false }) {
   const items = usePosCartStore((s) => s.items);
   const customer = usePosCartStore((s) => s.customer);
+  const authorDiscount = usePosCartStore((s) => s.authorDiscount);
+  const requestAuthorDiscount = usePosCartStore((s) => s.requestAuthorDiscount);
   const getTotal = usePosCartStore((s) => s.getTotal);
   const ensureSaleId = usePosCartStore((s) => s.ensureSaleId);
   // const staff = usePosAuthStore((s) => s.staff);
@@ -97,6 +99,19 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
     price_original: i.price_original || undefined,
   }));
 
+  // Remise auteur transmise au serveur (exigée quand le client est un auteur).
+  const authorField = authorDiscount != null ? { author_discount: authorDiscount } : {};
+
+  // Refus serveur « remise auteur à saisir » : le total va changer, on ferme
+  // l'encaissement et on ouvre la saisie — le caissier relance ensuite.
+  const handleAuthorRefusal = (err) => {
+    if (err.response?.data?.code !== 'AUTHOR_DISCOUNT_REQUIRED') return false;
+    toast.error(err.response.data.error);
+    onClose();
+    requestAuthorDiscount();
+    return true;
+  };
+
   // Émet une facture IMPAYÉE (à crédit) — aucun encaissement, réglable plus tard.
   // Exige un client identifié (la créance doit être attribuable).
   const handleCredit = async () => {
@@ -114,9 +129,11 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
         customer_id: customer.id,
         payments: [],
         unpaid: true,
+        ...authorField,
       });
       onComplete(result.data);
     } catch (err) {
+      if (handleAuthorRefusal(err)) return;
       setError(err.response?.data?.error || 'Erreur lors de la facturation à crédit');
     } finally {
       submittingRef.current = false;
@@ -183,6 +200,7 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
         })),
         customer_id: customer?.id || null,
         payments: payments.map((p) => ({ code: p.code, amount: p.amount })),
+        ...authorField,
       });
       onComplete(result.data);
     } catch (err) {
@@ -207,12 +225,14 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
           })),
           customer_id: customer?.id || null,
           payments: payments.map((p) => ({ code: p.code, amount: p.amount })),
+          ...authorField,
         };
         const count = enqueueSale(saleData);
         toast(`Hors ligne — vente mise en file d'attente (${count} en attente)`, { icon: '📡' });
         onComplete({ invoice_ref: `OFFLINE-${Date.now()}`, total_ttc: total, payments, staff: usePosAuthStore.getState().staff?.name, terminal: '-', offline: true });
         return;
       }
+      if (handleAuthorRefusal(err)) return;
       setError(err.response?.data?.error || 'Erreur lors de la vente');
     } finally {
       submittingRef.current = false;

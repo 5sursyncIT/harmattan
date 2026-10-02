@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { FiX, FiSave, FiAlertCircle } from 'react-icons/fi';
+import { FiX, FiSave, FiAlertCircle, FiAlertTriangle, FiExternalLink } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import { createAdminSociete, updateAdminSociete } from '../../api/admin';
 import './TiersFormModal.css';
@@ -45,6 +45,7 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
   const [form, setForm] = useState(emptyForm);
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const [similar, setSimilar] = useState(null); // homonymes renvoyés par le serveur (409)
 
   useEffect(() => {
     if (tier) {
@@ -77,7 +78,10 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
     setErrors({});
   }, [tier]);
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const set = (k, v) => {
+    setForm(f => ({ ...f, [k]: v }));
+    if (k === 'name' || k === 'firstname') setSimilar(null); // nom modifié → avertissement caduc
+  };
 
   // Bascule Particulier/Entreprise : on fusionne (« Prénom NOM » → raison
   // sociale) ou on redécoupe le nom pour ne rien perdre.
@@ -104,7 +108,7 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
     return Object.keys(errs).length === 0;
   };
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (confirmNew = false) => {
     if (!validate()) return;
     setSubmitting(true);
     try {
@@ -133,12 +137,16 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
         await updateAdminSociete(tier.id, payload);
         toast.success('Tiers mis à jour');
       } else {
-        const res = await createAdminSociete(payload);
+        const res = await createAdminSociete(confirmNew === true ? { ...payload, confirm_new: true } : payload);
         toast.success(`Tiers créé : ${res.data.name}`);
       }
       onSaved?.();
       onClose?.();
     } catch (err) {
+      if (!isEdit && err.response?.status === 409 && err.response.data?.similar?.length) {
+        setSimilar(err.response.data.similar);
+        return;
+      }
       toast.error(err.response?.data?.error || 'Erreur enregistrement');
     } finally {
       setSubmitting(false);
@@ -227,9 +235,31 @@ export default function TiersFormModal({ tier, onClose, onSaved }) {
           </div>
         </div>
 
+        {similar && (
+          <div className="tiers-similar" role="alert">
+            <p className="tiers-similar-title"><FiAlertTriangle /> Un tiers portant ce nom existe déjà</p>
+            <p className="tiers-similar-hint">Vérifiez qu'il ne s'agit pas de la même personne avant de créer une nouvelle fiche.</p>
+            <ul>
+              {similar.map((t) => (
+                <li key={t.id}>
+                  <a href={`/admin/tiers/${t.id}`} target="_blank" rel="noreferrer">
+                    {t.name}{t.name_alias ? ` (${t.name_alias})` : ''} <FiExternalLink size={12} />
+                  </a>
+                  <span>{[t.code_client, t.phone, t.email, `${t.invoice_count} facture${t.invoice_count > 1 ? 's' : ''}`].filter(Boolean).join(' · ')}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="tiers-modal-footer">
           <button type="button" className="btn btn-outline" onClick={onClose} disabled={submitting}>Annuler</button>
-          <button type="button" className="btn btn-primary" onClick={handleSubmit} disabled={submitting}>
+          {similar && (
+            <button type="button" className="btn btn-outline" onClick={() => handleSubmit(true)} disabled={submitting}>
+              C'est une autre personne — créer
+            </button>
+          )}
+          <button type="button" className="btn btn-primary" onClick={() => handleSubmit()} disabled={submitting || !!similar}>
             {submitting ? 'Enregistrement…' : (<><FiSave size={14} /> {isEdit ? 'Enregistrer' : 'Créer'}</>)}
           </button>
         </div>

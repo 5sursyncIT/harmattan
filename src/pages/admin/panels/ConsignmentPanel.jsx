@@ -2,21 +2,91 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FiArchive, FiSearch, FiPlus, FiX, FiDownload, FiCheckCircle, FiTrash2,
   FiAlertCircle, FiAlertTriangle, FiPackage, FiUsers, FiFileText, FiDollarSign,
-  FiCornerUpLeft, FiEdit2,
+  FiCornerUpLeft, FiEdit2, FiSend,
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import Loader from '../../../components/common/Loader';
+import useAdminRole from '../../../hooks/useAdminRole';
 import {
   getConsignmentStats, getConsignmentWarehouses, searchConsignmentProducts,
   listConsignors, createConsignor, updateConsignor, searchConsignorTiers,
   listDeposits, getDeposit, createDeposit, validateDeposit, deleteDeposit, returnDeposit, openDepositPdf,
-  previewSettlement, listSettlements, getSettlement, createSettlement, paySettlement, deleteSettlement, openSettlementPdf,
-  createSettlementInvoice, openSettlementInvoicePdf,
+  previewSettlement, listSettlements, getSettlement, createSettlement, deleteSettlement, openSettlementPdf,
+  openSettlementInvoicePdf, settleSettlement, settleConsignorNow,
 } from '../../../api/consignments';
 import './Consignment.css';
 
 const fmtDate = (s) => (s ? new Date(String(s).replace(' ', 'T')).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
 const fmtFcfa = (n) => `${Math.round(Number(n) || 0).toLocaleString('fr-FR')} FCFA`;
+
+// Seuls ces rôles règlent (le serveur l'impose aussi : requireFinance).
+const FINANCE_ROLES = ['super_admin', 'admin', 'comptable'];
+// Dû à un déposant à l'instant T : brouillon ouvert (figé) + ventes pas encore mises en reversement.
+const dueOf = (c) => (c.account?.openDraft?.net || 0) + (c.account?.pendingNet || 0);
+
+// ════════════════════════════════════════════════════════════
+// MODALE RÉGLER — une seule action : facture fournisseur du net,
+// règlement en comptabilité et relevé e-mailé au déposant.
+// ════════════════════════════════════════════════════════════
+function SettleModal({ title, amount, subtitle, email, onConfirm, onClose }) {
+  const [mode, setMode] = useState('LIQ');
+  const [ref, setRef] = useState('');
+  const [notify, setNotify] = useState(!!email);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const data = await onConfirm({ payment_mode: mode, payment_ref: ref, notify });
+      toast.success(`Reversé ${fmtFcfa(data.net)} — facture ${data.invoiceRef || '—'}${data.emailed ? ' · relevé envoyé au déposant' : ''}`);
+      onClose(true);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur règlement', { duration: 8000 });
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="cv-overlay" onClick={() => !busy && onClose(false)}>
+      <div className="cv-modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+        <div className="cv-modal-head">
+          <h3><FiDollarSign size={20} /> {title}</h3>
+          <button className="cv-icon-btn" onClick={() => onClose(false)} aria-label="Fermer"><FiX size={20} /></button>
+        </div>
+        <div className="cv-totals" style={{ marginTop: 0 }}>
+          <div className="cv-total-item net"><div className="lbl">Net à reverser</div><div className="val">{fmtFcfa(amount)}</div></div>
+        </div>
+        {subtitle && <p className="cv-line-sub" style={{ margin: '4px 0 12px' }}>{subtitle}</p>}
+        <div className="cv-grid-2">
+          <div className="cv-field"><label>Mode de règlement *</label>
+            <select className="cv-select" style={{ width: '100%' }} value={mode} onChange={e => setMode(e.target.value)}>
+              <option value="LIQ">Espèces</option>
+              <option value="WAVE">Wave</option>
+              <option value="OM">Orange Money</option>
+              <option value="VIR">Virement bancaire</option>
+              <option value="CHQ">Chèque</option>
+            </select>
+          </div>
+          <div className="cv-field"><label>Référence (facultatif)</label>
+            <input value={ref} onChange={e => setRef(e.target.value)} placeholder="N° de transaction, bordereau…" maxLength={120} />
+          </div>
+        </div>
+        <label className="cv-check">
+          <input type="checkbox" checked={notify} disabled={!email} onChange={e => setNotify(e.target.checked)} />
+          {email ? <>Envoyer le relevé PDF à <strong>{email}</strong></> : 'Pas d\'e-mail sur la fiche déposant : relevé à remettre en main propre'}
+        </label>
+        <div className="cv-callout cv-callout-green"><FiCheckCircle size={16} /> En un clic : facture fournisseur du net (contrepartie comptable de la vente), sortie d'argent enregistrée, reversement clôturé.</div>
+        <div className="cv-modal-actions">
+          <button className="cv-btn cv-btn-outline" onClick={() => onClose(false)} disabled={busy}>Annuler</button>
+          <button className="cv-btn cv-btn-success" onClick={submit} disabled={busy || !(amount > 0)}>
+            <FiCheckCircle size={14} /> {busy ? 'Règlement…' : `Régler ${fmtFcfa(amount)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ════════════════════════════════════════════════════════════
 // MODALE DÉPOSANT
@@ -139,13 +209,40 @@ function DepositModal({ consignors, warehouses, onClose, onCreated }) {
     clearTimeout(timer.current);
     timer.current = setTimeout(() => searchConsignmentProducts(q).then(r => setProductResults(r.data.products || [])).catch(() => {}), 300);
   };
+  // Un titre déjà présent voit sa quantité augmenter : scanner 12 fois le même
+  // livre donne une ligne × 12, pas douze lignes.
   const addProduct = (p) => {
-    setLines(prev => [...prev, {
-      product_id: p.id, isbn: p.isbn || '', label: p.label, author: '',
-      qty: 1, sale_price_ttc: p.price_ttc || 0, commission_rate: defaultRate,
-      _k: `p${p.id}-${prev.length}`, _consigned: p.consigned_by,
-    }]);
+    setLines(prev => {
+      const i = prev.findIndex(l => l.product_id === p.id);
+      if (i !== -1) return prev.map((l, j) => j === i ? { ...l, qty: (parseInt(l.qty, 10) || 0) + 1 } : l);
+      return [...prev, {
+        product_id: p.id, isbn: p.isbn || '', label: p.label, author: '',
+        qty: 1, sale_price_ttc: p.price_ttc || 0, commission_rate: defaultRate,
+        _k: `p${p.id}-${prev.length}`, _consigned: p.consigned_by && String(p.consigned_by) !== String(consignorId),
+      }];
+    });
     setProductResults([]); setProductQuery('');
+  };
+
+  // Douchette : le lecteur tape l'ISBN puis Entrée. Correspondance exacte →
+  // ajout direct ; ISBN inconnu du catalogue → ligne pré-remplie (le produit
+  // sera créé à la validation), il ne reste qu'à saisir titre et prix.
+  const onScanEnter = async () => {
+    const isbn = productQuery.replace(/[-\s]/g, '');
+    if (!/^(97[89]\d{10}|\d{10})$/.test(isbn)) return;
+    clearTimeout(timer.current);
+    try {
+      const { data } = await searchConsignmentProducts(isbn);
+      const exact = (data.products || []).find(p => String(p.isbn).replace(/[-\s]/g, '') === isbn || p.ref === isbn);
+      if (exact) { addProduct(exact); return; }
+    } catch { /* recherche indisponible : saisie manuelle */ }
+    setLines(prev => {
+      const i = prev.findIndex(l => !l.product_id && l.isbn === isbn);
+      if (i !== -1) return prev.map((l, j) => j === i ? { ...l, qty: (parseInt(l.qty, 10) || 0) + 1 } : l);
+      return [...prev, { product_id: null, isbn, label: '', author: '', qty: 1, sale_price_ttc: 0, commission_rate: defaultRate, _k: `s${isbn}-${Date.now()}`, _new: true }];
+    });
+    setProductResults([]); setProductQuery('');
+    toast('ISBN absent du catalogue : saisissez le titre et le prix', { icon: '✍️' });
   };
   const addManual = () => setLines(prev => [...prev, {
     product_id: null, isbn: '', label: '', author: '', qty: 1, sale_price_ttc: 0, commission_rate: defaultRate,
@@ -156,9 +253,10 @@ function DepositModal({ consignors, warehouses, onClose, onCreated }) {
 
   const totalValue = lines.reduce((s, l) => s + (parseInt(l.qty, 10) || 0) * (parseFloat(l.sale_price_ttc) || 0), 0);
 
-  const submit = async () => {
+  const submit = async (andValidate = false) => {
     if (submitting) return;
     if (!consignorId) return toast.error('Sélectionnez un déposant');
+    if (andValidate && !warehouseId) return toast.error("Choisissez l'entrepôt d'entrée pour valider");
     const clean = lines.filter(l => l.label.trim() && (parseInt(l.qty, 10) || 0) > 0 && (l.product_id || /^(97[89]\d{10}|\d{10})$/.test(String(l.isbn).replace(/[-\s]/g, ''))));
     if (clean.length === 0) return toast.error('Au moins une ligne valide (ISBN/titre + quantité)');
     setSubmitting(true);
@@ -172,7 +270,16 @@ function DepositModal({ consignors, warehouses, onClose, onCreated }) {
         note,
         lines: clean.map(l => ({ product_id: l.product_id, isbn: l.isbn, label: l.label, author: l.author, qty: l.qty, sale_price_ttc: l.sale_price_ttc, commission_rate: l.commission_rate })),
       });
-      toast.success(`Dépôt ${res.data.ref} créé`);
+      if (andValidate) {
+        try {
+          const { data } = await validateDeposit(res.data.id);
+          const st = data.stock;
+          if (st.conflicts?.length || st.failed?.length) toast(`Dépôt ${res.data.ref} validé avec ${st.conflicts.length + st.failed.length} ligne(s) à vérifier`, { icon: '⚠️', duration: 8000 });
+          else toast.success(`Dépôt ${res.data.ref} validé — ${st.moved} titre(s) entrés en stock`);
+        } catch (e) {
+          toast.error(`Dépôt ${res.data.ref} créé mais non validé : ${e.response?.data?.error || 'erreur'}`);
+        }
+      } else toast.success(`Dépôt ${res.data.ref} créé (brouillon)`);
       onCreated(res.data.id);
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur création');
@@ -208,7 +315,9 @@ function DepositModal({ consignors, warehouses, onClose, onCreated }) {
           <label>Ajouter un titre (recherche catalogue) ou saisir manuellement</label>
           <div className="cv-search">
             <FiSearch size={15} className="cv-search-ic" />
-            <input value={productQuery} onChange={e => onProductSearch(e.target.value)} placeholder="ISBN, titre ou référence…" />
+            <input value={productQuery} autoFocus onChange={e => onProductSearch(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onScanEnter(); } }}
+              placeholder="Scannez l'ISBN (douchette) ou cherchez un titre…" />
           </div>
           {productResults.length > 0 && (
             <div className="cv-search-results">
@@ -229,7 +338,7 @@ function DepositModal({ consignors, warehouses, onClose, onCreated }) {
         {lines.map((l, idx) => (
           <div key={l._k} className="cv-line">
             <div>
-              <input value={l.label} onChange={e => updateLine(idx, { label: e.target.value })} placeholder="Titre" />
+              <input value={l.label} autoFocus={!!l._new && !l.label} onChange={e => updateLine(idx, { label: e.target.value })} placeholder="Titre" />
               <input value={l.isbn} onChange={e => updateLine(idx, { isbn: e.target.value })} placeholder="ISBN (10 ou 13 chiffres)" style={{ marginTop: 4 }} disabled={!!l.product_id} />
               {l._consigned && <span className="cv-line-sub">⚠ déjà consigné par un autre déposant</span>}
             </div>
@@ -249,11 +358,12 @@ function DepositModal({ consignors, warehouses, onClose, onCreated }) {
           <div className="cv-total-item"><div className="lbl">Valeur déposée</div><div className="val">{fmtFcfa(totalValue)}</div></div>
         </div>
 
-        <div className="cv-callout"><FiAlertTriangle size={16} /> La validation créera les produits manquants (ISBN), fera l'entrée de stock réelle et attribuera les ventes au déposant.</div>
+        <div className="cv-callout"><FiAlertTriangle size={16} /> « Créer et valider » crée les produits manquants (ISBN), fait l'entrée de stock réelle et attribue dès aujourd'hui les ventes de ces titres au déposant.</div>
 
         <div className="cv-modal-actions">
           <button className="cv-btn cv-btn-outline" onClick={onClose} disabled={submitting}>Annuler</button>
-          <button className="cv-btn cv-btn-primary" onClick={submit} disabled={submitting}>{submitting ? 'Création…' : 'Créer le dépôt'}</button>
+          <button className="cv-btn cv-btn-outline" onClick={() => submit(false)} disabled={submitting}>Enregistrer en brouillon</button>
+          <button className="cv-btn cv-btn-success" onClick={() => submit(true)} disabled={submitting}><FiCheckCircle size={14} /> {submitting ? 'Validation…' : 'Créer et valider'}</button>
         </div>
       </div>
     </div>
@@ -452,8 +562,11 @@ function SettlementCreateModal({ consignors, onClose, onCreated }) {
           <div className="cv-field"><label>Au</label>
             <input type="date" value={periodTo} onChange={e => setPeriodTo(e.target.value)} onBlur={runPreview} /></div>
         </div>
+        {preview?.openDraft && (
+          <div className="cv-callout"><FiAlertTriangle size={16} /> Le reversement {preview.openDraft.ref} de ce déposant est encore ouvert : réglez-le ou supprimez-le avant d'en créer un autre.</div>
+        )}
         {preview?.lastSettlementTo && (
-          <div className="cv-callout cv-callout-green"><FiCheckCircle size={16} /> Dernier reversement payé jusqu'au {fmtDate(preview.lastSettlementTo)}. La période démarre le lendemain pour éviter tout double comptage.</div>
+          <div className="cv-callout cv-callout-green"><FiCheckCircle size={16} /> Dernier reversement jusqu'au {fmtDate(preview.lastSettlementTo)}. La période démarre le lendemain pour éviter tout double comptage.</div>
         )}
 
         {loading ? <Loader /> : preview && (
@@ -486,7 +599,7 @@ function SettlementCreateModal({ consignors, onClose, onCreated }) {
 
         <div className="cv-modal-actions">
           <button className="cv-btn cv-btn-outline" onClick={onClose} disabled={saving}>Annuler</button>
-          <button className="cv-btn cv-btn-primary" onClick={submit} disabled={saving || loading || !preview || preview.lines.length === 0}>{saving ? 'Création…' : 'Créer le reversement'}</button>
+          <button className="cv-btn cv-btn-primary" onClick={submit} disabled={saving || loading || !preview || preview.lines.length === 0 || !!preview.openDraft}>{saving ? 'Création…' : 'Créer le reversement'}</button>
         </div>
       </div>
     </div>
@@ -496,12 +609,11 @@ function SettlementCreateModal({ consignors, onClose, onCreated }) {
 // ════════════════════════════════════════════════════════════
 // MODALE DÉTAIL REVERSEMENT
 // ════════════════════════════════════════════════════════════
-function SettlementDetailModal({ id, onClose, onChanged }) {
+function SettlementDetailModal({ id, onClose, onChanged, canSettle }) {
   const [dto, setDto] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [payRef, setPayRef] = useState('');
-  const [payMode, setPayMode] = useState('LIQ');
+  const [showSettle, setShowSettle] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const load = useCallback(() => {
@@ -509,30 +621,6 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
     getSettlement(id).then(r => setDto(r.data)).catch(() => toast.error('Introuvable')).finally(() => setLoading(false));
   }, [id]);
   useEffect(() => { load(); }, [load]);
-
-  const doPay = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const { data } = await paySettlement(id, payRef, payMode);
-      toast.success(data.paymentId ? 'Reversement payé — règlement enregistré en comptabilité' : 'Reversement marqué payé');
-      onChanged(); load();
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur');
-    } finally { setBusy(false); }
-  };
-
-  const doCreateInvoice = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const { data } = await createSettlementInvoice(id);
-      toast.success(`Facture fournisseur ${data.ref} créée`);
-      onChanged(); load();
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur création facture');
-    } finally { setBusy(false); }
-  };
 
   const doDelete = async () => {
     if (busy) return;
@@ -547,7 +635,7 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
   };
 
   return (
-    <div className="cv-overlay" onClick={() => !busy && onClose()}>
+    <div className="cv-overlay" onClick={() => !busy && !showSettle && onClose()}>
       <div className="cv-modal cv-modal-lg" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
         {loading || !dto ? <Loader /> : (
           <>
@@ -585,29 +673,8 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
               <div className="cv-total-item"><div className="lbl">Commission</div><div className="val">{fmtFcfa(dto.totalCommission)}</div></div>
               <div className="cv-total-item net"><div className="lbl">Net à reverser</div><div className="val">{fmtFcfa(dto.totalNetDue)}</div></div>
             </div>
-
-            {dto.status === 'draft' && !dto.invoice && dto.totalNetDue > 0 && (
-              <div className="cv-callout"><FiAlertTriangle size={16} /> La vente de ces livres est déjà comptée en totalité dans votre chiffre d'affaires. Créez la facture fournisseur du net à reverser avant de régler : elle équilibre vos comptes (sans elle, le CA reste gonflé de {fmtFcfa(dto.totalNetDue)}) et c'est elle que le règlement vient solder.</div>
-            )}
-
-            {dto.status === 'draft' && (
-              <div className="cv-grid-2" style={{ marginTop: 12 }}>
-                <div className="cv-field">
-                  <label>Mode de règlement{dto.invoice ? ' *' : ''}</label>
-                  <select className="cv-select" style={{ width: '100%' }} value={payMode} onChange={e => setPayMode(e.target.value)}>
-                    <option value="LIQ">Espèces</option>
-                    <option value="WAVE">Wave</option>
-                    <option value="OM">Orange Money</option>
-                    <option value="VIR">Virement bancaire</option>
-                    <option value="CHQ">Chèque</option>
-                  </select>
-                  {dto.invoice && <span className="cv-line-sub">Solde la facture {dto.invoice.ref} et enregistre la sortie d'argent.</span>}
-                </div>
-                <div className="cv-field">
-                  <label>Référence du paiement (facultatif)</label>
-                  <input value={payRef} onChange={e => setPayRef(e.target.value)} placeholder="N° de transaction, bordereau…" maxLength={120} />
-                </div>
-              </div>
+            {dto.status === 'draft' && !dto.invoice && (
+              <p className="cv-line-sub">Montant recalculé au moment du règlement si des ventes de la période ont été validées ou annulées depuis.</p>
             )}
 
             <div className="cv-modal-actions">
@@ -618,22 +685,28 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
                 <button className="cv-btn cv-btn-danger" onClick={doDelete} disabled={busy}>{busy ? '…' : 'Confirmer'}</button>
               )}
               <button className="cv-btn cv-btn-outline" onClick={() => openSettlementPdf(dto.id)}><FiDownload size={14} /> Relevé PDF</button>
-              {dto.invoice ? (
+              {dto.invoice && (
                 <button className="cv-btn cv-btn-outline" onClick={() => openSettlementInvoicePdf(dto.id)}><FiDownload size={14} /> Facture {dto.invoice.ref}</button>
-              ) : dto.status === 'draft' && (
-                <button className="cv-btn cv-btn-outline" onClick={doCreateInvoice} disabled={busy}><FiFileText size={14} /> {busy ? '…' : 'Créer la facture fournisseur'}</button>
               )}
-              {dto.status === 'draft' && (
-                <button className="cv-btn cv-btn-success" onClick={doPay}
-                  disabled={busy || (!dto.invoice && dto.totalNetDue > 0)}
-                  title={!dto.invoice && dto.totalNetDue > 0 ? "Créez d'abord la facture fournisseur" : undefined}>
-                  <FiCheckCircle size={14} /> {busy ? '…' : 'Marquer payé'}
+              {dto.status === 'draft' && canSettle && (
+                <button className="cv-btn cv-btn-success" onClick={() => setShowSettle(true)} disabled={busy}>
+                  <FiCheckCircle size={14} /> Régler
                 </button>
               )}
             </div>
           </>
         )}
       </div>
+      {showSettle && dto && (
+        <SettleModal
+          title={`Régler ${dto.ref}`}
+          amount={dto.totalNetDue}
+          subtitle={`${dto.consignorName} · ventes du ${fmtDate(dto.periodFrom)} au ${fmtDate(dto.periodTo)}`}
+          email={dto.consignorEmail}
+          onConfirm={(data) => settleSettlement(dto.id, data).then(r => r.data)}
+          onClose={(done) => { setShowSettle(false); if (done) { onChanged(); load(); } }}
+        />
+      )}
     </div>
   );
 }
@@ -642,7 +715,10 @@ function SettlementDetailModal({ id, onClose, onChanged }) {
 // PANNEAU PRINCIPAL
 // ════════════════════════════════════════════════════════════
 export default function ConsignmentPanel() {
-  const [tab, setTab] = useState('deposits');
+  const role = useAdminRole();
+  const canSettle = FINANCE_ROLES.includes(role);
+  const [tab, setTab] = useState('consignors');
+  const [settleConsignor, setSettleConsignor] = useState(null);
   const [stats, setStats] = useState(null);
   const [consignors, setConsignors] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
@@ -693,12 +769,12 @@ export default function ConsignmentPanel() {
         <div className="cv-kpi"><div className="cv-kpi-val">{stats?.consignors ?? 0}</div><div className="cv-kpi-lbl">Déposants actifs</div></div>
         <div className="cv-kpi"><div className="cv-kpi-val">{stats?.deposits?.validated ?? 0}</div><div className="cv-kpi-lbl">Dépôts validés</div></div>
         <div className="cv-kpi"><div className="cv-kpi-val" style={{ color: '#92400e' }}>{stats?.deposits?.draft ?? 0}</div><div className="cv-kpi-lbl">Dépôts en brouillon</div></div>
-        <div className="cv-kpi"><div className="cv-kpi-val" style={{ color: '#10531a' }}>{fmtFcfa(stats?.settlements?.pendingAmount ?? 0)}</div><div className="cv-kpi-lbl">Reversements à payer</div></div>
+        <div className="cv-kpi"><div className="cv-kpi-val" style={{ color: 'var(--color-green)' }}>{fmtFcfa(stats?.settlements?.dueLive ?? 0)}</div><div className="cv-kpi-lbl">À reverser aux déposants (en direct)</div></div>
       </div>
 
       <div className="cv-tabs">
-        <button className={`cv-tab${tab === 'deposits' ? ' active' : ''}`} onClick={() => setTab('deposits')}><FiArchive size={14} /> Dépôts</button>
         <button className={`cv-tab${tab === 'consignors' ? ' active' : ''}`} onClick={() => setTab('consignors')}><FiUsers size={14} /> Déposants</button>
+        <button className={`cv-tab${tab === 'deposits' ? ' active' : ''}`} onClick={() => setTab('deposits')}><FiArchive size={14} /> Dépôts</button>
         <button className={`cv-tab${tab === 'settlements' ? ' active' : ''}`} onClick={() => setTab('settlements')}><FiDollarSign size={14} /> Reversements</button>
       </div>
 
@@ -755,18 +831,29 @@ export default function ConsignmentPanel() {
           ) : (
             <div className="cv-table-wrap">
               <table className="cv-table">
-                <thead><tr><th>Déposant</th><th>Contact</th><th className="cv-num">Commission</th><th className="cv-num">Titres</th><th className="cv-num">Dépôts</th><th></th></tr></thead>
+                <thead><tr><th>Déposant</th><th className="cv-num">Comm.</th><th className="cv-num">Confiés</th><th className="cv-num">En rayon</th><th className="cv-num">Vendus à reverser</th><th className="cv-num">À reverser</th><th>Dernier reversement</th><th></th></tr></thead>
                 <tbody>
-                  {consignors.map(c => (
-                    <tr key={c.id} className="cv-row" onClick={() => { setEditConsignor(c); setShowConsignor(true); }}>
-                      <td><strong>{c.name}</strong></td>
-                      <td>{c.contact_email || c.contact_phone || '—'}</td>
-                      <td className="cv-num">{c.default_commission_rate}%</td>
-                      <td className="cv-num">{c.titles_count}</td>
-                      <td className="cv-num">{c.deposits_count}</td>
-                      <td onClick={e => e.stopPropagation()}><button className="cv-icon-btn" onClick={() => { setEditConsignor(c); setShowConsignor(true); }} title="Modifier"><FiEdit2 size={16} /></button></td>
-                    </tr>
-                  ))}
+                  {consignors.map(c => {
+                    const a = c.account || {};
+                    const due = dueOf(c);
+                    return (
+                      <tr key={c.id} className="cv-row" onClick={() => { setEditConsignor(c); setShowConsignor(true); }}>
+                        <td><strong>{c.name}</strong><div className="cv-line-sub">{c.contact_email || c.contact_phone || 'aucun contact'}</div></td>
+                        <td className="cv-num">{c.default_commission_rate}%</td>
+                        <td className="cv-num">{(a.deposited ?? 0) - (a.returned ?? 0)}</td>
+                        <td className="cv-num">{a.inStock ?? '—'}</td>
+                        <td className="cv-num">{(a.pendingQty ?? 0)}{a.openDraft ? ` + ${a.openDraft.ref}` : ''}</td>
+                        <td className="cv-num"><strong style={{ color: due > 0 ? 'var(--color-green)' : undefined }}>{fmtFcfa(due)}</strong></td>
+                        <td>{a.lastPaidTo ? `jusqu'au ${fmtDate(a.lastPaidTo)}` : <span className="cv-line-sub">jamais</span>}</td>
+                        <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                          {canSettle && due > 0 && (
+                            <button className="cv-btn cv-btn-success" onClick={() => setSettleConsignor(c)} title="Facture, règlement et relevé en une action"><FiSend size={14} /> Régler</button>
+                          )}
+                          <button className="cv-icon-btn" onClick={() => { setEditConsignor(c); setShowConsignor(true); }} title="Modifier"><FiEdit2 size={16} /></button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -810,7 +897,19 @@ export default function ConsignmentPanel() {
         <SettlementCreateModal consignors={consignors} onClose={() => setShowSettle(false)} onCreated={(id) => { setShowSettle(false); refreshAll(); setSettleId(id); }} />
       )}
       {settleId && (
-        <SettlementDetailModal id={settleId} onClose={() => setSettleId(null)} onChanged={refreshAll} />
+        <SettlementDetailModal id={settleId} onClose={() => setSettleId(null)} onChanged={refreshAll} canSettle={canSettle} />
+      )}
+      {settleConsignor && (
+        <SettleModal
+          title={`Reverser à ${settleConsignor.name}`}
+          amount={settleConsignor.account?.openDraft ? settleConsignor.account.openDraft.net : settleConsignor.account?.pendingNet}
+          subtitle={settleConsignor.account?.openDraft
+            ? `Règle le reversement ${settleConsignor.account.openDraft.ref} (jusqu'au ${fmtDate(settleConsignor.account.openDraft.periodTo)}) ; les ventes suivantes iront au prochain.`
+            : `Ventes du ${fmtDate(settleConsignor.account?.pendingFrom)} à aujourd'hui · ${settleConsignor.account?.pendingQty ?? 0} exemplaire(s).`}
+          email={settleConsignor.contact_email}
+          onConfirm={(data) => settleConsignorNow(settleConsignor.id, data).then(r => r.data)}
+          onClose={(done) => { setSettleConsignor(null); if (done) refreshAll(); }}
+        />
       )}
     </div>
   );

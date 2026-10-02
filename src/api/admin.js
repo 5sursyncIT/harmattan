@@ -150,7 +150,8 @@ export const deleteSubscriber = (id) => api.delete(`/admin/newsletter/${id}`);
 export const exportSubscribers = () => '/api/admin/newsletter/export';
 
 // Orders & Payments
-export const confirmOrderPayment = (orderId) => api.post(`/admin/orders/${orderId}/confirm-payment`);
+// payload : { method: 'wave'|'orange_money'|'cheque', reference, cheque_issuer, cheque_bank }
+export const confirmOrderPayment = (orderId, payload) => api.post(`/admin/orders/${orderId}/confirm-payment`, payload);
 export const getAdminPayments = (params = {}) => api.get('/admin/payments', { params });
 export const getPaymentOrphans = () => api.get('/admin/payments/orphans');
 export const getAdminOrderDetail = (orderId) => api.get(`/admin/payments/order/${orderId}`);
@@ -244,6 +245,11 @@ export const createAdminSociete = (data) => api.post('/admin/societes', data);
 export const updateAdminSociete = (id, data) => api.put(`/admin/societes/${id}`, data);
 export const deleteAdminSociete = (id) => api.delete(`/admin/societes/${id}`);
 export const promoteSocieteToAuthor = (id) => api.post(`/admin/societes/${id}/promote-author`);
+export const getSocieteDuplicates = () => api.get('/admin/societes/duplicates');
+export const dismissSocieteDuplicates = (ids) => api.post('/admin/societes/duplicates/dismiss', { ids });
+export const mergeSocietes = (masterId, absorbedIds) => api.post('/admin/societes/merge', { master_id: masterId, absorbed_ids: absorbedIds });
+export const getSocieteMerges = () => api.get('/admin/societes/merges');
+export const revertSocieteMerge = (id) => api.post(`/admin/societes/merges/${id}/revert`);
 
 export const getAdminAuthors = (params = {}, config = {}) => api.get('/admin/authors', { params, ...config });
 export const getAdminAuthor = (id) => api.get(`/admin/authors/${id}`);

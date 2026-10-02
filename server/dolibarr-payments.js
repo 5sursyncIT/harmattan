@@ -99,6 +99,9 @@ export const ECOMMERCE_PAYMENT_MAP = {
                                              // le compte CPTEWAVE (5) est de type caisse
                                              // (courant=2) et refuse tout mode ≠ LIQ.
   OM:      { code: 'OM',    accountId: 4 },  // Code marchand OM
+  ORANGE_MONEY: { code: 'OM', accountId: 4 },  // id du moyen côté site (checkout)
+  CHQ:     { code: 'CHQ',   accountId: 1 },  // COMPTE CBAO HARMATTAN (remise de chèque)
+  CHEQUE:  { code: 'CHQ',   accountId: 1 },
   CB:      { code: 'CB',    accountId: 1 },  // COMPTE CBAO HARMATTAN
   CARD:    { code: 'CB',    accountId: 1 },
   LIQ:     { code: 'LIQ',   accountId: 3 },  // COMPTE LIQUIDE
@@ -121,7 +124,7 @@ export function resolveEcommercePayment(method) {
  * @returns {Promise<number>} id du paiement Dolibarr créé
  */
 export async function recordEcommerceInvoicePayment(adminApi, pool, {
-  invoiceId, amount, method, datepaye, comment,
+  invoiceId, amount, method, datepaye, comment, numPayment, chqemetteur, chqbank,
 }) {
   const { code, accountId } = resolveEcommercePayment(method);
   const paymentId = await resolvePaymentId(pool, code);
@@ -134,5 +137,9 @@ export async function recordEcommerceInvoicePayment(adminApi, pool, {
     datepaye,
     isLast: true,
     comment,
+    numPayment,
+    // Dolibarr refuse un règlement CHQ sans émetteur (400).
+    chqemetteur: code === 'CHQ' ? (chqemetteur || 'Client') : undefined,
+    chqbank: code === 'CHQ' ? chqbank : undefined,
   });
 }

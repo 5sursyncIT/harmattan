@@ -5,6 +5,8 @@ import { formatPrice } from '../../../utils/formatters';
 import Loader from '../../../components/common/Loader';
 import toast from 'react-hot-toast';
 import './Contracts.css';
+import { AuthorDiscountField } from '../../../components/admin/AuthorDiscountField';
+import { parseAuthorDiscount, isAuthorDiscountRequired } from '../../../utils/authorDiscount';
 
 // Fiche détaillée d'une commande web (ouverte au clic sur le n° de commande).
 function OrderDetailModal({ orderId, onClose }) {
@@ -104,8 +106,14 @@ function OrderDetailModal({ orderId, onClose }) {
   );
 }
 
-const METHOD_LABELS = { wave: 'Wave', orange_money: 'Orange Money', virement: 'Virement', cb: 'Carte bancaire' };
-const METHOD_COLORS = { wave: '#1e40af', orange_money: '#ea580c', virement: '#0891b2', cb: '#7c3aed' };
+const METHOD_LABELS = {
+  wave: 'Wave', orange_money: 'Orange Money', virement: 'Virement', cb: 'Carte bancaire',
+  paytech: 'Paiement en ligne', boutique: 'Paiement en boutique', cheque: 'Chèque',
+};
+const METHOD_COLORS = { wave: '#1e40af', orange_money: '#ea580c', virement: '#0891b2', cb: '#7c3aed', paytech: '#7c3aed', boutique: '#10531a', cheque: '#475569' };
+// Moyens que l'agent peut déclarer comme réellement reçus (cf. serveur).
+const RECEIVED_METHODS = ['wave', 'orange_money', 'cheque'];
+const EMPTY_CONFIRM = { method: '', reference: '', cheque_issuer: '', cheque_bank: '', author_discount: '' };
 const STATUS_CONFIG = {
   pending: { label: 'En attente', color: '#f59e0b', bg: '#fffbeb', border: '#fde68a' },
   confirmed: { label: 'Confirmé', color: '#10b981', bg: '#f0fdf4', border: '#bbf7d0' },
@@ -123,6 +131,9 @@ export default function PaymentsPanel() {
   const [processing, setProcessing] = useState(false);
   const [orphans, setOrphans] = useState(0);
   const [detailOrderId, setDetailOrderId] = useState(null);
+  // Confirmation : l'agent déclare comment l'argent a réellement été reçu.
+  const [showConfirm, setShowConfirm] = useState(null);
+  const [confirmForm, setConfirmForm] = useState(EMPTY_CONFIRM);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,14 +154,39 @@ export default function PaymentsPanel() {
     return () => { cancelled = true; };
   }, [status]);
 
-  const handleConfirm = async (payment) => {
+  const openConfirm = (payment) => {
+    setShowConfirm(payment);
+    // Pré-remplit avec le choix du client quand il fait partie des moyens reçus,
+    // et avec la référence qu'il a éventuellement saisie après sa commande.
+    setConfirmForm({
+      ...EMPTY_CONFIRM,
+      method: RECEIVED_METHODS.includes(payment.payment_method) ? payment.payment_method : '',
+      reference: payment.transaction_ref || '',
+      cheque_issuer: payment.customer_name || '',
+    });
+  };
+
+  const handleConfirm = async () => {
+    const payment = showConfirm;
+    if (!payment) return;
+    if (!confirmForm.method) return toast.error('Choisissez le moyen de paiement reçu');
+    if (confirmForm.method === 'cheque' && (!confirmForm.reference.trim() || !confirmForm.cheque_issuer.trim())) {
+      return toast.error('Chèque : numéro et émetteur obligatoires');
+    }
+    const authorPct = parseAuthorDiscount(confirmForm.author_discount);
+    if (payment.is_author && authorPct === null) return toast.error('Saisissez la remise auteur (0 à 100 %)');
     setProcessing(true);
     setActionId(payment.id);
     try {
-      const r = await confirmOrderPayment(payment.dolibarr_order_id);
+      const { author_discount: _ad, ...rest } = confirmForm;
+      void _ad;
+      const r = await confirmOrderPayment(payment.dolibarr_order_id, payment.is_author ? { ...rest, author_discount: authorPct } : rest);
+      setShowConfirm(null);
       toast.success(`Paiement confirmé — Facture ${r.data.invoice_ref} créée`);
       setData(d => ({ ...d, payments: d.payments.filter(p => p.id !== payment.id), total: d.total - 1 }));
     } catch (err) {
+      // Client reconnu auteur par le serveur → affiche le champ de saisie.
+      if (isAuthorDiscountRequired(err)) setShowConfirm((p) => (p ? { ...p, is_author: true } : p));
       toast.error(err.response?.data?.error || 'Erreur confirmation');
     } finally {
       setProcessing(false);
@@ -254,6 +290,7 @@ export default function PaymentsPanel() {
                     {p.payment_status === 'confirmed' && p.invoice_ref && (
                       <div style={{ marginTop: 6, fontSize: '0.8rem', color: '#10b981' }}>
                         Facture {p.invoice_ref} — confirmé par {p.confirmed_by} le {formatDate(p.confirmed_at)}
+                        {p.received_method && <> — reçu par <strong>{METHOD_LABELS[p.received_method] || p.received_method}</strong>{p.received_ref ? ` (réf. ${p.received_ref})` : ''}</>}
                       </div>
                     )}
                     {p.payment_status === 'confirmed' && !p.invoice_ref && (
@@ -272,7 +309,7 @@ export default function PaymentsPanel() {
                   {/* Actions */}
                   {p.payment_status === 'pending' && (
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <button onClick={() => handleConfirm(p)} disabled={processing && actionId === p.id}
+                      <button onClick={() => openConfirm(p)} disabled={processing && actionId === p.id}
                         style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: '#10b981', color: '#fff', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
                         <FiCheck size={14} /> {processing && actionId === p.id ? '...' : 'Confirmer'}
                       </button>
@@ -314,6 +351,74 @@ export default function PaymentsPanel() {
               <button className="ct-btn ct-btn-outline" onClick={() => { setShowReject(null); setRejectReason(''); }}>Annuler</button>
               <button className="ct-btn ct-btn-danger" onClick={handleReject} disabled={processing}>
                 {processing ? 'Rejet...' : 'Confirmer le rejet'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal confirmation : moyen réellement reçu */}
+      {showConfirm && (
+        <div className="ct-modal-overlay" onClick={() => setShowConfirm(null)}>
+          <div className="ct-modal" onClick={e => e.stopPropagation()}>
+            <h3><FiCheck size={18} style={{ color: '#10b981', verticalAlign: -3 }} /> Confirmer le paiement</h3>
+            <p style={{ color: '#64748b' }}>
+              Commande <strong>{showConfirm.order_ref}</strong> — <strong>{formatPrice(showConfirm.amount_expected)}</strong>
+              {' '}· choix du client : {METHOD_LABELS[showConfirm.payment_method] || showConfirm.payment_method}
+            </p>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 6 }}>Moyen de paiement reçu *</label>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {RECEIVED_METHODS.map((m) => (
+                  <button key={m} type="button" onClick={() => setConfirmForm(f => ({ ...f, method: m }))}
+                    style={{ padding: '8px 14px', borderRadius: 8, fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer',
+                      border: `2px solid ${confirmForm.method === m ? METHOD_COLORS[m] : '#e2e8f0'}`,
+                      background: confirmForm.method === m ? `${METHOD_COLORS[m]}15` : '#fff',
+                      color: confirmForm.method === m ? METHOD_COLORS[m] : '#475569' }}>
+                    {METHOD_LABELS[m]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>
+                {confirmForm.method === 'cheque' ? 'Numéro du chèque *' : 'Référence de la transaction'}
+              </label>
+              <input type="text" value={confirmForm.reference} onChange={e => setConfirmForm(f => ({ ...f, reference: e.target.value }))}
+                placeholder={confirmForm.method === 'cheque' ? 'Ex : 0012345' : 'Code reçu par SMS (recommandé)'}
+                style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #d1d5db' }} />
+            </div>
+            {confirmForm.method === 'cheque' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                <div>
+                  <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>Émetteur du chèque *</label>
+                  <input type="text" value={confirmForm.cheque_issuer} onChange={e => setConfirmForm(f => ({ ...f, cheque_issuer: e.target.value }))}
+                    style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #d1d5db' }} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontWeight: 600, fontSize: '0.85rem', marginBottom: 4 }}>Banque émettrice</label>
+                  <input type="text" value={confirmForm.cheque_bank} onChange={e => setConfirmForm(f => ({ ...f, cheque_bank: e.target.value }))}
+                    style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #d1d5db' }} />
+                </div>
+              </div>
+            )}
+            {showConfirm.is_author && (
+              <AuthorDiscountField
+                value={confirmForm.author_discount}
+                onChange={(v) => setConfirmForm(f => ({ ...f, author_discount: v }))}
+                authorName={showConfirm.customer_name}
+                style={{ marginBottom: 12 }}
+              />
+            )}
+            {showConfirm.is_author && parseAuthorDiscount(confirmForm.author_discount) !== null && (
+              <p style={{ fontSize: '0.85rem', color: 'var(--color-text)', margin: '0 0 12px' }}>
+                Montant facturé et encaissé : <strong>≈ {formatPrice(Math.round((Number(showConfirm.amount_expected) || 0) * (1 - parseAuthorDiscount(confirmForm.author_discount) / 100)))}</strong> (au lieu de {formatPrice(showConfirm.amount_expected)})
+              </p>
+            )}
+            <div className="ct-modal-actions">
+              <button className="ct-btn ct-btn-outline" onClick={() => setShowConfirm(null)}>Annuler</button>
+              <button className="ct-btn ct-btn-primary" onClick={handleConfirm} disabled={processing || !confirmForm.method}>
+                {processing ? 'Confirmation...' : 'Confirmer et facturer'}
               </button>
             </div>
           </div>

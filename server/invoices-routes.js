@@ -188,6 +188,79 @@ async function missingInvoiceStock(dolibarrPool, id) {
     }))
     .filter(m => m.qty > 0);
 }
+
+// Lignes de la facture encore créditables : quantités facturées moins ce que les
+// avoirs validés déjà rattachés (fk_facture_source) ont repris — avoirs admin,
+// retours POS, avoirs de secours du POS confondus. Sans cette déduction, un avoir
+// après un retour POS, ou un second avoir, restituait deux fois stock et montant.
+//
+// Articles : déduction par produit, en quantités, ligne après ligne.
+// Lignes libres (sans produit) : déduction en montant, faute d'identifiant.
+export async function creditableLines(dolibarrPool, id) {
+  const [lines] = await dolibarrPool.query(
+    `SELECT fd.fk_product, fd.qty, fd.subprice, fd.remise_percent, fd.tva_tx,
+            fd.product_type, fd.description, fd.total_ttc,
+            p.ref AS product_ref, p.label AS product_label
+       FROM llx_facturedet fd
+       LEFT JOIN llx_product p ON p.rowid = fd.fk_product
+      WHERE fd.fk_facture = ?
+      ORDER BY fd.rang ASC, fd.rowid ASC`, [id]
+  );
+  const [credited] = await dolibarrPool.query(
+    `SELECT fd.fk_product, SUM(ABS(fd.qty)) AS qty, SUM(ABS(fd.total_ttc)) AS amount
+       FROM llx_facturedet fd
+       JOIN llx_facture f ON f.rowid = fd.fk_facture
+      WHERE f.fk_facture_source = ? AND f.type = 2 AND f.fk_statut <> 0
+      GROUP BY fd.fk_product`, [id]
+  );
+  const qtyLeft = new Map();   // produit → quantité déjà créditée restant à imputer
+  let freeAmountLeft = 0;      // montant déjà crédité sur des lignes libres
+  for (const c of credited) {
+    if (c.fk_product == null) freeAmountLeft += Number(c.amount) || 0;
+    else qtyLeft.set(Number(c.fk_product), Number(c.qty) || 0);
+  }
+
+  const out = [];
+  for (const l of lines) {
+    const qty = Math.abs(Number(l.qty)) || 0;
+    const base = {
+      fk_product: l.fk_product ? Number(l.fk_product) : null,
+      product_ref: l.product_ref || null,
+      label: l.product_label || l.description || '',
+      tva_tx: Number(l.tva_tx) || 0,
+      product_type: Number(l.product_type) || 0,
+      description: l.description || undefined,
+      invoiced_qty: qty,
+    };
+    if (base.fk_product) {
+      const already = Math.min(qty, qtyLeft.get(base.fk_product) || 0);
+      qtyLeft.set(base.fk_product, (qtyLeft.get(base.fk_product) || 0) - already);
+      out.push({
+        ...base, credited_qty: already, qty: qty - already,
+        subprice: Number(l.subprice), remise_percent: Number(l.remise_percent) || 0,
+      });
+    } else {
+      const lineTotal = Math.abs(Number(l.total_ttc)) || 0;
+      const already = Math.min(lineTotal, freeAmountLeft);
+      freeAmountLeft -= already;
+      const rest = Math.round((lineTotal - already) * 100) / 100;
+      if (already === 0) {
+        out.push({ ...base, credited_qty: 0, qty, subprice: Number(l.subprice), remise_percent: Number(l.remise_percent) || 0 });
+      } else if (rest > 0.01) {
+        // Ligne libre partiellement créditée : on reprend le solde en une ligne.
+        out.push({ ...base, credited_qty: 0, qty: 1, subprice: rest, remise_percent: 0 });
+      } else {
+        out.push({ ...base, credited_qty: qty, qty: 0, subprice: Number(l.subprice), remise_percent: 0 });
+      }
+    }
+  }
+  return out;
+}
+
+// Avoirs en cours de création, par facture : un double clic lançait deux avoirs
+// avant que le premier soit validé (et donc visible par creditableLines).
+const creditNotesInFlight = new Set();
+
 // Utilisateur Dolibarr derrière la clé API admin (pour fk_user_closing).
 let dolibarrUserId = null;
 async function getDolibarrUserId() {
@@ -1006,23 +1079,62 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
   // ═══════════════════════════════════════════════════════════
   // CREDIT NOTE — création d'un avoir total
   // ═══════════════════════════════════════════════════════════
+  // Refus communs à l'aperçu et à la création d'un avoir.
+  function creditNoteRefusal(before) {
+    if (before.type === 2) return 'Impossible de créer un avoir d\'un avoir';
+    if (before.fk_statut === 0) return 'La facture doit être validée pour créer un avoir';
+    // Abandonnée : l'abandon a déjà soldé la créance (et rendu le stock le cas
+    // échéant). Un avoir par-dessus restituerait une seconde fois.
+    if (before.fk_statut === 3) return 'Facture abandonnée — rouvrez-la avant de créer un avoir';
+    return null;
+  }
+
+  // Aperçu : ce que l'avoir reprendrait (reste à créditer, par ligne).
+  router.get('/:id/credit-note/preview', auth, async (req, res) => {
+    const id = parseInt(req.params.id);
+    try {
+      const before = await loadInvoiceRow(dolibarrPool, id);
+      if (!before) return res.status(404).json({ error: 'Facture introuvable' });
+      const lines = await creditableLines(dolibarrPool, id);
+      const refusal = creditNoteRefusal(before);
+      const toCredit = lines.filter(l => l.qty > 0);
+      res.json({
+        refusal,
+        lines,
+        already_credited: lines.some(l => l.credited_qty > 0 || l.qty < l.invoiced_qty),
+        nothing_left: toCredit.length === 0,
+        total_to_credit: Math.round(toCredit.reduce(
+          (s, l) => s + l.qty * l.subprice * (1 - (l.remise_percent || 0) / 100), 0)),
+      });
+    } catch (err) {
+      console.error('[INVOICES] credit-note preview error:', err.message);
+      res.status(500).json({ error: 'Erreur aperçu avoir' });
+    }
+  });
+
   router.post('/:id/credit-note', auth, noCsrf, async (req, res) => {
     const id = parseInt(req.params.id);
     const reason = nonEmptyReason(req.body?.reason);
     if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+    if (creditNotesInFlight.has(id)) {
+      return res.status(409).json({ error: 'Un avoir est déjà en cours de création pour cette facture' });
+    }
+    creditNotesInFlight.add(id);
 
+    let creditId = null;
     try {
       const before = await loadInvoiceRow(dolibarrPool, id);
       if (!before) return res.status(404).json({ error: 'Facture introuvable' });
-      if (before.fk_statut < 1) return res.status(409).json({ error: 'La facture doit être validée pour créer un avoir' });
-      if (before.type === 2) return res.status(409).json({ error: 'Impossible de créer un avoir d\'un avoir' });
+      const refusal = creditNoteRefusal(before);
+      if (refusal) return res.status(409).json({ error: refusal });
 
-      // Récupérer lignes d'origine via SQL pour avoir prix/remise exacts
-      const [lines] = await dolibarrPool.query(
-        `SELECT fk_product, qty, subprice, remise_percent, tva_tx, product_type, description
-         FROM llx_facturedet WHERE fk_facture = ?`, [id]
-      );
-      if (!lines.length) return res.status(409).json({ error: 'Facture sans lignes — avoir impossible' });
+      // Seul le reste non encore crédité (retours POS et avoirs antérieurs déduits).
+      const lines = (await creditableLines(dolibarrPool, id)).filter(l => l.qty > 0);
+      if (!lines.length) {
+        return res.status(409).json({
+          error: 'Facture déjà entièrement couverte par des avoirs (retours caisse ou avoirs précédents) — rien à créditer',
+        });
+      }
 
       const today = new Date().toISOString().split('T')[0];
       const creditRes = await adminApi.post('/invoices', {
@@ -1031,34 +1143,45 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         type: 2,
         fk_facture_source: id,
         lines: lines.map(l => ({
-          fk_product: l.fk_product ? parseInt(l.fk_product) : undefined,
-          qty: parseFloat(l.qty),
-          subprice: parseFloat(l.subprice),
-          remise_percent: parseFloat(l.remise_percent) || 0,
-          tva_tx: parseFloat(l.tva_tx) || 0,
-          product_type: parseInt(l.product_type) || 0,
-          description: l.description || undefined,
+          fk_product: l.fk_product || undefined,
+          qty: l.qty,
+          subprice: l.subprice,
+          remise_percent: l.remise_percent,
+          tva_tx: l.tva_tx,
+          product_type: l.product_type,
+          description: l.description,
         })),
         note_private: `AVOIR régularisation libraire — facture ${before.ref} — ${reason}`,
       });
-      const creditId = creditRes.data;
-      // idwarehouse:4 (Rayon) → avec STOCK_CALCULATE_ON_BILL=1, valider un avoir
+      creditId = creditRes.data;
+      // idwarehouse (Rayon) → avec STOCK_CALCULATE_ON_BILL=1, valider un avoir
       // (type 2) RÉ-INCRÉMENTE le stock. Sans idwarehouse, Dolibarr ne bouge pas le
       // stock et la vente initiale (qui l'avait décrémenté) n'était jamais restituée.
-      await adminApi.post(`/invoices/${creditId}/validate`, { idwarehouse: 4 });
+      await adminApi.post(`/invoices/${creditId}/validate`, { idwarehouse: STOCK_WAREHOUSE_ID });
 
       const creditDetail = await adminApi.get(`/invoices/${creditId}`);
+      const credited = lines.map(l => ({ fk_product: l.fk_product, label: l.label, qty: l.qty }));
       writeAudit(db, {
         admin: req.admin, fk_facture: id, ref_facture: before.ref,
         action: 'credit_note', reason,
         before: { fk_statut: before.fk_statut, paye: before.paye, total_ttc: Number(before.total_ttc) },
-        after:  { credit_invoice_id: creditId, credit_invoice_ref: creditDetail.data.ref, credit_total_ttc: Number(creditDetail.data.total_ttc) },
+        after:  { credit_invoice_id: creditId, credit_invoice_ref: creditDetail.data.ref, credit_total_ttc: Number(creditDetail.data.total_ttc), lines: credited },
       });
-      res.json({ success: true, credit_invoice_id: creditId, credit_invoice_ref: creditDetail.data.ref });
+      res.json({ success: true, credit_invoice_id: creditId, credit_invoice_ref: creditDetail.data.ref, lines: credited });
     } catch (err) {
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] credit-note error:', msg);
+      // Avoir créé mais non validé : brouillon PROV sans mouvement de stock, on le
+      // retire pour ne pas laisser d'orphelin.
+      if (creditId) {
+        try {
+          const [[row]] = await dolibarrPool.query('SELECT fk_statut FROM llx_facture WHERE rowid = ?', [creditId]);
+          if (row && Number(row.fk_statut) === 0) await adminApi.delete(`/invoices/${creditId}`);
+        } catch (e) { void e; }
+      }
       res.status(500).json({ error: 'Erreur création avoir', detail: msg });
+    } finally {
+      creditNotesInFlight.delete(id);
     }
   });
 
@@ -1105,10 +1228,40 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
   // réservé (séquence intacte), la facture sort des créances, et le stock encore
   // sorti pour elle est rendu — ce que setCanceled() ne fait pas de lui-même.
   // ═══════════════════════════════════════════════════════════
+  // Aperçu : exemplaires encore sortis pour cette facture, que l'abandon pourrait
+  // remettre en rayon. Sert à poser la question « les livres sont-ils revenus ? ».
+  router.get('/:id/abandon/preview', auth, async (req, res) => {
+    const id = parseInt(req.params.id);
+    try {
+      const pending = await pendingInvoiceStock(dolibarrPool, id);
+      if (!pending.length) return res.json({ pending: [] });
+      const [labels] = await dolibarrPool.query(
+        `SELECT rowid, ref, label FROM llx_product WHERE rowid IN (${pending.map(() => '?').join(',')})`,
+        pending.map(m => m.fk_product)
+      );
+      const byId = new Map(labels.map(p => [Number(p.rowid), p]));
+      res.json({
+        pending: pending.map(m => ({
+          ...m, ref: byId.get(m.fk_product)?.ref || null, label: byId.get(m.fk_product)?.label || '',
+        })),
+      });
+    } catch (err) {
+      console.error('[INVOICES] abandon preview error:', err.message);
+      res.status(500).json({ error: 'Erreur aperçu abandon' });
+    }
+  });
+
   router.post('/:id/abandon', auth, noCsrf, async (req, res) => {
     const id = parseInt(req.params.id);
     const reason = nonEmptyReason(req.body?.reason);
     if (!reason) return res.status(400).json({ error: 'Motif obligatoire (4-500 caractères)' });
+    // Les livres sont-ils revenus en rayon ? Oui pour un doublon ou une erreur de
+    // saisie ; non pour un impayé où le client a gardé la marchandise — restituer
+    // gonflerait alors le stock de livres qui ne sont plus là. Absent = ancien
+    // comportement (restitution), pour les appelants antérieurs.
+    const restock = req.body?.restock === undefined
+      ? true
+      : (req.body.restock === true || req.body.restock === 'true');
 
     try {
       const before = await loadInvoiceRow(dolibarrPool, id);
@@ -1118,9 +1271,12 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
       const { paid, nb } = await sumPayments(dolibarrPool, id);
       if (nb > 0 || paid > 0) return res.status(409).json({ error: 'Facture avec paiement(s) imputé(s) — créez un avoir' });
 
-      // Restitution du stock encore dû (rien à faire si Dolibarr l'a déjà rendu).
+      // Restitution du stock encore dû (rien à faire si Dolibarr l'a déjà rendu),
+      // seulement si la marchandise est revenue. Sinon le solde net reste négatif,
+      // et /reopen, qui raisonne sur ce même solde, ne ressortira rien.
       const restored = [];
-      for (const m of await pendingInvoiceStock(dolibarrPool, id)) {
+      const pending = await pendingInvoiceStock(dolibarrPool, id);
+      for (const m of restock ? pending : []) {
         await adminApi.post('/stockmovements', {
           product_id: m.fk_product,
           warehouse_id: m.fk_entrepot,
@@ -1136,13 +1292,16 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
 
       // Dolibarr n'expose pas setCanceled() en REST : on reproduit son écriture
       // (statut 3 + close_code, et libération des remises que la facture retenait).
+      // Code de clôture natif Dolibarr : « badcustomer » (client mauvais payeur)
+      // quand le client garde les livres, « abandon » (autre raison) sinon.
+      const closeCode = restock ? 'abandon' : 'badcustomer';
       const closingUser = await getDolibarrUserId();
       await dolibarrPool.query(
         `UPDATE llx_facture
-            SET fk_statut = 3, close_code = 'abandon', close_note = ?,
+            SET fk_statut = 3, close_code = ?, close_note = ?,
                 fk_user_closing = ?, date_closing = NOW()
           WHERE rowid = ?`,
-        [`${reason} — abandon par ${req.admin.username}`, closingUser, id]
+        [closeCode, `${reason} — abandon par ${req.admin.username}`, closingUser, id]
       );
       await dolibarrPool.query(
         'UPDATE llx_societe_remise_except SET fk_facture = NULL WHERE fk_facture = ?', [id]
@@ -1152,9 +1311,12 @@ export function createInvoicesRouter({ db, dolibarrPool, auth, csrfProtection })
         admin: req.admin, fk_facture: id, ref_facture: before.ref,
         action: 'abandon', reason,
         before: { fk_statut: before.fk_statut, paye: before.paye, total_ttc: Number(before.total_ttc) },
-        after:  { fk_statut: 3, close_code: 'abandon', stock_restored: restored },
+        after:  {
+          fk_statut: 3, close_code: closeCode, stock_restored: restored,
+          stock_kept_by_customer: restock ? [] : pending,
+        },
       });
-      res.json({ success: true, ref: before.ref, stock_restored: restored });
+      res.json({ success: true, ref: before.ref, stock_restored: restored, restock });
     } catch (err) {
       const msg = err.response?.data?.error?.message || err.message;
       console.error('[INVOICES] abandon error:', msg);

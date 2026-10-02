@@ -15,7 +15,7 @@ const GENRES = [
 const MAX_FILE_MB = 20;
 const MAX_SYNOPSIS = 2000;
 const MAX_MESSAGE = 1000;
-const ACCEPTED_EXT = ['.pdf', '.doc', '.docx', '.odt', '.rtf'];
+const ACCEPTED_EXT = ['.doc', '.docx'];
 
 function formatBytes(bytes) {
   if (!bytes) return '';
@@ -208,7 +208,7 @@ export default function AuthorSubmitPage() {
                     <span>ou cliquez pour parcourir</span>
                   </div>
                   <p className="file-dropzone-hint">
-                    PDF, DOC, DOCX, ODT ou RTF — {MAX_FILE_MB} Mo maximum
+                    Word uniquement (.doc ou .docx) — {MAX_FILE_MB} Mo maximum
                   </p>
                   <input
                     ref={fileInputRef}

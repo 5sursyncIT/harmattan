@@ -55,7 +55,12 @@ const originalUpload = multer({
     },
   }),
   limits: { fileSize: 20 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => cb(null, /\.(pdf|doc|docx|odt|rtf)$/i.test(file.originalname || '')),
+  // Manuscrits auteur : Word uniquement (.doc/.docx) — décision éditoriale 2026-09.
+  fileFilter: (req, file, cb) => {
+    const ok = /\.(doc|docx)$/i.test(file.originalname || '');
+    if (!ok) req.fileFormatRejected = true;
+    cb(null, ok);
+  },
 });
 
 export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimiter, transporter, cookieSecure, siteUrl, dolibarrPool }) {
@@ -517,6 +522,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
     try {
       const { title, genre, synopsis, biography, message } = req.body;
       if (!title) return res.status(400).json({ error: 'Titre requis' });
+      if (req.fileFormatRejected) return res.status(400).json({ error: 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).' });
       if (!req.file) return res.status(400).json({ error: 'Fichier manuscrit requis' });
 
       const ref = generateManuscriptRef(db);
@@ -610,7 +616,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
 
   // Dépôt d'une version retravaillée après verdict « à retravailler » :
   // nouvelle version du kind `original` + transition evaluation_rework → in_evaluation.
-  const reworkUpload = createManuscriptMulter('original', 20, /\.(pdf|doc|docx|odt|rtf)$/i);
+  const reworkUpload = createManuscriptMulter('original', 20, /\.(doc|docx)$/i);
   router.post('/manuscripts/:id/submit-rework', requireAuthorAuth, csrfProtection, (req, res) => {
     reworkUpload.single('original')(req, res, (err) => {
       if (err) {
@@ -628,6 +634,7 @@ export function createAuthorRouter({ db, csrfProtection, sanitizeBody, authLimit
             error: `Dépôt impossible à ce stade (${STAGE_LABELS[manuscript.current_stage] || manuscript.current_stage})`,
           });
         }
+        if (req.fileFormatRejected) return res.status(400).json({ error: 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).' });
         if (!req.file) return res.status(400).json({ error: 'Fichier manuscrit retravaillé requis' });
 
         const note = (req.body?.note || '').trim() || null;
@@ -879,7 +886,11 @@ export function createManuscriptMulter(kindName, sizeMB, mimePattern) {
       },
     }),
     limits: { fileSize: sizeMB * 1024 * 1024 },
-    fileFilter: (req, file, cb) => cb(null, mimePattern.test(file.originalname || '')),
+    fileFilter: (req, file, cb) => {
+      const ok = mimePattern.test(file.originalname || '');
+      if (!ok) req.fileFormatRejected = true;
+      cb(null, ok);
+    },
   });
 }
 

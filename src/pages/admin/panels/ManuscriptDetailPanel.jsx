@@ -212,6 +212,10 @@ export default function ManuscriptDetailPanel() {
   const [versionModal, setVersionModal] = useState(false);
   const [versionForm, setVersionForm] = useState({ file: null, note: '' });
   const [versionBusy, setVersionBusy] = useState(false);
+  // Pièces jointes du manuscrit (5 max) : modale d'ajout + retrait.
+  const [attachModal, setAttachModal] = useState(false);
+  const [attachForm, setAttachForm] = useState({ files: [], note: '' });
+  const [attachBusy, setAttachBusy] = useState(false);
   const [revisionModal, setRevisionModal] = useState(false);
   const [revisionMessage, setRevisionMessage] = useState('');
   const [revisionBusy, setRevisionBusy] = useState(false);
@@ -247,6 +251,31 @@ export default function ManuscriptDetailPanel() {
       await manuscriptsApi.deleteDuplicate(id, reason);
       toast.success(`${m.ref} supprimé`);
       navigate(`/admin/manuscripts/${m.duplicate_of}`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erreur lors de la suppression');
+    }
+  };
+
+  // Suppression direction : dossier ouvert par erreur, envoi de test, retrait
+  // de l'auteur… Motif obligatoire ; le serveur refuse si un contrat, un ISBN ou
+  // un produit existe, et archive fiche + fichiers dans manuscripts/_supprimes/.
+  const deleteManuscript = async () => {
+    const m = data?.manuscript;
+    if (!m) return;
+    const reason = window.prompt(
+      `Supprimer définitivement ${m.ref} « ${m.title} » ?\n\n`
+      + 'La fiche, sa frise et ses fichiers disparaissent de l\'application '
+      + '(une archive est conservée sur le serveur et la suppression est inscrite au registre).\n\n'
+      + 'Motif de la suppression (obligatoire) :',
+      '',
+    );
+    if (reason === null) return;
+    if (reason.trim().length < 5) { toast.error('Motif obligatoire (5 caractères minimum)'); return; }
+    if (!window.confirm(`Confirmer la suppression de ${m.ref} ? Cette action retire le manuscrit de toutes les listes.`)) return;
+    try {
+      await manuscriptsApi.deleteManuscript(id, reason.trim());
+      toast.success(`${m.ref} supprimé`);
+      navigate(`/admin/manuscripts${backToList}`);
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erreur lors de la suppression');
     }
@@ -457,6 +486,34 @@ export default function ManuscriptDetailPanel() {
     } finally { setVersionBusy(false); }
   };
 
+  // ── Pièces jointes ──
+  const confirmAttachUpload = async () => {
+    if (!attachForm.files.length) return toast.error('Choisissez au moins un fichier');
+    setAttachBusy(true);
+    try {
+      const fd = new FormData();
+      attachForm.files.forEach((f) => fd.append('files', f));
+      if (attachForm.note.trim()) fd.append('note', attachForm.note.trim());
+      const res = await manuscriptsApi.uploadAttachments(id, fd);
+      const n = res.data?.uploaded || attachForm.files.length;
+      toast.success(n > 1 ? `${n} pièces jointes ajoutées` : 'Pièce jointe ajoutée');
+      setAttachModal(false);
+      setAttachForm({ files: [], note: '' });
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || "Erreur lors de l'envoi");
+    } finally { setAttachBusy(false); }
+  };
+
+  const removeAttachment = async (f) => {
+    if (!window.confirm(`Retirer la pièce jointe « ${f.file_name} » ?`)) return;
+    try {
+      await manuscriptsApi.removeAttachment(id, f.id);
+      toast.success('Pièce jointe retirée');
+      load();
+    } catch (err) { toast.error(err.response?.data?.error || 'Erreur'); }
+  };
+
   const confirmRevisionRequest = async () => {
     setRevisionBusy(true);
     try {
@@ -608,7 +665,15 @@ export default function ManuscriptDetailPanel() {
     .sort((a, b) => (b.version - a.version) || (b.id - a.id));
   const currentVersion = textVersions[0] || null;
   const finalVersion = textVersions.find((f) => f.is_final) || null;
-  const otherFiles = (files || []).filter((f) => f.kind !== 'original');
+  // Pièces jointes d'abord (documents choisis par la direction), puis les
+  // fichiers produits par le workflow (rapport d'évaluation, correction…).
+  const attachments = (files || []).filter((f) => f.kind === 'attachment');
+  const otherFiles = [
+    ...attachments,
+    ...(files || []).filter((f) => f.kind !== 'original' && f.kind !== 'attachment'),
+  ];
+  const attachLimits = data.attachment_limits || { max: 5, size_mb: 20, accept: '' };
+  const attachRemaining = Math.max(0, attachLimits.max - attachments.length);
   const depositRequest = data.deposit_request || null;
   const fmtSize = (bytes) => {
     if (!bytes) return '';
@@ -686,6 +751,15 @@ export default function ManuscriptDetailPanel() {
             style={{ marginLeft: 8, fontSize: '0.78rem', padding: '2px 10px', verticalAlign: 'middle' }}
           >
             <FiEdit3 style={{ verticalAlign: 'middle', marginRight: 4 }} /> Corriger l'état
+          </button>
+        )}
+        {isAdmin && !manuscript.duplicate_of && (
+          <button
+            type="button" className="ms-btn ms-btn-danger" onClick={deleteManuscript}
+            title="Supprimer définitivement ce manuscrit (direction) — impossible s'il a un contrat, un ISBN ou un produit"
+            style={{ marginLeft: 8, fontSize: '0.78rem', padding: '2px 10px', verticalAlign: 'middle' }}
+          >
+            <FiTrash2 style={{ verticalAlign: 'middle', marginRight: 4 }} /> Supprimer
           </button>
         )}
       </p>
@@ -1019,7 +1093,19 @@ export default function ManuscriptDetailPanel() {
           </div>
 
           <div className="ms-card">
-            <h3>Autres documents ({otherFiles.length})</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <h3 style={{ margin: 0 }}>Autres documents ({otherFiles.length})</h3>
+              {canEditWorkflow && (
+                <button
+                  type="button" className="ms-btn"
+                  disabled={!attachRemaining}
+                  title={attachRemaining ? undefined : `Maximum ${attachLimits.max} pièces jointes : retirez-en une pour en ajouter`}
+                  onClick={() => { setAttachForm({ files: [], note: '' }); setAttachModal(true); }}
+                >
+                  <FiPlus style={{ verticalAlign: 'middle' }} /> Joindre des fichiers ({attachments.length}/{attachLimits.max})
+                </button>
+              )}
+            </div>
             {otherFiles.length ? (
               <ul className="ms-file-list">
                 {otherFiles.map((f) => (
@@ -1028,7 +1114,15 @@ export default function ManuscriptDetailPanel() {
                       <span className="ms-file-kind">{f.kind_label || f.kind}</span>
                       {f.version > 1 && <strong>v{f.version}</strong>} {f.file_name}
                       {!!f.binary_purged && <span style={{ color: '#9ca3af', fontSize: '0.72rem', marginLeft: 6 }}>archivé (fichier purgé)</span>}
+                      {f.kind === 'attachment' && (
+                        <div style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                          {uploaderLabel(f)} · {new Date(f.uploaded_at).toLocaleString('fr-FR')}
+                          {f.file_size ? ` · ${fmtSize(f.file_size)}` : ''}
+                          {f.note ? ` · « ${f.note} »` : ''}
+                        </div>
+                      )}
                     </div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     {safeHttpUrl(f.external_url) ? (
                       <a href={safeHttpUrl(f.external_url)}
                         target="_blank" rel="noopener noreferrer"
@@ -1042,6 +1136,12 @@ export default function ManuscriptDetailPanel() {
                         <FiDownload /> Télécharger
                       </a>
                     ) : null}
+                    {f.kind === 'attachment' && canEditWorkflow && (
+                      <button type="button" className="ms-btn" title="Retirer cette pièce jointe" onClick={() => removeAttachment(f)}>
+                        <FiTrash2 />
+                      </button>
+                    )}
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -1348,6 +1448,54 @@ export default function ManuscriptDetailPanel() {
               <button type="button" className="ms-btn" onClick={() => setVersionModal(false)} disabled={versionBusy}>Annuler</button>
               <button type="button" className="ms-btn ms-btn-primary" onClick={confirmVersionUpload} disabled={versionBusy}>
                 {versionBusy ? 'Dépôt…' : 'Déposer la version'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {attachModal && (
+        <div className="ms-modal-backdrop" onClick={() => !attachBusy && setAttachModal(false)}>
+          <div className="ms-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Joindre des fichiers au manuscrit</h3>
+            <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: 0 }}>
+              Documents annexes (lettre de l&apos;auteur, préface, photos, biographie…), rangés dans
+              « Autres documents » sans toucher à la version courante du texte.
+              Encore <strong>{attachRemaining} place{attachRemaining > 1 ? 's' : ''}</strong> sur {attachLimits.max}.
+            </p>
+            <div className="form-group">
+              <label>Fichiers (max {attachLimits.size_mb} Mo chacun) *</label>
+              <input
+                type="file" multiple accept={attachLimits.accept || undefined}
+                onChange={(e) => {
+                  const picked = Array.from(e.target.files || []);
+                  if (picked.length > attachRemaining) {
+                    toast.error(`${attachRemaining} fichier${attachRemaining > 1 ? 's' : ''} au plus`);
+                    e.target.value = '';
+                    return setAttachForm({ ...attachForm, files: [] });
+                  }
+                  setAttachForm({ ...attachForm, files: picked });
+                }}
+              />
+              {attachForm.files.length > 0 && (
+                <ul style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: '0.8rem', color: '#4b5563' }}>
+                  {attachForm.files.map((f) => <li key={f.name}>{f.name} · {fmtSize(f.size)}</li>)}
+                </ul>
+              )}
+            </div>
+            <div className="form-group">
+              <label>Commentaire (facultatif — ex. « préface reçue le 02/10 »)</label>
+              <textarea
+                rows={2}
+                value={attachForm.note}
+                onChange={(e) => setAttachForm({ ...attachForm, note: e.target.value })}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', resize: 'vertical' }}
+              />
+            </div>
+            <div className="ms-modal-actions">
+              <button type="button" className="ms-btn" onClick={() => setAttachModal(false)} disabled={attachBusy}>Annuler</button>
+              <button type="button" className="ms-btn ms-btn-primary" onClick={confirmAttachUpload} disabled={attachBusy || !attachForm.files.length}>
+                {attachBusy ? 'Envoi…' : 'Joindre'}
               </button>
             </div>
           </div>

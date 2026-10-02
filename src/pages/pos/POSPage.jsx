@@ -15,6 +15,7 @@ import PaymentPanel from '../../components/pos/PaymentPanel';
 import POSReceipt from '../../components/pos/POSReceipt';
 import POSQuoteReceipt from '../../components/pos/POSQuoteReceipt';
 import CustomerSelect from '../../components/pos/CustomerSelect';
+import AuthorDiscountModal from '../../components/pos/AuthorDiscountModal';
 import CashRegister from '../../components/pos/CashRegister';
 import POSCashReport from '../../components/pos/POSCashReport';
 import POSExpense from '../../components/pos/POSExpense';
@@ -65,6 +66,7 @@ export default function POSPage() {
   const clearTicket = usePosCartStore((s) => s.clearTicket);
   const setDiscount = usePosCartStore((s) => s.setDiscount);
   const items = usePosCartStore((s) => s.items);
+  const authorPromptOpen = usePosCartStore((s) => s.authorPromptOpen);
   const getItemCount = usePosCartStore((s) => s.getItemCount);
   const openSessionStore = usePosSessionStore((s) => s.openSession);
   const closeSessionStore = usePosSessionStore((s) => s.closeSession);
@@ -159,16 +161,34 @@ export default function POSPage() {
     setCompletedSale(null);
   };
 
+  // Client auteur sans remise saisie → on ouvre la saisie au lieu de continuer.
+  const needsAuthorDiscount = () => {
+    const { customer, authorDiscount, requestAuthorDiscount } = usePosCartStore.getState();
+    if (customer?.source === 'author' && authorDiscount == null) {
+      requestAuthorDiscount();
+      return true;
+    }
+    return false;
+  };
+
+  const openPayment = (split = false) => {
+    if (needsAuthorDiscount()) return;
+    setPaymentSplitMode(split);
+    setActivePanel('ticket');
+    setShowPayment(true);
+  };
+
   const handleQuote = async () => {
-    const currentItems = usePosCartStore.getState().items;
-    const customer = usePosCartStore.getState().customer;
+    const { items: currentItems, customer, authorDiscount } = usePosCartStore.getState();
     if (!currentItems.length) return;
+    if (needsAuthorDiscount()) return;
     try {
-      const res = await posCreateQuote({ items: currentItems, customer });
+      const res = await posCreateQuote({ items: currentItems, customer, author_discount: authorDiscount });
       setCompletedQuote(res.data);
       clearTicket();
       toast.success(`Facture proforma ${res.data.ref} créée`);
     } catch (err) {
+      if (err.response?.data?.code === 'AUTHOR_DISCOUNT_REQUIRED') usePosCartStore.getState().requestAuthorDiscount();
       toast.error(err.response?.data?.error || 'Erreur création facture proforma');
     }
   };
@@ -191,6 +211,7 @@ export default function POSPage() {
 
   const handlePayCash = () => {
     if (!items.length) return;
+    if (needsAuthorDiscount()) return;
     setShowPayment(true);
   };
 
@@ -229,11 +250,7 @@ export default function POSPage() {
       <div className="pos-body">
         <div className="pos-ticket-col">
           <POSCart
-            onPay={() => {
-              setPaymentSplitMode(false);
-              setActivePanel('ticket');
-              setShowPayment(true);
-            }}
+            onPay={() => openPayment(false)}
             onQuote={handleQuote}
             onSelectCustomer={() => setShowCustomer(true)}
             onBackToCatalog={() => setActivePanel('catalog')}
@@ -274,8 +291,8 @@ export default function POSPage() {
             onHistory={() => setShowHistory(true)}
             onFreeProduct={() => setShowFreeProduct(true)}
             onGlobalDiscount={handleGlobalDiscount}
-            onSplit={() => { setPaymentSplitMode(true); setActivePanel('ticket'); setShowPayment(true); }}
-            onPay={() => { setPaymentSplitMode(false); setActivePanel('ticket'); setShowPayment(true); }}
+            onSplit={() => openPayment(true)}
+            onPay={() => openPayment(false)}
             onPayCash={handlePayCash}
             onUnpaid={() => setShowUnpaid(true)}
             onExpense={() => setShowExpense(true)}
@@ -315,6 +332,8 @@ export default function POSPage() {
       {showCustomer && (
         <CustomerSelect onClose={() => setShowCustomer(false)} />
       )}
+
+      {authorPromptOpen && !showCustomer && <AuthorDiscountModal />}
 
       {showCashRegister && (
         <CashRegister

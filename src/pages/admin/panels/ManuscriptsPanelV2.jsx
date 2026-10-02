@@ -23,6 +23,8 @@ const SORTABLE = [
   { key: 'stale', label: 'Immobilisé', dir: 'DESC' },
 ];
 const defaultDir = (key) => SORTABLE.find((c) => c.key === key)?.dir || 'DESC';
+// Tri appliqué quand l'URL n'en précise aucun (même défaut que le serveur).
+const DEFAULT_SORT = 'stage';
 
 const UNASSIGNED_OPTIONS = [
   { value: '', label: 'Toutes affectations' },
@@ -158,11 +160,15 @@ export default function ManuscriptsPanelV2() {
 
   const update = (key, value) => updateParams({ [key]: value, page: 1 });
 
+  // Tri effectivement appliqué (l'URL vide = tri par défaut, par étape).
+  const activeSort = filters.sort || DEFAULT_SORT;
+  const activeOrder = filters.order || defaultDir(activeSort);
+
   // 1er clic : sens naturel de la colonne. 2ᵉ : inverse. 3ᵉ : retour au tri par
-  // défaut (les plus récemment reçus).
+  // défaut (par étape).
   const toggleSort = (key) => {
-    if (filters.sort !== key) return updateParams({ sort: key, order: defaultDir(key), page: 1 });
-    if (filters.order === defaultDir(key)) {
+    if (activeSort !== key) return updateParams({ sort: key, order: defaultDir(key), page: 1 });
+    if (activeOrder === defaultDir(key)) {
       return updateParams({ sort: key, order: defaultDir(key) === 'ASC' ? 'DESC' : 'ASC', page: 1 });
     }
     return updateParams({ sort: '', order: '', page: 1 });
@@ -216,8 +222,8 @@ export default function ManuscriptsPanelV2() {
   };
 
   const sortIcon = (key) => {
-    if (filters.sort !== key) return null;
-    return (filters.order || defaultDir(key)) === 'ASC' ? <FiArrowUp size={11} /> : <FiArrowDown size={11} />;
+    if (activeSort !== key) return null;
+    return activeOrder === 'ASC' ? <FiArrowUp size={11} /> : <FiArrowDown size={11} />;
   };
 
   // Ancienneté dans l'étape : au-delà d'un mois le dossier dort, au-delà de
@@ -422,7 +428,7 @@ export default function ManuscriptsPanelV2() {
                 <tr>
                   {SORTABLE.slice(0, 5).map((c) => (
                     <th key={c.key}>
-                      <button type="button" className={`ms-th-sort ${filters.sort === c.key ? 'active' : ''}`} onClick={() => toggleSort(c.key)}>
+                      <button type="button" className={`ms-th-sort ${activeSort === c.key ? 'active' : ''}`} onClick={() => toggleSort(c.key)}>
                         {c.label} {sortIcon(c.key)}
                       </button>
                     </th>
@@ -430,7 +436,7 @@ export default function ManuscriptsPanelV2() {
                   <th>Acteur</th>
                   {SORTABLE.slice(5).map((c) => (
                     <th key={c.key}>
-                      <button type="button" className={`ms-th-sort ${filters.sort === c.key ? 'active' : ''}`} onClick={() => toggleSort(c.key)}>
+                      <button type="button" className={`ms-th-sort ${activeSort === c.key ? 'active' : ''}`} onClick={() => toggleSort(c.key)}>
                         {c.label} {sortIcon(c.key)}
                       </button>
                     </th>

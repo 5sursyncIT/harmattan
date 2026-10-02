@@ -26,6 +26,7 @@ import { execFileSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync, existsSync } from 'fs';
+import cron from 'node-cron';
 import { resolvePaymentId } from './dolibarr-payments.js';
 
 const ADMIN_API_KEY = process.env.DOLIBARR_ADMIN_API_KEY;
@@ -241,7 +242,7 @@ async function streamDolibarrPdf(res, { type, id, filename }) {
 }
 
 // ─── ROUTER FACTORY ──────────────────────────────────────────
-export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection }) {
+export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection, transporter, siteUrl }) {
   const router = Router();
   ensureTables(db);
   const csrf = csrfProtection || ((req, res, next) => next());
@@ -316,7 +317,7 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
   // ═══════════════════════════════════════════════════════════
   // STATS / DASHBOARD
   // ═══════════════════════════════════════════════════════════
-  router.get('/stats', auth, (req, res) => {
+  router.get('/stats', auth, async (req, res) => {
     try {
       const consignors = db.prepare('SELECT COUNT(*) AS n FROM consignors WHERE active = 1').get().n;
       const dep = db.prepare(`SELECT
@@ -328,10 +329,16 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
         SUM(CASE WHEN status='draft' THEN 1 ELSE 0 END) AS nb_draft,
         SUM(CASE WHEN status='draft' THEN total_net_due ELSE 0 END) AS due_draft
         FROM consignment_settlements`).get();
+      // Dû en direct = brouillons (figés) + ventes pas encore mises en reversement.
+      let dueLive = Number(settlements.due_draft || 0);
+      for (const c of db.prepare('SELECT id FROM consignors WHERE active = 1').all()) {
+        const { periodFrom } = nextPeriodFrom(c.id);
+        if (periodFrom <= todayISO()) dueLive += (await computeSales(c.id, periodFrom, todayISO())).totals.net;
+      }
       res.json({
         consignors,
         deposits: { total: Number(dep.total || 0), draft: Number(dep.nb_draft || 0), validated: Number(dep.nb_validated || 0) },
-        settlements: { pending: Number(settlements.nb_draft || 0), pendingAmount: Number(settlements.due_draft || 0) },
+        settlements: { pending: Number(settlements.nb_draft || 0), pendingAmount: Number(settlements.due_draft || 0), dueLive },
       });
     } catch (err) {
       console.error('[CONSIGNMENT] stats error:', err.message);
@@ -391,7 +398,58 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
   // ═══════════════════════════════════════════════════════════
   // DÉPOSANTS (consignors)
   // ═══════════════════════════════════════════════════════════
-  router.get('/consignors', auth, (req, res) => {
+  /**
+   * Compte courant d'un déposant, en direct : exemplaires confiés / repris /
+   * en rayon, et ventes pas encore reversées (du lendemain du dernier
+   * reversement à aujourd'hui). C'est ce qu'on lui doit à l'instant T — le
+   * chiffre qui manquait pour savoir quand le régler.
+   */
+  async function consignorAccounts(rows) {
+    const stockByProduct = new Map();
+    const maps = db.prepare('SELECT product_id, consignor_id FROM consignment_products WHERE active = 1').all();
+    if (maps.length && dolibarrPool) {
+      const ids = maps.map(m => m.product_id);
+      const [prows] = await dolibarrPool.query(
+        `SELECT rowid AS id, stock FROM llx_product WHERE rowid IN (${ids.map(() => '?').join(',')})`, ids
+      );
+      for (const p of prows) stockByProduct.set(p.id, Number(p.stock) || 0);
+    }
+    const deposits = db.prepare("SELECT consignor_id, lines_json FROM consignment_deposits WHERE status != 'draft'").all();
+    const today = todayISO();
+    return Promise.all(rows.map(async (c) => {
+      let deposited = 0, returned = 0;
+      for (const d of deposits) {
+        if (d.consignor_id !== c.id) continue;
+        let lines = [];
+        try { lines = JSON.parse(d.lines_json) || []; } catch { lines = []; }
+        for (const l of lines) {
+          if (!l.product_id) continue;
+          deposited += parseInt(l.qty, 10) || 0;
+          returned += parseInt(l.qty_returned, 10) || 0;
+        }
+      }
+      const inStock = maps.filter(m => m.consignor_id === c.id).reduce((t, m) => t + Math.max(0, stockByProduct.get(m.product_id) || 0), 0);
+      const { periodFrom } = nextPeriodFrom(c.id);
+      let pending = { qty: 0, sales: 0, commission: 0, net: 0 };
+      if (dolibarrPool && periodFrom <= today) {
+        try { pending = (await computeSales(c.id, periodFrom, today)).totals; }
+        catch (e) { console.warn('[CONSIGNMENT] compte déposant:', e.message); }
+      }
+      const draft = draftOf(c.id);
+      const paid = db.prepare("SELECT COALESCE(SUM(total_net_due),0) AS n, MAX(period_to) AS last FROM consignment_settlements WHERE consignor_id = ? AND status = 'paid'").get(c.id);
+      return {
+        ...c,
+        account: {
+          deposited, returned, inStock,
+          pendingFrom: periodFrom, pendingQty: pending.qty, pendingSales: pending.sales, pendingNet: pending.net,
+          openDraft: draft ? { id: draft.id, ref: draft.ref, net: draft.total_net_due, periodTo: draft.period_to } : null,
+          paidTotal: paid.n, lastPaidTo: paid.last,
+        },
+      };
+    }));
+  }
+
+  router.get('/consignors', auth, async (req, res) => {
     try {
       const includeInactive = req.query.all === '1';
       const rows = db.prepare(
@@ -402,7 +460,8 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
          ${includeInactive ? '' : 'WHERE c.active = 1'}
          ORDER BY c.name ASC`
       ).all();
-      res.json({ consignors: rows });
+      // ?light=1 : listes déroulantes, sans les requêtes Dolibarr du compte.
+      res.json({ consignors: req.query.light === '1' ? rows : await consignorAccounts(rows) });
     } catch (err) {
       console.error('[CONSIGNMENT] consignors list error:', err.message);
       res.status(500).json({ error: 'Erreur chargement déposants' });
@@ -845,24 +904,35 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
   // négatifs) nettent naturellement les retours déjà facturés.
   // ═══════════════════════════════════════════════════════════
   async function computeSales(consignorId, periodFrom, periodTo) {
-    const maps = db.prepare('SELECT product_id, commission_rate, sale_price_ttc FROM consignment_products WHERE consignor_id = ? AND active = 1').all(consignorId);
+    // `since` = date du premier dépôt du titre : une vente antérieure n'est pas
+    // une vente du déposant (le titre pouvait être au catalogue en fonds propre),
+    // quelle que soit la période demandée.
+    const maps = db.prepare(
+      `SELECT cp.product_id, cp.commission_rate, cp.sale_price_ttc,
+              COALESCE(d.deposit_date, date(cp.updated_at)) AS since
+         FROM consignment_products cp
+         LEFT JOIN consignment_deposits d ON d.id = cp.first_deposit_id
+        WHERE cp.consignor_id = ? AND cp.active = 1`
+    ).all(consignorId);
     if (!maps.length) return { lines: [], totals: { qty: 0, sales: 0, commission: 0, net: 0 } };
     const rateMap = new Map(maps.map(m => [m.product_id, m]));
-    const ids = maps.map(m => m.product_id);
-    const ph = ids.map(() => '?').join(',');
+    const perProduct = maps.map(() => '(fd.fk_product = ? AND f.datef >= ?)').join(' OR ');
+    const perProductParams = maps.flatMap(m => [m.product_id, m.since > periodFrom ? m.since : periodFrom]);
 
+    // fk_statut 1 (validée) et 2 (payée) seulement : 3 = abandonnée, ce n'est
+    // pas une vente (ex. LIBFAC20260821-023615, repassée en brouillon puis abandonnée).
     const [rows] = await dolibarrPool.query(
       `SELECT fd.fk_product AS product_id, p.ref, p.label, p.barcode,
               SUM(fd.qty) AS qty_sold, SUM(fd.total_ttc) AS sales_ttc
          FROM llx_facturedet fd
          JOIN llx_facture f ON f.rowid = fd.fk_facture
          LEFT JOIN llx_product p ON p.rowid = fd.fk_product
-        WHERE fd.fk_product IN (${ph})
-          AND f.fk_statut >= 1
-          AND f.datef >= ? AND f.datef <= ?
+        WHERE (${perProduct})
+          AND f.fk_statut IN (1, 2)
+          AND f.datef <= ?
         GROUP BY fd.fk_product
         HAVING SUM(fd.qty) <> 0`,
-      [...ids, periodFrom, `${periodTo} 23:59:59`]
+      [...perProductParams, `${periodTo} 23:59:59`]
     );
 
     const lines = rows.map(r => {
@@ -939,24 +1009,94 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
   // REVERSEMENTS (settlements)
   // ═══════════════════════════════════════════════════════════
 
-  // Aperçu (sans persistance). Suggère period_from = lendemain du dernier
-  // reversement payé pour éviter tout double comptage.
+  const addDays = (iso, n) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+  /**
+   * Début de la prochaine période à reverser. Les périodes s'enchaînent sans
+   * trou ni chevauchement : lendemain du DERNIER reversement, brouillon compris
+   * (ne regarder que les payés laissait créer deux brouillons sur les mêmes
+   * ventes, puis les payer tous les deux). Premier reversement : date du
+   * premier dépôt — pas 2000-01-01.
+   */
+  function nextPeriodFrom(consignorId) {
+    const last = db.prepare(
+      'SELECT period_to FROM consignment_settlements WHERE consignor_id = ? ORDER BY date(period_to) DESC LIMIT 1'
+    ).get(consignorId);
+    if (last?.period_to) return { periodFrom: addDays(last.period_to, 1), lastTo: last.period_to };
+    const first = db.prepare(
+      "SELECT MIN(deposit_date) AS d FROM consignment_deposits WHERE consignor_id = ? AND status != 'draft'"
+    ).get(consignorId);
+    return { periodFrom: first?.d || todayISO(), lastTo: null };
+  }
+
+  const draftOf = (consignorId) => db.prepare(
+    "SELECT * FROM consignment_settlements WHERE consignor_id = ? AND status = 'draft' ORDER BY id DESC LIMIT 1"
+  ).get(consignorId);
+
+  /**
+   * Crée un reversement brouillon. Refuse s'il en existe déjà un (un seul
+   * reversement ouvert par déposant) ou si la période chevauche un reversement
+   * existant. Retourne { status, body } pour être partagé route / cron / 1-clic.
+   */
+  async function createSettlementRecord(consignorId, periodFrom, periodTo, username) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(periodFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(periodTo) || periodFrom > periodTo) {
+      return { status: 400, body: { error: 'Période invalide' } };
+    }
+    const draft = draftOf(consignorId);
+    if (draft) return { status: 409, body: { error: `Le reversement ${draft.ref} est encore ouvert : réglez-le ou supprimez-le d'abord`, draftId: draft.id } };
+    const { lastTo } = nextPeriodFrom(consignorId);
+    if (lastTo && periodFrom <= lastTo) {
+      return { status: 409, body: { error: `Période déjà reversée jusqu'au ${fmtDateFr(lastTo)} : commencez au plus tôt le ${fmtDateFr(addDays(lastTo, 1))}` } };
+    }
+
+    const { lines, totals } = await computeSales(consignorId, periodFrom, periodTo);
+    if (lines.length === 0) return { status: 400, body: { error: 'Aucune vente sur cette période' } };
+
+    const out = db.transaction(() => {
+      const ref = generateRef('RV', 'consignment_settlements');
+      const r = db.prepare(
+        `INSERT INTO consignment_settlements
+           (ref, consignor_id, period_from, period_to, total_qty, total_sales_ttc, total_commission, total_net_due, lines_json, status, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?, 'draft', ?)`
+      ).run(ref, consignorId, periodFrom, periodTo, totals.qty, totals.sales, totals.commission, totals.net, JSON.stringify(lines), username);
+      return { id: Number(r.lastInsertRowid), ref };
+    })();
+    return { status: 201, body: out };
+  }
+
+  /**
+   * Recalcule un brouillon SANS facture avant règlement : ses lignes ont été
+   * figées à sa création (éventuellement en cours de période, ou par le cron),
+   * une vente validée depuis dans la même période doit y figurer. Une fois la
+   * facture émise, le montant est gelé — c'est elle que l'on solde.
+   */
+  async function refreshDraft(row) {
+    if (row.status !== 'draft' || row.fk_facture_fourn) return row;
+    const { lines, totals } = await computeSales(row.consignor_id, row.period_from, row.period_to);
+    db.prepare(
+      `UPDATE consignment_settlements SET total_qty = ?, total_sales_ttc = ?, total_commission = ?, total_net_due = ?, lines_json = ?
+        WHERE id = ? AND status = 'draft' AND fk_facture_fourn IS NULL`
+    ).run(totals.qty, totals.sales, totals.commission, totals.net, JSON.stringify(lines), row.id);
+    return db.prepare('SELECT * FROM consignment_settlements WHERE id = ?').get(row.id);
+  }
+
+  // Aperçu (sans persistance) de la prochaine période à reverser.
   router.get('/settlements/preview', auth, async (req, res) => {
     try {
       const consignorId = parseInt(req.query.consignor_id, 10);
       const consignor = db.prepare('SELECT * FROM consignors WHERE id = ?').get(consignorId);
       if (!consignor) return res.status(400).json({ error: 'Déposant invalide' });
 
-      const last = db.prepare("SELECT period_to FROM consignment_settlements WHERE consignor_id = ? AND status = 'paid' ORDER BY date(period_to) DESC LIMIT 1").get(consignorId);
-      let periodFrom = req.query.period_from;
-      if (!periodFrom) {
-        if (last?.period_to) { const d = new Date(last.period_to + 'T00:00:00'); d.setDate(d.getDate() + 1); periodFrom = d.toISOString().slice(0, 10); }
-        else periodFrom = '2000-01-01';
-      }
+      const next = nextPeriodFrom(consignorId);
+      const periodFrom = req.query.period_from || next.periodFrom;
       const periodTo = req.query.period_to || todayISO();
+      const draft = draftOf(consignorId);
 
       const { lines, totals } = await computeSales(consignorId, periodFrom, periodTo);
-      res.json({ consignor: { id: consignor.id, name: consignor.name }, periodFrom, periodTo, lines, totals, lastSettlementTo: last?.period_to || null });
+      res.json({
+        consignor: { id: consignor.id, name: consignor.name }, periodFrom, periodTo, lines, totals,
+        lastSettlementTo: next.lastTo, openDraft: draft ? { id: draft.id, ref: draft.ref } : null,
+      });
     } catch (err) {
       console.error('[CONSIGNMENT] settlement preview error:', err.message);
       res.status(500).json({ error: 'Erreur calcul du reversement' });
@@ -969,26 +1109,11 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
       const consignorId = parseInt(b.consignor_id, 10);
       const consignor = db.prepare('SELECT * FROM consignors WHERE id = ?').get(consignorId);
       if (!consignor) return res.status(400).json({ error: 'Déposant invalide' });
-      const periodFrom = String(b.period_from || '').slice(0, 10);
-      const periodTo = String(b.period_to || todayISO()).slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(periodFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(periodTo)) {
-        return res.status(400).json({ error: 'Période invalide' });
-      }
-
-      const { lines, totals } = await computeSales(consignorId, periodFrom, periodTo);
-      if (lines.length === 0) return res.status(400).json({ error: 'Aucune vente sur cette période' });
-
-      const insert = db.transaction(() => {
-        const ref = generateRef('RV', 'consignment_settlements');
-        const r = db.prepare(
-          `INSERT INTO consignment_settlements
-             (ref, consignor_id, period_from, period_to, total_qty, total_sales_ttc, total_commission, total_net_due, lines_json, status, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?, 'draft', ?)`
-        ).run(ref, consignorId, periodFrom, periodTo, totals.qty, totals.sales, totals.commission, totals.net, JSON.stringify(lines), req.admin?.username || 'admin');
-        return { id: r.lastInsertRowid, ref };
-      });
-      const out = insert();
-      res.status(201).json(out);
+      const r = await createSettlementRecord(
+        consignorId, String(b.period_from || '').slice(0, 10), String(b.period_to || todayISO()).slice(0, 10),
+        req.admin?.username || 'admin',
+      );
+      res.status(r.status).json(r.body);
     } catch (err) {
       console.error('[CONSIGNMENT] settlement create error:', err.message);
       res.status(500).json({ error: 'Erreur création du reversement' });
@@ -1017,7 +1142,7 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
     let lines = [];
     try { lines = JSON.parse(r.lines_json) || []; } catch { lines = []; }
     return {
-      id: r.id, ref: r.ref, consignorId: r.consignor_id, consignorName: r.consignor_name || null,
+      id: r.id, ref: r.ref, consignorId: r.consignor_id, consignorName: r.consignor_name || null, consignorEmail: r.contact_email || null,
       periodFrom: r.period_from, periodTo: r.period_to,
       totalQty: r.total_qty, totalSales: r.total_sales_ttc, totalCommission: r.total_commission, totalNetDue: r.total_net_due,
       lines, status: r.status, statusLabel: SET_STATUS[r.status] || r.status,
@@ -1039,26 +1164,25 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
    * Idempotent : une facture déjà rattachée est renvoyée telle quelle ; l'index
    * unique Dolibarr (ref_supplier, fk_soc) rattrape une création concurrente.
    */
-  router.post('/settlements/:id/supplier-invoice', auth, requireFinance, csrf, async (req, res) => {
-    const id = parseInt(req.params.id, 10);
+  async function createSupplierInvoiceFor(id, admin) {
     const row = db.prepare(
       `SELECT s.*, c.id AS c_id, c.name AS c_name, c.fk_soc, c.contact_email, c.contact_phone
          FROM consignment_settlements s
          LEFT JOIN consignors c ON c.id = s.consignor_id WHERE s.id = ?`
     ).get(id);
-    if (!row) return res.status(404).json({ error: 'Reversement introuvable' });
+    if (!row) return { status: 404, body: { error: 'Reversement introuvable' } };
     if (row.fk_facture_fourn) {
-      return res.json({ ok: true, already: true, id: row.fk_facture_fourn, ref: row.facture_fourn_ref });
+      return { status: 200, body: { ok: true, already: true, id: row.fk_facture_fourn, ref: row.facture_fourn_ref } };
     }
     // Un reversement payé ne peut plus être soldé par /pay (il n'est plus en
     // brouillon) : lui créer une facture validée la rendrait impayable et
     // laisserait le déposant en dettes fournisseurs à vie.
     if (row.status === 'paid') {
-      return res.status(409).json({ error: 'Ce reversement est déjà marqué payé : sa facture devait être créée avant le règlement' });
+      return { status: 409, body: { error: 'Ce reversement est déjà marqué payé : sa facture devait être créée avant le règlement' } };
     }
-    if (!row.c_id) return res.status(400).json({ error: 'Déposant introuvable' });
+    if (!row.c_id) return { status: 400, body: { error: 'Déposant introuvable' } };
     const net = Math.round(Number(row.total_net_due) || 0);
-    if (net <= 0) return res.status(400).json({ error: 'Aucun net à reverser sur ce reversement' });
+    if (net <= 0) return { status: 400, body: { error: 'Aucun net à reverser sur ce reversement' } };
 
     let invoiceId = null;
     let linked = false;
@@ -1103,9 +1227,9 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
         .run(invoiceId, ref, id);
       linked = true;
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-        .run(req.admin?.username || 'admin', 'consignment_supplier_invoice',
+        .run(admin, 'consignment_supplier_invoice',
           `Facture fournisseur ${ref} créée pour le reversement ${row.ref} — ${row.c_name} : ${fmtFcfa(net)}`);
-      res.json({ ok: true, id: invoiceId, ref });
+      return { status: 200, body: { ok: true, id: invoiceId, ref } };
     } catch (err) {
       const apiMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
       console.error('[CONSIGNMENT] supplier invoice create error:', apiMsg);
@@ -1122,16 +1246,21 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
             await adminApi.delete(`/supplierinvoices/${invoiceId}`);
           } else {
             console.warn(`[CONSIGNMENT] facture fourn. #${invoiceId} validée malgré l'erreur — conservée, à rattacher manuellement`);
-            return res.status(502).json({
+            return { status: 502, body: {
               error: `La facture fournisseur #${invoiceId} a été créée mais n'a pas pu être rattachée (${apiMsg}). Vérifiez-la dans la comptabilité.`,
-            });
+            } };
           }
         } catch (e) {
           if (e.response?.status !== 404) console.warn('[CONSIGNMENT] nettoyage facture fourn. échoué:', e.message);
         }
       }
-      res.status(502).json({ error: `Erreur création facture fournisseur : ${apiMsg}` });
+      return { status: 502, body: { error: `Erreur création facture fournisseur : ${apiMsg}` } };
     }
+  }
+
+  router.post('/settlements/:id/supplier-invoice', auth, requireFinance, csrf, async (req, res) => {
+    const r = await createSupplierInvoiceFor(parseInt(req.params.id, 10), req.admin?.username || 'admin');
+    res.status(r.status).json(r.body);
   });
 
   // PDF de la facture fournisseur (Dolibarr, modèle canelle).
@@ -1155,7 +1284,7 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
   router.get('/settlements/:id', auth, (req, res) => {
     try {
       const row = db.prepare(
-        `SELECT s.*, c.name AS consignor_name FROM consignment_settlements s
+        `SELECT s.*, c.name AS consignor_name, c.contact_email FROM consignment_settlements s
          LEFT JOIN consignors c ON c.id = s.consignor_id WHERE s.id = ?`
       ).get(parseInt(req.params.id, 10));
       if (!row) return res.status(404).json({ error: 'Reversement introuvable' });
@@ -1183,33 +1312,31 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
    * elle est maintenue et l'admin est invité à vérifier avant tout retry :
    * mieux vaut un reversement à vérifier qu'un déposant payé deux fois.
    */
-  router.post('/settlements/:id/pay', auth, requireFinance, csrf, async (req, res) => {
-    const id = parseInt(req.params.id, 10);
-    const admin = req.admin?.username || 'admin';
+  async function paySettlementFor(id, admin, { payment_ref, payment_mode } = {}) {
     let claimed = false;
     try {
       const row = db.prepare('SELECT * FROM consignment_settlements WHERE id = ?').get(id);
-      if (!row) return res.status(404).json({ error: 'Reversement introuvable' });
-      if (row.status === 'paid') return res.status(409).json({ error: 'Reversement déjà marqué payé' });
+      if (!row) return { status: 404, body: { error: 'Reversement introuvable' } };
+      if (row.status === 'paid') return { status: 409, body: { error: 'Reversement déjà marqué payé' } };
 
-      const payRef = String(req.body?.payment_ref || '').trim().slice(0, 120) || null;
-      const modeKey = String(req.body?.payment_mode || '').toUpperCase();
+      const payRef = String(payment_ref || '').trim().slice(0, 120) || null;
+      const modeKey = String(payment_mode || '').toUpperCase();
       const mode = SETTLEMENT_PAYMENT_MODES[modeKey] || null;
-      if (modeKey && !mode) return res.status(400).json({ error: 'Mode de règlement inconnu' });
+      if (modeKey && !mode) return { status: 400, body: { error: 'Mode de règlement inconnu' } };
       const net = Math.round(Number(row.total_net_due) || 0);
       // La facture est la contrepartie comptable du reversement : l'exiger avant
       // de payer évite la facture validée « impayable » (le /pay ne sait solder
       // qu'un reversement en brouillon).
       if (net > 0 && !row.fk_facture_fourn) {
-        return res.status(409).json({ error: "Créez d'abord la facture fournisseur : elle est la contrepartie comptable du reversement" });
+        return { status: 409, body: { error: "Créez d'abord la facture fournisseur : elle est la contrepartie comptable du reversement" } };
       }
       if (row.fk_facture_fourn && !mode) {
-        return res.status(400).json({ error: 'Mode de règlement requis pour solder la facture fournisseur' });
+        return { status: 400, body: { error: 'Mode de règlement requis pour solder la facture fournisseur' } };
       }
 
       const modeId = row.fk_facture_fourn ? await resolvePaymentId(dolibarrPool, mode.code) : null;
       if (row.fk_facture_fourn && !modeId) {
-        return res.status(500).json({ error: `Mode de paiement Dolibarr introuvable (${mode.code})` });
+        return { status: 500, body: { error: `Mode de paiement Dolibarr introuvable (${mode.code})` } };
       }
 
       // Réservation atomique : une seule requête peut passer draft → paid.
@@ -1217,7 +1344,7 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
         `UPDATE consignment_settlements SET status = 'paid', payment_ref = ?, payment_mode = ?,
            paid_by = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'draft'`
       ).run(payRef, modeKey || null, admin, id);
-      if (claim.changes === 0) return res.status(409).json({ error: 'Reversement déjà marqué payé' });
+      if (claim.changes === 0) return { status: 409, body: { error: 'Reversement déjà marqué payé' } };
       claimed = true;
 
       let paymentId = null;
@@ -1253,7 +1380,7 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
             // Dolibarr a répondu une erreur → rien n'a été commité : on relâche.
             db.prepare("UPDATE consignment_settlements SET status='draft', paid_by=NULL, paid_at=NULL WHERE id=?").run(id);
             claimed = false;
-            return res.status(502).json({ error: `Règlement Dolibarr refusé : ${apiMsg}` });
+            return { status: 502, body: { error: `Règlement Dolibarr refusé : ${apiMsg}` } };
           }
           // Timeout / réseau / passerelle : le règlement a PEUT-ÊTRE été
           // enregistré. On garde la réservation pour interdire tout retry aveugle.
@@ -1261,9 +1388,9 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
           db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
             .run(admin, 'consignment_settle_indeterminate',
               `Reversement ${row.ref} : règlement Dolibarr indéterminé (${apiMsg}) — vérifier la facture ${row.facture_fourn_ref || row.fk_facture_fourn}`);
-          return res.status(502).json({
+          return { status: 502, body: {
             error: `Règlement incertain (${apiMsg}). Le reversement est marqué payé par sécurité : vérifiez la facture ${row.facture_fourn_ref || `#${row.fk_facture_fourn}`} dans la comptabilité avant toute nouvelle tentative.`,
-          });
+          } };
         }
         db.prepare('UPDATE consignment_settlements SET fk_paiement_fourn = ? WHERE id = ?').run(paymentId, id);
       }
@@ -1271,7 +1398,7 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
       db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
         .run(admin, 'consignment_settle',
           `Reversement ${row.ref} marqué payé (${fmtFcfa(row.total_net_due)})${mode ? ` — ${mode.label}` : ''}${paymentId ? ` — paiement Dolibarr #${paymentId}` : ''}`);
-      res.json({ success: true, paymentId });
+      return { status: 200, body: { success: true, paymentId } };
     } catch (err) {
       console.error('[CONSIGNMENT] settlement pay error:', err.message);
       // `claimed` n'est vrai QUE tant qu'aucun euro n'a bougé : il est remis à
@@ -1281,9 +1408,114 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
         try { db.prepare("UPDATE consignment_settlements SET status='draft', paid_by=NULL, paid_at=NULL WHERE id=?").run(id); }
         catch { /* best effort */ }
       }
-      res.status(500).json({ error: 'Erreur enregistrement du paiement' });
+      return { status: 500, body: { error: 'Erreur enregistrement du paiement' } };
+    }
+  }
+
+  router.post('/settlements/:id/pay', auth, requireFinance, csrf, async (req, res) => {
+    const r = await paySettlementFor(parseInt(req.params.id, 10), req.admin?.username || 'admin', req.body || {});
+    res.status(r.status).json(r.body);
+  });
+
+  /**
+   * Règlement en UNE action : recalcul du brouillon → facture fournisseur du
+   * net (si absente) → règlement → relevé PDF envoyé au déposant. Les étapes
+   * restent les fonctions ci-dessus, avec leurs garde-fous (idempotence de la
+   * facture, réservation atomique du paiement) : on n'enchaîne que ce qu'un
+   * humain faisait en trois clics, dans l'ordre imposé.
+   */
+  async function settleFully(id, admin, { payment_mode, payment_ref, notify } = {}) {
+    let row = db.prepare('SELECT * FROM consignment_settlements WHERE id = ?').get(id);
+    if (!row) return { status: 404, body: { error: 'Reversement introuvable' } };
+    if (row.status === 'paid') return { status: 409, body: { error: 'Reversement déjà marqué payé' } };
+    // Mode vérifié AVANT la facture : sinon une facture validée resterait en
+    // plan faute de pouvoir la solder dans la foulée.
+    if (!SETTLEMENT_PAYMENT_MODES[String(payment_mode || '').toUpperCase()]) {
+      return { status: 400, body: { error: 'Mode de règlement requis' } };
+    }
+    row = await refreshDraft(row);
+    if (!(Number(row.total_net_due) > 0)) {
+      return { status: 400, body: { error: 'Plus aucun net à reverser sur cette période (ventes annulées ?) : supprimez ce reversement' } };
+    }
+    if (!row.fk_facture_fourn) {
+      const inv = await createSupplierInvoiceFor(id, admin);
+      if (inv.status >= 300) return inv;
+    }
+    const pay = await paySettlementFor(id, admin, { payment_mode, payment_ref });
+    if (pay.status >= 300) return pay;
+
+    const final = db.prepare('SELECT ref, facture_fourn_ref, total_net_due FROM consignment_settlements WHERE id = ?').get(id);
+    let emailed = null;
+    if (notify !== false) emailed = await emailStatementToConsignor(id);
+    return { status: 200, body: { success: true, ref: final.ref, invoiceRef: final.facture_fourn_ref, net: final.total_net_due, paymentId: pay.body.paymentId, emailed } };
+  }
+
+  router.post('/settlements/:id/settle', auth, requireFinance, csrf, async (req, res) => {
+    try {
+      const r = await settleFully(parseInt(req.params.id, 10), req.admin?.username || 'admin', req.body || {});
+      res.status(r.status).json(r.body);
+    } catch (err) {
+      console.error('[CONSIGNMENT] settle error:', err.message);
+      res.status(500).json({ error: 'Erreur règlement du reversement' });
     }
   });
+
+  /**
+   * « Reverser maintenant » depuis la fiche déposant : reprend le brouillon
+   * ouvert s'il existe (ex. préparé par le cron mensuel), sinon crée le
+   * reversement de la prochaine période jusqu'à aujourd'hui, puis le règle.
+   */
+  router.post('/consignors/:id/settle-now', auth, requireFinance, csrf, async (req, res) => {
+    try {
+      const consignorId = parseInt(req.params.id, 10);
+      const consignor = db.prepare('SELECT id FROM consignors WHERE id = ?').get(consignorId);
+      if (!consignor) return res.status(404).json({ error: 'Déposant introuvable' });
+      const admin = req.admin?.username || 'admin';
+      let settlementId = draftOf(consignorId)?.id;
+      if (!settlementId) {
+        const created = await createSettlementRecord(consignorId, nextPeriodFrom(consignorId).periodFrom, todayISO(), admin);
+        if (created.status >= 300) return res.status(created.status).json(created.body);
+        settlementId = created.body.id;
+      }
+      const r = await settleFully(settlementId, admin, req.body || {});
+      res.status(r.status).json({ ...r.body, settlementId });
+    } catch (err) {
+      console.error('[CONSIGNMENT] settle-now error:', err.message);
+      res.status(500).json({ error: 'Erreur règlement du déposant' });
+    }
+  });
+
+  /** Relevé PDF au déposant par e-mail (best-effort : n'échoue jamais un règlement). */
+  async function emailStatementToConsignor(id) {
+    try {
+      const row = db.prepare(
+        `SELECT s.*, c.name AS consignor_name, c.contact_email, c.contact_phone FROM consignment_settlements s
+         LEFT JOIN consignors c ON c.id = s.consignor_id WHERE s.id = ?`
+      ).get(id);
+      if (!transporter || !row?.contact_email) return false;
+      const dto = settlementToDto(row);
+      dto.consignor = { name: row.consignor_name, email: row.contact_email, phone: row.contact_phone };
+      const pdf = renderOdtPdf(`rv-mail-${row.id}`, buildCvContent(dto));
+      const esc = (v) => escXml(v);
+      await transporter.sendMail({
+        from: `"${EDITOR_NAME}" <${process.env.SMTP_USER}>`,
+        to: row.contact_email,
+        subject: `Relevé de reversement ${row.ref} — ${fmtFcfa(row.total_net_due)}`,
+        html: `<div style="font-family:Arial,sans-serif;color:#374151;max-width:560px">
+          <p>Bonjour ${esc(row.consignor_name)},</p>
+          <p>Nous vous reversons <strong>${esc(fmtFcfa(row.total_net_due))}</strong> au titre des ventes de vos ouvrages en dépôt-vente
+          du ${esc(fmtDateFr(row.period_from))} au ${esc(fmtDateFr(row.period_to))} :
+          ${esc(String(row.total_qty))} exemplaire(s) vendu(s) pour ${esc(fmtFcfa(row.total_sales_ttc))}, commission retenue ${esc(fmtFcfa(row.total_commission))}.</p>
+          <p>Le relevé détaillé est joint à ce message.</p>
+          <p>Cordialement,<br>${esc(EDITOR_NAME)}</p></div>`,
+        attachments: [{ filename: `${row.ref}.pdf`, content: pdf, contentType: 'application/pdf' }],
+      });
+      return true;
+    } catch (e) {
+      console.error('[CONSIGNMENT] envoi relevé déposant échoué:', e.message);
+      return false;
+    }
+  }
 
   router.delete('/settlements/:id', auth, csrf, (req, res) => {
     try {
@@ -1326,6 +1558,67 @@ export function createConsignmentRouter({ db, dolibarrPool, auth, csrfProtection
       res.status(500).json({ error: 'Erreur génération PDF' });
     }
   });
+
+  /**
+   * Préparation mensuelle (le 1er à 7h30, heure de Dakar) : pour chaque
+   * déposant ayant vendu le mois écoulé, un reversement BROUILLON est créé
+   * (période : lendemain du dernier reversement → dernier jour du mois), puis
+   * la direction et la comptabilité reçoivent la liste à régler. Aucun argent
+   * ne bouge ici : le règlement reste un clic humain (« Régler »).
+   */
+  async function prepareMonthlySettlements() {
+    const now = new Date();
+    const periodTo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0)).toISOString().slice(0, 10);
+    const created = [];
+    for (const c of db.prepare('SELECT id, name FROM consignors WHERE active = 1').all()) {
+      try {
+        if (draftOf(c.id)) continue;
+        const { periodFrom } = nextPeriodFrom(c.id);
+        if (periodFrom > periodTo) continue;
+        const r = await createSettlementRecord(c.id, periodFrom, periodTo, 'auto (mensuel)');
+        if (r.status === 201) {
+          const row = db.prepare('SELECT ref, total_net_due, total_qty FROM consignment_settlements WHERE id = ?').get(r.body.id);
+          created.push({ name: c.name, ...row });
+        }
+      } catch (e) { console.error(`[CONSIGNMENT] préparation mensuelle ${c.name}:`, e.message); }
+    }
+    const open = db.prepare(
+      `SELECT s.ref, s.total_net_due, s.period_from, s.period_to, c.name FROM consignment_settlements s
+       JOIN consignors c ON c.id = s.consignor_id WHERE s.status = 'draft' ORDER BY c.name`
+    ).all();
+    if (open.length) {
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run('system', 'consignment_monthly', `${created.length} reversement(s) préparé(s), ${open.length} à régler`);
+    }
+    if (!open.length || !transporter) return { created, open };
+    try {
+      const to = db.prepare(
+        "SELECT email FROM admin_users WHERE is_active=1 AND role IN ('super_admin','admin','comptable') AND email IS NOT NULL AND email != ''"
+      ).all().map(a => a.email);
+      if (to.length) {
+        const total = open.reduce((t, o) => t + (Number(o.total_net_due) || 0), 0);
+        const rowsHtml = open.map(o => `<tr><td style="padding:6px 8px">${escXml(o.name)}</td><td style="padding:6px 8px">${escXml(o.ref)}</td>
+          <td style="padding:6px 8px">${escXml(fmtDateFr(o.period_from))} → ${escXml(fmtDateFr(o.period_to))}</td>
+          <td style="padding:6px 8px;text-align:right;font-weight:600">${escXml(fmtFcfa(o.total_net_due))}</td></tr>`).join('');
+        await transporter.sendMail({
+          from: `"L'Harmattan Sénégal" <${process.env.SMTP_USER}>`,
+          to: to.join(','),
+          subject: `Dépôt-vente : ${open.length} reversement(s) à régler — ${fmtFcfa(total)}`,
+          html: `<div style="font-family:Arial,sans-serif;color:#374151;max-width:640px">
+            <p>Les reversements de dépôt-vente du mois sont prêts${created.length ? ` (${created.length} nouveau(x))` : ''}.</p>
+            <table style="width:100%;border-collapse:collapse;font-size:14px">${rowsHtml}</table>
+            <p style="font-size:16px"><strong>Total à reverser : ${escXml(fmtFcfa(total))}</strong></p>
+            <p><a href="${escXml(`${siteUrl || ''}/admin/consignments`)}" style="display:inline-block;padding:10px 20px;background:#10531a;color:#fff;text-decoration:none;border-radius:8px">Régler les reversements</a></p>
+          </div>`,
+        });
+      }
+    } catch (e) { console.error('[CONSIGNMENT] notification mensuelle échouée:', e.message); }
+    return { created, open };
+  }
+
+  cron.schedule('30 7 1 * *', () => {
+    prepareMonthlySettlements().catch(e => console.error('[CONSIGNMENT] cron mensuel:', e.message));
+  }, { timezone: 'Africa/Dakar' });
 
   return router;
 }

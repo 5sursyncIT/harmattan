@@ -113,14 +113,14 @@ export default function ManuscriptDepositPage() {
                 <FiUpload style={{ verticalAlign: 'middle', marginRight: 6 }} />Déposer votre version révisée
               </h2>
               <p style={{ fontSize: '0.85rem', color: '#6b7280', marginTop: 0 }}>
-                Formats acceptés : PDF, DOC, DOCX, ODT, RTF — max {info.max_mb} Mo.
+                Format accepté : Word uniquement (.doc ou .docx) — max {info.max_mb} Mo.
                 Dépôts restants sur ce lien : {info.remaining_uploads}
                 {' '}· lien valable jusqu&apos;au {new Date(info.expires_at).toLocaleDateString('fr-FR')}.
               </p>
               <div style={{ marginBottom: 12 }}>
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx,.odt,.rtf"
+                  accept=".doc,.docx"
                   onChange={(e) => setFile(e.target.files?.[0] || null)}
                 />
               </div>

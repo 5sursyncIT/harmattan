@@ -93,3 +93,5 @@
   .cv-line { grid-template-columns: 1fr 60px 90px; }
   .cv-line .cv-line-rate, .cv-line .cv-line-del { grid-column: span 1; }
 }
+.cv-check { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 0.88rem; color: var(--color-text, #334155); cursor: pointer; }
+.cv-check input { width: auto; margin: 0; }

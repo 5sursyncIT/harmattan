@@ -23,6 +23,10 @@ export const manuscriptsApi = {
   // Suppression définitive d'un doublon DÉJÀ marqué (refusée s'il porte un
   // contrat, un ISBN ou un produit). Fichiers + instantané archivés côté serveur.
   deleteDuplicate: (id, reason = '') => api.delete(`/admin/manuscripts/v2/${id}`, { data: { reason } }),
+  // Suppression direction (super_admin/admin) d'un manuscrit quelconque — même
+  // route, motif obligatoire, mêmes refus (contrat, ISBN, produit).
+  deleteManuscript: (id, reason) => api.delete(`/admin/manuscripts/v2/${id}`, { data: { reason } }),
+  deletions: () => api.get('/admin/manuscripts/v2/deletions'),
   // Export CSV du résultat courant (mêmes filtres, sans pagination).
   exportCsv: (params = {}) => api.get('/admin/manuscripts/v2/export.csv', { params, responseType: 'blob' }),
   assignedToMe: () => api.get('/admin/manuscripts/assigned'),
@@ -59,6 +63,12 @@ export const manuscriptsApi = {
   // Jalon : version protégée de la purge de rétention.
   setFileMilestone: (id, fileId, isMilestone) =>
     api.post(`/admin/manuscripts/v2/${id}/files/${fileId}/milestone`, { is_milestone: isMilestone }),
+  // Pièces jointes du manuscrit (5 max, toute étape) — kind 'attachment'.
+  uploadAttachments: (id, formData) =>
+    api.post(`/admin/manuscripts/v2/${id}/attachments`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeAttachment: (id, fileId) => api.delete(`/admin/manuscripts/v2/${id}/attachments/${fileId}`),
   // Démarrer la correction sans attendre le paiement du devis (équipe éditoriale).
   startCorrection: (id, note) => api.post(`/admin/manuscripts/v2/${id}/start-correction`, { note }),
   createContract: (id) => api.post(`/admin/manuscripts/v2/${id}/create-contract`),

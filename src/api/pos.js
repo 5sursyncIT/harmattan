@@ -21,7 +21,7 @@ export const posSearchCustomers = (q) => api.get('/pos/customers/search', { para
 export const posCreateCustomer = (data) => api.post('/pos/customers', data);
 
 // Promeut un auteur local en client POS (crée le tier Dolibarr si absent).
-export const posPromoteAuthorToCustomer = (authorId) => api.post(`/pos/customers/from-author/${authorId}`);
+export const posPromoteAuthorToCustomer = (authorId, body = {}) => api.post(`/pos/customers/from-author/${authorId}`, body);
 
 export const posCreateSale = (data) => api.post('/pos/sales', {
   ...data,
@@ -58,6 +58,8 @@ export const posGetTodayQuotes = () => api.get('/pos/quotes/today');
 export const posChangePin = (currentPin, newPin) => api.put('/pos/auth/change-pin', { currentPin, newPin });
 
 export const posLookupInvoice = (ref) => api.get(`/pos/invoices/lookup/${ref}`);
+// Données d'une facture passée pour réimprimer son ticket (duplicata).
+export const posGetInvoiceReceipt = (id) => api.get(`/pos/invoices/${id}/receipt`);
 
 // Impayés (factures à crédit) : liste + règlement ultérieur
 export const posGetUnpaidInvoices = (q) => api.get('/pos/invoices/unpaid', { params: { q } });

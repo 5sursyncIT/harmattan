@@ -8,8 +8,8 @@ import {
 } from 'react-icons/fi';
 import {
   listInvoices, getInvoice, getInvoicePdf, getInvoicesReport, getInvoiceBanks, searchInvoiceCustomers,
-  payInvoice, createCreditNote, setInvoiceToDraft,
-  reassignInvoiceCustomer, deleteInvoiceDraft, abandonInvoice, reopenInvoice,
+  payInvoice, createCreditNote, getCreditNotePreview, setInvoiceToDraft,
+  reassignInvoiceCustomer, deleteInvoiceDraft, abandonInvoice, getAbandonPreview, reopenInvoice,
   validateInvoice, renegotiateInvoice,
   getCustomerCredits, createDeposit, applyCredit, correctPaymentMethod,
 } from '../../../api/invoices';
@@ -645,6 +645,8 @@ function ActionModal({ type, invoice, onClose, onDone }) {
         {type === 'reassign' && <ReassignFields extra={extra} setExtra={setExtra} />}
         {type === 'apply-credit' && <ApplyCreditFields invoice={invoice} extra={extra} setExtra={setExtra} />}
         {type === 'renegotiate' && <RenegotiateFields invoice={invoice} setExtra={setExtra} />}
+        {type === 'credit-note' && <CreditNoteFields invoice={invoice} setExtra={setExtra} />}
+        {type === 'abandon' && <AbandonFields invoice={invoice} extra={extra} setExtra={setExtra} />}
 
         <label className="ac-form-label">Motif de la régularisation <span style={{ color: '#dc2626' }}>*</span></label>
         <textarea
@@ -916,6 +918,117 @@ function ApplyCreditFields({ invoice, extra, setExtra }) {
             <span className="ac-credit-meta">{c.source_ref || ''} · {fmtDate(c.date)}</span>
           </label>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Aperçu de l'avoir ──────────────────────────────────────
+// L'avoir ne reprend que le reste non encore crédité : les retours faits en
+// caisse et les avoirs précédents sont déduits (sinon stock et montant étaient
+// restitués deux fois). On montre ce qui sera repris avant de confirmer.
+function CreditNoteFields({ invoice, setExtra }) {
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    getCreditNotePreview(invoice.id)
+      .then(r => {
+        setPreview(r.data);
+        const blocked = r.data.refusal
+          || (r.data.nothing_left ? 'Rien à créditer : la facture est déjà entièrement couverte par des avoirs' : null);
+        setExtra({ loaded: true, blocked });
+      })
+      .catch(() => { setError('Aperçu indisponible'); setExtra({ loaded: false }); });
+  }, [invoice.id, setExtra]);
+
+  if (error) return <div style={{ padding: 12, color: '#dc2626' }}>{error}</div>;
+  if (!preview) return <div style={{ padding: 12, color: '#64748b' }}>Calcul du reste à créditer…</div>;
+  if (preview.refusal) return <div style={{ padding: 12, color: '#9a3412', fontWeight: 600 }}>{preview.refusal}</div>;
+  if (preview.nothing_left) {
+    return <div style={{ padding: 12, color: '#9a3412', fontWeight: 600 }}>
+      Rien à créditer : tous les articles de cette facture ont déjà été repris (retours caisse ou avoirs précédents).
+    </div>;
+  }
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {preview.already_credited && (
+        <div style={{ fontSize: '0.8rem', color: '#9a3412', marginBottom: 8 }}>
+          Une partie de cette facture a déjà été reprise : seul le reste figure ci-dessous.
+        </div>
+      )}
+      <div className="ac-table-wrap">
+        <table className="ac-table">
+          <thead>
+            <tr>
+              <th>Article</th>
+              <th className="ac-amount">Facturé</th>
+              <th className="ac-amount">Déjà repris</th>
+              <th className="ac-amount">Repris par cet avoir</th>
+            </tr>
+          </thead>
+          <tbody>
+            {preview.lines.map((l, i) => (
+              <tr key={i} style={l.qty > 0 ? undefined : { color: '#94a3b8' }}>
+                <td>
+                  {l.label}
+                  {l.product_ref && <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>{l.product_ref}</div>}
+                </td>
+                <td className="ac-amount">{l.invoiced_qty}</td>
+                <td className="ac-amount">{l.credited_qty}</td>
+                <td className="ac-amount" style={{ fontWeight: 700 }}>{l.qty}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ marginTop: 8, textAlign: 'right' }}>
+        Montant de l'avoir : <strong>{formatPrice(preview.total_to_credit)}</strong>
+      </div>
+    </div>
+  );
+}
+
+// ─── Abandon : les livres sont-ils revenus ? ────────────────
+// Remettre en rayon est juste pour un doublon ou une erreur de saisie, faux pour
+// un impayé où le client a gardé les livres. La question n'est posée que s'il
+// reste des exemplaires sortis pour cette facture.
+function AbandonFields({ invoice, extra, setExtra }) {
+  const [pending, setPending] = useState(null);
+
+  useEffect(() => {
+    getAbandonPreview(invoice.id)
+      .then(r => {
+        const list = r.data.pending || [];
+        setPending(list);
+        setExtra(e => ({ ...e, loaded: true, needs_choice: list.length > 0 }));
+      })
+      .catch(() => { setPending([]); setExtra(e => ({ ...e, loaded: false })); });
+  }, [invoice.id, setExtra]);
+
+  if (pending === null) return <div style={{ padding: 12, color: '#64748b' }}>Vérification du stock sorti…</div>;
+  if (!pending.length) {
+    return <div style={{ padding: 12, color: '#64748b', fontSize: '0.85rem' }}>
+      Aucun exemplaire n'est sorti du stock pour cette facture : le stock ne sera pas modifié.
+    </div>;
+  }
+  const choice = (value, title, hint) => (
+    <label className={`ac-credit-choice ${extra.restock === value ? 'active' : ''}`}>
+      <input type="radio" name="restock" checked={extra.restock === value}
+        onChange={() => setExtra({ ...extra, restock: value })} />
+      <span><strong>{title}</strong><div style={{ fontSize: '0.75rem', color: '#64748b' }}>{hint}</div></span>
+    </label>
+  );
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label className="ac-form-label">
+        Exemplaires encore sortis pour cette facture :{' '}
+        {pending.map(m => `${m.qty} × ${m.label || m.ref}`).join(', ')}
+      </label>
+      <label className="ac-form-label">Où sont ces livres ? <span style={{ color: '#dc2626' }}>*</span></label>
+      <div className="ac-credit-list">
+        {choice(true, 'Revenus en rayon ou jamais partis', 'Doublon, erreur de saisie, retour : ils sont remis en stock.')}
+        {choice(false, 'Gardés par le client', 'Impayé irrécouvrable : le stock reste inchangé.')}
       </div>
     </div>
   );
@@ -1245,10 +1358,15 @@ const ACTION_META = {
   'credit-note': {
     title: 'Créer un avoir (annulation)',
     confirmLabel: 'Créer l\'avoir',
-    warning: (inv) => `Un avoir total sera créé pour la facture ${inv.ref}. L'opération est définitive.`,
+    warning: (inv) => `Un avoir sera créé pour la facture ${inv.ref} sur tout ce qui n'a pas encore été repris, `
+      + 'et ces exemplaires reviendront en stock. L\'opération est définitive.',
     danger: true,
     successMessage: 'Avoir créé',
-    run: (inv, reason) => createCreditNote(inv.id, reason),
+    run: (inv, reason, extra) => {
+      if (!extra.loaded) throw new Error('Aperçu de l\'avoir non chargé');
+      if (extra.blocked) throw new Error(extra.blocked);
+      return createCreditNote(inv.id, reason);
+    },
   },
   renegotiate: {
     title: 'Renégocier les montants de la facture',
@@ -1305,11 +1423,16 @@ const ACTION_META = {
     title: 'Abandonner la facture',
     confirmLabel: 'Abandonner',
     warning: (inv) => `La facture ${inv.ref} porte un numéro définitif : elle ne peut pas être supprimée sans `
-      + 'trouer la numérotation. Elle sera classée « abandonnée », sortie des créances, et les exemplaires '
-      + 'qu\'elle avait sortis du stock seront restitués. Action irréversible.',
+      + 'trouer la numérotation. Elle sera classée « abandonnée » et sortie des créances. Action irréversible.',
     danger: true,
-    successMessage: 'Facture abandonnée, stock restitué',
-    run: (inv, reason) => abandonInvoice(inv.id, reason),
+    successMessage: 'Facture abandonnée',
+    run: (inv, reason, extra) => {
+      if (!extra.loaded) throw new Error('Vérification du stock non chargée');
+      if (extra.needs_choice && typeof extra.restock !== 'boolean') {
+        throw new Error('Indiquez si les livres sont revenus en rayon ou gardés par le client');
+      }
+      return abandonInvoice(inv.id, reason, extra.needs_choice ? extra.restock : true);
+    },
   },
   reopen: {
     title: 'Annuler l\'abandon',

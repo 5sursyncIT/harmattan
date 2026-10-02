@@ -35,6 +35,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: false,
-    include: ['src/**/*.test.js'],
+    include: ['src/**/*.test.js', 'server/**/*.test.js'],
+    // preorder-utils.test.js tourne sous node:test (node --test), pas vitest.
+    exclude: ['**/node_modules/**', 'server/preorder-utils.test.js'],
   }
 })

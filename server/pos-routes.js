@@ -5,7 +5,9 @@ import crypto from 'crypto';
 import 'dotenv/config';
 import { dolibarrApi } from './dolibarr-client.js';
 import { recordInvoicePayment } from './dolibarr-payments.js';
-import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { findExistingTier, findSimilarTiers, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { ensureAuthorTier } from './author-tier.js';
+import { findAuthorForTier, parseAuthorDiscount, authorDiscountRequiredBody, authorDiscountNote, authorTierIds } from './author-discount.js';
 import { EXCLUDED_CATEGORIES_SET } from '../src/utils/excludedCategories.js';
 import {
   ensureExpenseTables, createExpenseRecord, notifyAdminsExpense,
@@ -979,15 +981,20 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       ).all(pat, pat, pat, pat, pat);
 
       // 3) Fusion : on évite les doublons (auteur déjà présent dans Dolibarr).
-      const linkedTierIds = new Set(
-        authorRows.filter((a) => a.dolibarr_thirdparty_id).map((a) => a.dolibarr_thirdparty_id),
-      );
+      //    Le badge « auteur » se décide sur le LIEN tiers ↔ fiche auteur, pas
+      //    sur la requête tapée : le nom du tiers et celui de la fiche auteur
+      //    diffèrent souvent (ordre prénom/nom, accents, « Maître… »), et le
+      //    tiers ressortait alors comme simple client → remise auteur non demandée.
+      const linkedTierIds = new Set([
+        ...authorRows.filter((a) => a.dolibarr_thirdparty_id).map((a) => Number(a.dolibarr_thirdparty_id)),
+        ...authorTierIds(db, dolRows.map((c) => c.id)),
+      ]);
       const dolFmt = dolRows.map((c) => ({
         id: c.id,
         name: c.name,
         email: c.email || null,
         phone: c.phone || null,
-        source: linkedTierIds.has(c.id) ? 'author' : 'client',
+        source: linkedTierIds.has(Number(c.id)) ? 'author' : 'client',
       }));
       const authorOnly = authorRows
         .filter((a) => !a.dolibarr_thirdparty_id)
@@ -1009,43 +1016,75 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
   // Promeut un auteur local sans tier Dolibarr en client POS. Idempotent :
   // si l'auteur est déjà lié, retourne simplement les infos du tier.
-  router.post('/customers/from-author/:id', requirePosAuth, csrfProtection, async (req, res) => {
-    try {
-      const authorId = parseInt(req.params.id);
-      if (!authorId) return res.status(400).json({ error: 'ID auteur invalide' });
+  //
+  // Anti-doublons (cf. doublon SIBY #110 / #2479 du 15/09/2026) :
+  //  - verrou par auteur : un double-clic ne crée plus deux tiers ;
+  //  - création via ensureAuthorTier (dédup email/téléphone, jamais d'email factice) ;
+  //  - si un tiers actif porte le même nom complet, on NE crée PAS : 409 + candidats,
+  //    le caissier choisit « c'est lui » (link_to) ou « autre personne » (confirm_new).
+  const fromAuthorLocks = new Map();
+  const tierPayload = (t) => ({ id: t.id, name: t.name, email: t.email || null, phone: t.phone || null });
 
-      const author = db.prepare(
-        'SELECT id, email, firstname, lastname, phone, dolibarr_thirdparty_id FROM authors WHERE id = ?',
-      ).get(authorId);
-      if (!author) return res.status(404).json({ error: 'Auteur introuvable' });
+  async function promoteAuthor(authorId, { linkTo, confirmNew }) {
+    const author = db.prepare(
+      'SELECT id, email, firstname, lastname, display_name, phone, dolibarr_thirdparty_id FROM authors WHERE id = ?',
+    ).get(authorId);
+    if (!author) return { status: 404, body: { error: 'Auteur introuvable' } };
 
-      // Déjà lié à un tier Dolibarr → on récupère + on renvoie.
-      if (author.dolibarr_thirdparty_id) {
-        const [[tier]] = await dolibarrPool.query(
-          'SELECT rowid AS id, nom AS name, email, phone FROM llx_societe WHERE rowid = ?',
-          [author.dolibarr_thirdparty_id],
-        );
-        if (tier) return res.json({ id: tier.id, name: tier.name, email: tier.email, phone: tier.phone });
-        // Le tier a été supprimé côté Dolibarr — on recrée ci-dessous.
+    const activeTier = async (id) => {
+      const [[t]] = await dolibarrPool.query(
+        'SELECT rowid AS id, nom AS name, name_alias, email, phone, status FROM llx_societe WHERE rowid = ?', [id],
+      );
+      return t && Number(t.status) === 1 ? t : null;
+    };
+
+    // Déjà lié à un tier actif → on le renvoie.
+    if (author.dolibarr_thirdparty_id) {
+      const t = await activeTier(author.dolibarr_thirdparty_id);
+      if (t) return { status: 200, body: tierPayload(t) };
+      // Tier supprimé/archivé : on re-lie ci-dessous.
+      db.prepare('UPDATE authors SET dolibarr_thirdparty_id = NULL WHERE id = ?').run(authorId);
+    }
+
+    // Le caissier a reconnu l'auteur dans un tiers existant.
+    if (linkTo) {
+      const t = await activeTier(linkTo);
+      if (!t) return { status: 404, body: { error: 'Tiers introuvable ou archivé' } };
+      db.prepare('UPDATE authors SET dolibarr_thirdparty_id = ? WHERE id = ?').run(t.id, authorId);
+      return { status: 200, body: tierPayload(t) };
+    }
+
+    const fullName = `${author.firstname || ''} ${author.lastname || ''}`.trim() || author.display_name || '';
+    if (!confirmNew) {
+      const similar = await findSimilarTiers(dolibarrPool, { name: fullName });
+      if (similar.length) {
+        return { status: 409, body: { error: 'Ce client existe peut-être déjà', author_name: fullName, similar } };
       }
+    }
 
-      // Création d'un tier Dolibarr client à partir des infos auteur.
-      const fullName = `${author.firstname || ''} ${author.lastname || ''}`.trim() || `Auteur #${authorId}`;
-      const created = await adminApi.post('/thirdparties', {
-        name: fullName,
-        email: author.email || '',
-        phone: author.phone || '',
-        client: 1,
-        code_client: -1,
-      });
-      const newId = parseInt(created.data);
+    const r = await ensureAuthorTier({ db, dolibarrPool }, authorId, { force: true, throwOnError: true });
+    const t = await activeTier(r.thirdpartyId);
+    return { status: 200, body: t ? tierPayload(t) : { id: r.thirdpartyId, name: fullName, email: null, phone: author.phone || null } };
+  }
 
-      db.prepare('UPDATE authors SET dolibarr_thirdparty_id = ? WHERE id = ?').run(newId, authorId);
+  router.post('/customers/from-author/:id', requirePosAuth, csrfProtection, async (req, res) => {
+    const authorId = parseInt(req.params.id);
+    if (!authorId) return res.status(400).json({ error: 'ID auteur invalide' });
+    const linkTo = parseInt(req.body?.link_to) || null;
+    const confirmNew = !!req.body?.confirm_new;
 
-      res.json({ id: newId, name: fullName, email: author.email || null, phone: author.phone || null });
+    // Sérialise les appels concurrents pour un même auteur.
+    const prev = fromAuthorLocks.get(authorId) || Promise.resolve();
+    const run = prev.catch(() => {}).then(() => promoteAuthor(authorId, { linkTo, confirmNew }));
+    fromAuthorLocks.set(authorId, run);
+    try {
+      const { status, body } = await run;
+      res.status(status).json(body);
     } catch (err) {
       console.error('POS from-author error:', err.response?.data || err.message);
       res.status(500).json({ error: 'Erreur création client à partir de l\'auteur' });
+    } finally {
+      if (fromAuthorLocks.get(authorId) === run) fromAuthorLocks.delete(authorId);
     }
   });
 
@@ -1070,7 +1109,20 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
           phone: existing.phone,
           existing: true,
           matchedBy: existing.matchedBy,
+          ...(findAuthorForTier(db, existing.id) ? { source: 'author' } : {}),
         });
+      }
+
+      // Même nom complet qu'un tiers actif → le caissier confirme (homonyme possible).
+      if (!req.body.confirm_new) {
+        const similar = await findSimilarTiers(dolibarrPool, { name: buildTierName({ name, firstname, isCompany }) });
+        if (similar.length) {
+          const authorIds = authorTierIds(db, similar.map((t) => t.id));
+          return res.status(409).json({
+            error: 'Ce client existe peut-être déjà',
+            similar: similar.map((t) => (authorIds.has(Number(t.id)) ? { ...t, source: 'author' } : t)),
+          });
+        }
       }
 
       const customerRes = await adminApi.post('/thirdparties', {
@@ -1224,6 +1276,17 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         });
       }
 
+      // 0b-bis. Remise auteur : si le client facturé est un auteur, le taux doit
+      //         avoir été saisi par le caissier (plusieurs niveaux de remise
+      //         existent, aucun taux n'est appliqué d'office). Le panier applique
+      //         ce taux à chaque ligne (item.discount) ; ici on exige la saisie
+      //         et on la trace. Service de presse exclu (tout est à 0 F).
+      const saleAuthor = isPresse ? null : findAuthorForTier(db, customer_id);
+      const authorDiscount = parseAuthorDiscount(req.body.author_discount);
+      if (saleAuthor && authorDiscount === null) {
+        return res.status(409).json(authorDiscountRequiredBody(saleAuthor));
+      }
+
       // 0c. Verify the payments cover the sale total — server-side recompute
       //     (XOF = no decimals, tva 0) à partir des prix DE CONFIANCE. Rejected
       //     before any Dolibarr write, so an under-paid sale never produces an
@@ -1350,6 +1413,13 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         // libraire, manager) — l'audit nominatif suffit comme garde-fou.
         const roleLabel = req.posStaff.role === 'manager' ? 'manager' : 'libraire';
         let invoiceNote = `POS Terminal ${terminal} | Caissier: ${req.posStaff.name} (${roleLabel})${isPresse ? ` | SERVICE DE PRESSE → ${pressOrgan} (exemplaires gratuits)` : ''}${note ? ' | ' + note : ''}`;
+        if (saleAuthor) {
+          invoiceNote += '\n' + authorDiscountNote(authorDiscount, `${req.posStaff.name}/${roleLabel}`);
+          try {
+            db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+              .run(req.posStaff.name || 'pos', 'pos_author_discount', `T${terminal} | ${roleLabel} | client auteur #${socid} : remise ${authorDiscount} %`);
+          } catch { /* ignore */ }
+        }
         if (priceOverrides.length > 0) {
           const lines = priceOverrides.map((o) =>
             `[PRIX MODIFIÉ par ${req.posStaff.name}/${roleLabel}] ${o.label} : ${o.from} → ${o.to} F (${o.reason})`,
@@ -1800,6 +1870,83 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       if (err.response?.status === 404) return res.status(404).json({ error: 'Facture non trouvée' });
       console.error('Invoice lookup error:', err.message);
       res.status(500).json({ error: 'Erreur recherche facture' });
+    }
+  });
+
+  // Données d'une facture POS passée, au format « sale » attendu par les
+  // générateurs de ticket (réimpression depuis l'historique). Lecture SQL
+  // directe : date/heure réelles de la vente (datec), caissier et organe de
+  // presse relus dans la note privée posée à la création.
+  router.get('/invoices/:id/receipt', requirePosAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!id) return res.status(400).json({ error: 'Identifiant invalide' });
+      const [[inv]] = await dolibarrPool.query(
+        `SELECT f.rowid AS id, f.ref, f.type, f.total_ttc, f.fk_statut AS status, f.pos_source AS terminal,
+                f.fk_soc, f.note_private, UNIX_TIMESTAMP(f.datec) AS datec_ts, s.nom AS customer_name
+           FROM llx_facture f
+           LEFT JOIN llx_societe s ON s.rowid = f.fk_soc
+          WHERE f.rowid = ? AND f.module_source = 'takepos'`,
+        [id],
+      );
+      if (!inv) return res.status(404).json({ error: 'Facture introuvable' });
+      if (Number(inv.status) === 0) return res.status(400).json({ error: 'Facture en brouillon : aucun ticket à réimprimer' });
+      if (Number(inv.type) === 2) return res.status(400).json({ error: 'Un avoir ne se réimprime pas comme ticket de caisse' });
+
+      const [lines] = await dolibarrPool.query(
+        `SELECT COALESCE(NULLIF(p.label, ''), NULLIF(fd.label, ''), fd.description) AS label,
+                fd.qty, fd.subprice, fd.remise_percent, fd.total_ttc
+           FROM llx_facturedet fd
+           LEFT JOIN llx_product p ON p.rowid = fd.fk_product
+          WHERE fd.fk_facture = ?
+          ORDER BY fd.rang, fd.rowid`,
+        [id],
+      );
+      const [pays] = await dolibarrPool.query(
+        `SELECT cp.code, SUM(pf.amount) AS amount
+           FROM llx_paiement_facture pf
+           JOIN llx_paiement p ON p.rowid = pf.fk_paiement
+           LEFT JOIN llx_c_paiement cp ON cp.id = p.fk_paiement
+          WHERE pf.fk_facture = ?
+          GROUP BY cp.code
+          ORDER BY MIN(p.datep)`,
+        [id],
+      );
+
+      const note = String(inv.note_private || '');
+      const staff = (note.match(/Caissier:\s*([^|(\n]+)/) || [])[1]?.trim() || '';
+      const pressOrgan = (note.match(/SERVICE DE PRESSE → ([^|(\n]+)/) || [])[1]?.trim() || '';
+      const isPresse = Number(inv.fk_soc) === POS_CONFIG.pressCustomer || !!pressOrgan;
+      const total = Math.abs(Number(inv.total_ttc) || 0);
+      const payments = pays
+        .map((p) => ({ code: normalizePaymentCode(p.code) || p.code || '?', amount: Math.abs(Number(p.amount) || 0) }))
+        .filter((p) => p.amount > 0);
+      const paid = payments.reduce((s, p) => s + p.amount, 0);
+
+      res.json({
+        invoice_id: inv.id,
+        invoice_ref: inv.ref,
+        date: inv.datec_ts ? Number(inv.datec_ts) * 1000 : null,
+        terminal: inv.terminal || '',
+        staff,
+        customer_name: Number(inv.fk_soc) === POS_CONFIG.defaultCustomer ? '' : (inv.customer_name || ''),
+        items: lines.map((l) => ({
+          label: l.label || '',
+          qty: Math.abs(Number(l.qty) || 0),
+          price_ttc: Number(l.subprice) || 0,
+          discount: Number(l.remise_percent) || 0,
+          line_total: Math.abs(Number(l.total_ttc) || 0),
+        })),
+        total_ttc: total,
+        payments,
+        service_presse: isPresse,
+        press_organ: pressOrgan || undefined,
+        remaining: isPresse ? 0 : Math.max(0, Math.round(total - paid)),
+        duplicate: true,
+      });
+    } catch (err) {
+      console.error('[POS] receipt reprint error:', err.message);
+      res.status(500).json({ error: 'Erreur chargement du ticket' });
     }
   });
 
@@ -2716,6 +2863,9 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
+  // Remise auteur saisie au comptoir (null = client non auteur / non saisie).
+  try { db.exec('ALTER TABLE pos_quotes ADD COLUMN author_discount REAL'); } catch { /* déjà présente */ }
+
   // Échappe les caractères réservés XML — toute valeur dynamique insérée dans
   // content.xml doit y passer (sinon injection / document ODT corrompu).
   function escapeXml(s) {
@@ -2756,8 +2906,15 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       // sont exposés à l'admin via /api/admin/propals/pos-quotes (visibles dans /admin/devis).
 
       // Save local copy (for ODT generation)
-      const stmt = db.prepare(`INSERT INTO pos_quotes (ref, customer_name, customer_phone, customer_email, items, total_ttc, staff_name, terminal)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      // Client auteur : le taux de remise doit avoir été saisi (cf. /sales).
+      const quoteAuthor = findAuthorForTier(db, customer?.id);
+      const quoteAuthorDiscount = parseAuthorDiscount(req.body.author_discount);
+      if (quoteAuthor && quoteAuthorDiscount === null) {
+        return res.status(409).json(authorDiscountRequiredBody(quoteAuthor));
+      }
+
+      const stmt = db.prepare(`INSERT INTO pos_quotes (ref, customer_name, customer_phone, customer_email, items, total_ttc, staff_name, terminal, author_discount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       stmt.run(
         ref,
@@ -2767,7 +2924,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         JSON.stringify(items),
         total,
         req.posStaff.name,
-        terminal
+        terminal,
+        quoteAuthor ? quoteAuthorDiscount : null,
       );
 
       res.json({
@@ -2779,6 +2937,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         terminal,
         date: new Date().toISOString(),
         validity_days: 30,
+        author_discount: quoteAuthor ? quoteAuthorDiscount : null,
       });
     } catch (err) {
       console.error('POS quote error:', err);

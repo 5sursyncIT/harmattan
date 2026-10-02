@@ -226,7 +226,8 @@ export function getActiveDepositToken(db, manuscriptId) {
 }
 
 // ─── ROUTER PUBLIC DE DÉPÔT (auteur, sans connexion) ────────
-const DEPOSIT_PATTERN = /\.(pdf|doc|docx|odt|rtf)$/i;
+// Manuscrits auteur : Word uniquement (.doc/.docx) — décision éditoriale 2026-09.
+const DEPOSIT_PATTERN = /\.(doc|docx)$/i;
 const DEPOSIT_SIZE_MB = 20;
 
 const depositUpload = multer({
@@ -245,7 +246,11 @@ const depositUpload = multer({
     },
   }),
   limits: { fileSize: DEPOSIT_SIZE_MB * 1024 * 1024 },
-  fileFilter: (req, file, cb) => cb(null, DEPOSIT_PATTERN.test(file.originalname || '')),
+  fileFilter: (req, file, cb) => {
+    const ok = DEPOSIT_PATTERN.test(file.originalname || '');
+    if (!ok) req.fileFormatRejected = true;
+    cb(null, ok);
+  },
 });
 
 /**
@@ -331,7 +336,8 @@ export function createDepositRouter({ db, downloadLimiter, uploadLimiter, csrfPr
       });
     },
     (req, res) => {
-      if (!req.file) return res.status(400).json({ error: 'Fichier requis (PDF, DOC, DOCX, ODT ou RTF)' });
+      if (req.fileFormatRejected) return res.status(400).json({ error: 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).' });
+      if (!req.file) return res.status(400).json({ error: 'Fichier requis (Word : DOC ou DOCX)' });
       const m = req.depositManuscript;
       const note = String(req.body?.note || '').trim().slice(0, 1000) || null;
       const actor = { role: 'author', id: m.author_id, label: m.author_name };

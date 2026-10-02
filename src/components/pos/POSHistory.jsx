@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { FiX, FiRotateCcw, FiPrinter, FiSearch, FiChevronLeft, FiChevronRight, FiRefreshCw, FiFileText } from 'react-icons/fi';
-import { posGetSalesHistory } from '../../api/pos';
+import { posGetSalesHistory, posGetInvoiceReceipt } from '../../api/pos';
+import { reprintSaleReceipt } from '../../pos/printReceipt';
 import toast from 'react-hot-toast';
 import './POSHistory.css';
 
@@ -17,6 +18,19 @@ export default function POSHistory({ onClose, onReturn, onSettle }) {
   const [dateTo, setDateTo] = useState('');
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
+  const [reprintingId, setReprintingId] = useState(null);
+
+  const handleReprint = async (row) => {
+    setReprintingId(row.id);
+    try {
+      const res = await posGetInvoiceReceipt(row.id);
+      await reprintSaleReceipt(res.data);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Réimpression impossible');
+    } finally {
+      setReprintingId(null);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -194,8 +208,9 @@ export default function POSHistory({ onClose, onReturn, onSettle }) {
                       <button
                         type="button"
                         className="pos-history-action"
-                        onClick={() => toast('Réimpression — bientôt disponible', { icon: '🚧' })}
-                        title="Réimprimer le reçu"
+                        onClick={() => handleReprint(r)}
+                        disabled={reprintingId === r.id || r.type == 2 || r.status == 0}
+                        title={r.type == 2 ? 'Un avoir ne se réimprime pas' : r.status == 0 ? 'Facture en brouillon' : 'Réimprimer le ticket (duplicata)'}
                       >
                         <FiPrinter size={14} />
                       </button>

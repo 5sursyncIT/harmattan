@@ -121,6 +121,7 @@ const SuppliersPanel = lazy(() => import('./pages/admin/panels/SuppliersPanel'))
 const CustomersPanel = lazy(() => import('./pages/admin/panels/CustomersPanel'));
 const CustomerDetailPage = lazy(() => import('./pages/admin/panels/CustomerDetailPage'));
 const TiersPanel = lazy(() => import('./pages/admin/panels/TiersPanel'));
+const TiersDuplicatesPanel = lazy(() => import('./pages/admin/panels/TiersDuplicatesPanel'));
 const SocieteDetailPage = lazy(() => import('./pages/admin/panels/SocieteDetailPage'));
 const AuthorsPanel = lazy(() => import('./pages/admin/panels/AuthorsPanel'));
 const AdminNewsPanel = lazy(() => import('./pages/admin/panels/NewsPanel'));
@@ -229,6 +230,7 @@ export default function App() {
             <Route path="customers" element={<CustomersPanel />} />
             <Route path="customers/:id" element={<CustomerDetailPage />} />
             <Route path="tiers" element={<TiersPanel />} />
+            <Route path="tiers/doublons" element={<TiersDuplicatesPanel />} />
             <Route path="tiers/:id" element={<SocieteDetailPage />} />
             <Route path="authors" element={<AuthorsPanel />} />
             <Route path="news" element={<AdminNewsPanel />} />

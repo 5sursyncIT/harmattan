@@ -330,8 +330,13 @@ export function createPaytechRouter({
               const productIds = productLines.map((l) => parseInt(l.fk_product));
               if (productIds.length > 0) {
                 const placeholders = productIds.map(() => '?').join(',');
+                // Stock du RAYON (4), celui que la validation décrémente — le stock
+                // global laissait passer une commande que Dolibarr refuse ensuite.
                 const [stockRows] = await dolibarrPool.query(
-                  `SELECT rowid AS id, label, stock, fk_product_type FROM llx_product WHERE rowid IN (${placeholders})`,
+                  `SELECT p.rowid AS id, p.label, p.fk_product_type, COALESCE(ps.reel, 0) AS stock
+                     FROM llx_product p
+                     LEFT JOIN llx_product_stock ps ON ps.fk_product = p.rowid AND ps.fk_entrepot = 4
+                    WHERE p.rowid IN (${placeholders})`,
                   productIds,
                 );
                 const stockMap = new Map(stockRows.map((r) => [r.id, r]));
@@ -369,10 +374,19 @@ export function createPaytechRouter({
             invoiceId = invoiceRes.data;
             // Validate the invoice — idwarehouse:4 (Rayon) = même dépôt que POS,
             // déclenche le décrément stock sur la source de vérité physique.
+            // Échec de validation = aucun stock sorti. On supprime le brouillon et on
+            // remonte l'erreur : le paiement part alors dans les orphelins (sans
+            // facture) que l'admin régularise, au lieu d'un brouillon muet sur
+            // lequel le règlement ne peut même pas s'imputer.
             try {
               await dolibarrApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
             } catch (e) {
-              console.warn('[PAYTECH-IPN] invoice validate warning:', e.response?.data || e.message);
+              const draftId = invoiceId;
+              invoiceId = null;
+              try { await adminApi.delete(`/invoices/${draftId}`); } catch (delErr) {
+                console.error(`[PAYTECH-IPN] brouillon ${draftId} non supprimé:`, delErr.response?.data || delErr.message);
+              }
+              throw e;
             }
             // Tag canal de vente (cohérent avec /orders et confirm-payment admin).
             // createfromorder ne copie pas toujours module_source — PUT best-effort.

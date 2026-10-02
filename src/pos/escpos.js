@@ -24,12 +24,14 @@ function encodeText(text) {
     'Ý': 0xED,
     'ñ': 0xA4, 'Ñ': 0xA5,
     'ç': 0x87, 'Ç': 0x80,
-    'œ': 0x9C, 'Œ': 0x8C,
     '€': 0xD5, '£': 0x9C, '¥': 0xBE, '§': 0xF5,
     '«': 0xAE, '»': 0xAF, '°': 0xF8,
+    '\u202F': 0x20, '\u00A0': 0x20,
     '–': 0x2D, '—': 0x2D, '…': 0x2E, '’': 0x27, '‘': 0x27, '“': 0x22, '”': 0x22,
   };
   const bytes = [];
+  // CP858 n'a ni « œ » ni « Œ » : on les décompose.
+  text = String(text).replace(/œ/g, 'oe').replace(/Œ/g, 'OE');
   for (const ch of text) {
     const code = map[ch];
     if (code !== undefined) { bytes.push(code); continue; }
@@ -39,6 +41,26 @@ function encodeText(text) {
     bytes.push(0x3F); // '?' pour inconnu
   }
   return bytes;
+}
+
+// Montant formaté fr-FR (« 12 500 »). Le séparateur de milliers natif est
+// U+202F, absent de CP858 : sans ce remplacement il s'imprimait « 12?500 ».
+function money(n) {
+  return Math.round(Number(n) || 0).toLocaleString('fr-FR').replace(/[\u202F\u00A0]/g, ' ');
+}
+
+// Coupe un texte en lignes de `cols` caractères max, sur les espaces.
+function wrap(text, cols) {
+  const lines = [];
+  let cur = '';
+  for (const word of String(text || '').split(/\s+/).filter(Boolean)) {
+    if (!cur) cur = word;
+    else if (cur.length + 1 + word.length <= cols) cur += ` ${word}`;
+    else { lines.push(cur); cur = word; }
+    while (cur.length > cols) { lines.push(cur.slice(0, cols)); cur = cur.slice(cols); }
+  }
+  if (cur) lines.push(cur);
+  return lines;
 }
 
 export class Receipt {
@@ -82,10 +104,10 @@ export class Receipt {
   hr(char = '-') { return this.textLine(char.repeat(this.cols)); }
 
   // Ligne en deux colonnes (libellé gauche, valeur droite alignée)
-  twoCols(left, right) {
+  twoCols(left, right, cols = this.cols) {
     const l = String(left);
     const r = String(right);
-    const space = this.cols - l.length - r.length;
+    const space = cols - l.length - r.length;
     if (space >= 1) return this.textLine(l + ' '.repeat(space) + r);
     // Si trop long, on retourne à la ligne pour la valeur
     return this.textLine(l).alignRight().textLine(r).alignLeft();
@@ -93,11 +115,11 @@ export class Receipt {
 
   // Ligne article : label sur une ligne, puis Qté x PU = Total en dessous
   itemLine({ label, qty, unit, total }) {
-    const safeLabel = (label || '').slice(0, this.cols);
-    this.textLine(safeLabel);
-    const qtyStr = Number.isInteger(qty) ? String(qty) : qty.toFixed(2);
-    const unitStr = Math.round(unit).toLocaleString('fr-FR');
-    const totalStr = Math.round(total).toLocaleString('fr-FR');
+    wrap(label, this.cols).forEach((l) => this.textLine(l));
+    const q = Number(qty) || 0;
+    const qtyStr = Number.isInteger(q) ? String(q) : q.toFixed(2);
+    const unitStr = money(unit);
+    const totalStr = money(total);
     const line = `  ${qtyStr} x ${unitStr}`;
     const space = this.cols - line.length - totalStr.length;
     return this.textLine(line + ' '.repeat(Math.max(1, space)) + totalStr);
@@ -111,6 +133,14 @@ export class Receipt {
 const PAYMENT_LABELS = {
   LIQ: 'Espèces', CB: 'Carte', CHQ: 'Chèque', WAVE: 'Wave', OM: 'Orange Money',
 };
+
+// Reste dû : fourni par le serveur à la réimpression (`remaining`), sinon
+// déduit du drapeau `unpaid` d'une vente à crédit qui vient d'être faite.
+export function amountDue(sale) {
+  if (sale.service_presse) return 0;
+  if (sale.remaining != null) return Math.max(0, Math.round(Number(sale.remaining) || 0));
+  return sale.unpaid ? Math.round(Number(sale.total_ttc) || 0) : 0;
+}
 
 // Construit un ticket de caisse complet pour une vente POS
 export function buildSaleReceipt(sale, { width = 80, openDrawer = false, shop = {} } = {}) {
@@ -131,10 +161,12 @@ export function buildSaleReceipt(sale, { width = 80, openDrawer = false, shop = 
   r.textLine(tel);
   r.textLine(ninea);
   r.textLine(rc);
+  if (sale.duplicate) r.blank().bold().textLine('*** DUPLICATA ***').bold(false);
   r.alignLeft().blank();
 
   // ─── Métadonnées facture ─────────────────────────────────
-  const now = new Date();
+  // Date réelle de la vente (réimpression), sinon l'instant présent.
+  const now = sale.date ? new Date(sale.date) : new Date();
   const dateStr = now.toLocaleDateString('fr-FR');
   const timeStr = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
   r.twoCols('Facture', sale.invoice_ref || '—');
@@ -159,7 +191,7 @@ export function buildSaleReceipt(sale, { width = 80, openDrawer = false, shop = 
     let label = item.label || '';
     if (item.discount > 0) label += ` (-${item.discount}%)`;
     r.itemLine({ label, qty, unit, total: lineTotal });
-    itemCount += qty;
+    itemCount += Number(qty) || 0;
   });
 
   r.hr();
@@ -167,27 +199,32 @@ export function buildSaleReceipt(sale, { width = 80, openDrawer = false, shop = 
   r.hr('=');
 
   // ─── Total ───────────────────────────────────────────────
-  const totalStr = `${Math.round(sale.total_ttc || 0).toLocaleString('fr-FR')} FCFA`;
-  r.bold().size(0x11).twoCols('TOTAL TTC', totalStr).size(0).bold(false);
+  const totalStr = `${money(sale.total_ttc)} FCFA`;
+  r.bold().size(0x11).twoCols('TOTAL TTC', totalStr, Math.floor(r.cols / 2)).size(0).bold(false);
   r.hr();
 
   // ─── Paiements ──────────────────────────────────────────
-  const totalPaid = (sale.payments || []).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-  (sale.payments || []).forEach((p) => {
-    const label = PAYMENT_LABELS[p.code] || p.code;
-    const amount = `${Math.round(parseFloat(p.amount)).toLocaleString('fr-FR')} F`;
-    r.twoCols(label, amount);
-  });
-  const change = Math.round(totalPaid - (sale.total_ttc || 0));
-  if (change > 0) {
-    r.twoCols('Rendu monnaie', `${change.toLocaleString('fr-FR')} F`);
+  if (sale.service_presse) {
+    r.bold().twoCols(`SERVICE DE PRESSE${sale.press_organ ? ` - ${sale.press_organ}` : ''}`.slice(0, r.cols - 4), '0 F').bold(false);
+  } else {
+    const totalPaid = (sale.payments || []).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    (sale.payments || []).forEach((p) => {
+      r.twoCols(PAYMENT_LABELS[p.code] || p.code, `${money(p.amount)} F`);
+    });
+    const due = amountDue(sale);
+    if (due > 0) {
+      r.bold().twoCols(totalPaid > 0 ? 'RESTE A REGLER' : 'A REGLER (facture impayée)', `${money(due)} F`).bold(false);
+    } else {
+      const change = Math.round(totalPaid - (sale.total_ttc || 0));
+      if (change > 0) r.twoCols('Rendu monnaie', `${money(change)} F`);
+    }
   }
   r.hr();
 
   // ─── Pied de ticket ─────────────────────────────────────
   r.alignCenter();
   r.textLine('Montants en Francs CFA BCEAO');
-  r.textLine('Exoneré de TVA');
+  r.textLine('Exonéré de TVA');
   r.blank();
   r.bold().textLine('Merci de votre visite !').bold(false);
   r.textLine(website);
@@ -198,12 +235,14 @@ export function buildSaleReceipt(sale, { width = 80, openDrawer = false, shop = 
     r.blank().alignCenter();
     // GS h 64 : hauteur 100 dots
     r.write(GS, 0x68, 0x64);
-    // GS w 3 : largeur 3
-    r.write(GS, 0x77, 0x03);
+    // GS w 2 : largeur 2 (en 3, une réf. de 15 car. = 600 points > 576 imprimables)
+    r.write(GS, 0x77, 0x02);
     // GS H 0 : pas de texte HRI
     r.write(GS, 0x48, 0x00);
     // GS k 73 n d1..dn 0x00 : CODE128 de longueur n
-    const refBytes = encodeText(sale.invoice_ref);
+    // Les données CODE128 doivent commencer par le sélecteur de jeu « {B »,
+    // sinon l'imprimante ignore la commande (aucun code-barres imprimé).
+    const refBytes = [0x7B, 0x42, ...encodeText(sale.invoice_ref)];
     r.write(GS, 0x6B, 0x49, refBytes.length, ...refBytes);
     r.alignLeft().blank();
   }

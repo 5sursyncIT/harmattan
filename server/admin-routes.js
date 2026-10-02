@@ -89,7 +89,10 @@ const manuscriptUpload = multer({
   }),
   limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    cb(null, /\.(pdf|doc|docx)$/i.test(file.originalname));
+    // Manuscrits : Word uniquement (.doc/.docx) — décision éditoriale 2026-09.
+    const ok = /\.(doc|docx)$/i.test(file.originalname || '');
+    if (!ok) req.fileFormatRejected = true;
+    cb(null, ok);
   },
 });
 
@@ -1098,7 +1101,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
               cleanupAll();
               return res.status(400).json({
                 error: `Le fichier du tome ${i + 1} est manquant.`,
-                errors: { file: 'Veuillez joindre le fichier de chaque tome (PDF, DOC ou DOCX).' },
+                errors: { file: 'Veuillez joindre le fichier de chaque tome (Word : DOC ou DOCX).' },
               });
             }
             tomeInputs.push({ subtitle, file: f, externalUrl: null });
@@ -1110,7 +1113,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
         const f = uploaded[0] || null;
         if (!f && !externalUrl) {
           return res.status(400).json({
-            error: 'Le manuscrit (PDF, DOC ou DOCX) ou un lien de téléchargement est obligatoire.',
+            error: 'Le manuscrit (Word : DOC ou DOCX) ou un lien de téléchargement est obligatoire.',
             errors: { file: 'Veuillez joindre votre manuscrit ou coller un lien de téléchargement.' },
           });
         }
@@ -1351,6 +1354,11 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
   // au lieu de laisser filer vers le handler d'erreur générique (500 opaque).
   const submitUpload = manuscriptUpload.fields([{ name: 'files', maxCount: 5 }, { name: 'file', maxCount: 1 }]);
   const submitUploadSafe = (req, res, next) => submitUpload(req, res, (err) => {
+    if (!err && req.fileFormatRejected) {
+      for (const f of [...(req.files?.files || []), ...(req.files?.file || [])]) cleanupTmpUpload(f);
+      const msg = 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).';
+      return res.status(400).json({ error: msg, errors: { file: msg } });
+    }
     if (!err) return next();
     console.warn('[MANUSCRIPT] Upload rejeté par multer:', err.code || err.message);
     const msg = err.code === 'LIMIT_FILE_SIZE'

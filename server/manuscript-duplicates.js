@@ -203,19 +203,18 @@ export function listDuplicateGroups(db, { includeResolved = false } = {}) {
     || String(b.members.at(-1).created_at).localeCompare(String(a.members.at(-1).created_at)));
 }
 
-// ─── SUPPRESSION D'UN DOUBLON ────────────────────────────────────────────────
-// Le marquage laisse la copie en base : utile tant qu'on hésite, encombrant une
-// fois la décision prise (fiche consultable, fichiers en double sur disque,
-// groupe « traité » qui revient à chaque affichage). La suppression achève
-// l'arbitrage, sous trois conditions :
-//   - la copie est d'abord MARQUÉE comme doublon (l'original est donc désigné
-//     et survit — on ne supprime jamais le seul exemplaire d'un ouvrage) ;
-//   - elle ne porte rien qui vive hors de SQLite : contrat Dolibarr, ISBN,
-//     produit ou ordre de fabrication. Supprimer la fiche laisserait ces objets
-//     orphelins (et le devis/la facture du contrat avec eux) ;
-//   - la trace survit : un événement dans la frise de l'original, et un
-//     instantané JSON des lignes + les fichiers déplacés (pas effacés) dans
-//     manuscripts/_supprimes/, de quoi reconstituer le dossier en cas d'erreur.
+// ─── SUPPRESSION D'UN MANUSCRIT ──────────────────────────────────────────────
+// Deux usages :
+//   - DOUBLON marqué (arbitrage, rôles éditoriaux) : l'original désigné survit,
+//     la suppression est tracée dans sa frise ;
+//   - SUPPRESSION DIRECTION (super_admin/admin, motif obligatoire) : dossier
+//     ouvert par erreur, envoi de test, soumission retirée par l'auteur…
+// Dans les deux cas, on refuse ce qui vit hors de SQLite : contrat Dolibarr,
+// ISBN, produit ou ordre de fabrication — supprimer la fiche les rendrait
+// orphelins (et le devis/la facture du contrat avec eux). Et la trace survit :
+//   - une ligne dans le registre `manuscript_deletions` (qui, quand, pourquoi) ;
+//   - un instantané JSON des lignes + le dossier de fichiers déplacé (pas
+//     effacé) dans manuscripts/_supprimes/, de quoi reconstituer le dossier.
 
 // Tables filles portant manuscript_id, vidées avec la fiche.
 const CHILD_TABLES = [
@@ -228,17 +227,39 @@ function tableExists(db, name) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 }
 
+/** Registre des suppressions : la frise du manuscrit disparaît, celui-ci reste. */
+export function ensureDeletionSchema(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS manuscript_deletions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manuscript_id INTEGER NOT NULL,
+    ref TEXT NOT NULL,
+    title TEXT,
+    author_id INTEGER,
+    author_name TEXT,
+    stage TEXT,
+    kind TEXT NOT NULL,              -- 'duplicate' | 'direction'
+    duplicate_of_ref TEXT,
+    reason TEXT,
+    deleted_by_id INTEGER,
+    deleted_by TEXT,
+    deleted_by_role TEXT,
+    archive_dir TEXT,
+    deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+}
+
 /**
- * Raisons empêchant la suppression d'un manuscrit (liste vide = supprimable).
+ * Raisons empêchant la suppression (liste vide = supprimable).
+ * @param {boolean} opts.asDuplicate  exige que le manuscrit soit marqué doublon.
  * @returns {string[]}
  */
-export function duplicateDeletionBlockers(db, m) {
+export function manuscriptDeletionBlockers(db, m, { asDuplicate = false } = {}) {
   const blockers = [];
-  if (!m.duplicate_of) {
+  if (asDuplicate && !m.duplicate_of) {
     blockers.push("Marquez d'abord ce manuscrit comme doublon de l'original à conserver");
   }
   const attached = db.prepare('SELECT COUNT(*) AS n FROM manuscripts WHERE duplicate_of = ?').get(m.id).n;
-  if (attached) blockers.push(`${m.ref} est l'original de ${attached} doublon(s)`);
+  if (attached) blockers.push(`${m.ref} est l'original de ${attached} doublon(s) — détachez-les ou supprimez-les d'abord`);
   const links = tableExists(db, 'contract_manuscript_links')
     ? db.prepare('SELECT COUNT(*) AS n FROM contract_manuscript_links WHERE manuscript_id = ?').get(m.id).n
     : 0;
@@ -249,28 +270,27 @@ export function duplicateDeletionBlockers(db, m) {
 }
 
 /**
- * Supprime un doublon marqué. Les lignes sont effacées dans une transaction ;
- * les fichiers et l'instantané sont mis de côté dans `trashRoot`.
- * @returns {{ original: {id:number, ref:string}, trashDir: string|null, files: number }}
+ * Supprime un manuscrit (blockers vérifiés par l'appelant). Les lignes sont
+ * effacées dans une transaction ; fichiers et instantané sont mis de côté avant.
+ * @returns {{ original: {id:number, ref:string}|null, trashDir: string }}
  */
-export function deleteDuplicateManuscript(db, m, { manuscriptsDir, actor = {}, reason = '', logEvent }) {
-  const original = db.prepare('SELECT id, ref FROM manuscripts WHERE id = ?').get(m.duplicate_of);
+export function deleteManuscript(db, m, { manuscriptsDir, actor = {}, reason = '', kind = 'direction', logEvent }) {
+  ensureDeletionSchema(db);
+  const original = m.duplicate_of ? db.prepare('SELECT id, ref FROM manuscripts WHERE id = ?').get(m.duplicate_of) : null;
+  const author = db.prepare('SELECT firstname, lastname FROM authors WHERE id = ?').get(m.author_id);
   const tables = CHILD_TABLES.filter((t) => tableExists(db, t));
-  const snapshot = { manuscript: m, deleted_at: new Date().toISOString(), deleted_by: actor.label || null, reason };
+  const snapshot = { manuscript: m, author, deleted_at: new Date().toISOString(), deleted_by: actor.label || null, kind, reason };
   for (const t of tables) snapshot[t] = db.prepare(`SELECT * FROM ${t} WHERE manuscript_id = ?`).all(m.id);
 
   // Instantané + fichiers mis de côté AVANT d'effacer : si le disque refuse,
-  // rien n'est supprimé.
+  // rien n'est supprimé en base.
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const trashDir = join(manuscriptsDir, '_supprimes', `${m.ref}-${stamp}`);
+  const archive = `_supprimes/${m.ref}-${stamp}`;
+  const trashDir = join(manuscriptsDir, archive);
   mkdirSync(trashDir, { recursive: true });
   writeFileSync(join(trashDir, 'snapshot.json'), JSON.stringify(snapshot, null, 2));
   const ownDir = join(manuscriptsDir, String(m.id));
-  let moved = 0;
-  if (existsSync(ownDir)) {
-    renameSync(ownDir, join(trashDir, 'fichiers'));
-    moved = (snapshot.manuscript_files || []).length;
-  }
+  if (existsSync(ownDir)) renameSync(ownDir, join(trashDir, 'fichiers'));
 
   db.transaction(() => {
     for (const t of tables) db.prepare(`DELETE FROM ${t} WHERE manuscript_id = ?`).run(m.id);
@@ -280,11 +300,20 @@ export function deleteDuplicateManuscript(db, m, { manuscriptsDir, actor = {}, r
       db.prepare('UPDATE author_notifications SET manuscript_id = NULL WHERE manuscript_id = ?').run(m.id);
     }
     db.prepare('DELETE FROM manuscripts WHERE id = ?').run(m.id);
+    db.prepare(`INSERT INTO manuscript_deletions
+      (manuscript_id, ref, title, author_id, author_name, stage, kind, duplicate_of_ref, reason,
+       deleted_by_id, deleted_by, deleted_by_role, archive_dir)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      m.id, m.ref, m.title, m.author_id,
+      author ? `${author.firstname || ''} ${author.lastname || ''}`.trim() : null,
+      m.current_stage, kind, original?.ref || null, reason || null,
+      actor.id || null, actor.label || null, actor.role || null, archive,
+    );
     if (original && logEvent) {
       logEvent(db, original.id, 'duplicate_deleted', actor,
-        `Doublon ${m.ref} — « ${m.title} » supprimé${reason ? ` (${reason})` : ''}. Archive : _supprimes/${m.ref}-${stamp}`);
+        `Doublon ${m.ref} — « ${m.title} » supprimé${reason ? ` (${reason})` : ''}. Archive : ${archive}`);
     }
   })();
 
-  return { original, trashDir, files: moved };
+  return { original, trashDir };
 }

@@ -12,6 +12,10 @@
 import { Router } from 'express';
 import axios from 'axios';
 import { findExistingTier } from './tier-dedup.js';
+import {
+  findAuthorForTier, authorTierIds, parseAuthorDiscount, authorDiscountRequiredBody,
+  authorDiscountNote, noteHasAuthorDiscount,
+} from './author-discount.js';
 
 // Statuts Dolibarr d'une proposition commerciale.
 const STATUS_LABELS = { 0: 'Brouillon', 1: 'Validé', 2: 'Signé', 3: 'Non signé', 4: 'Facturé' };
@@ -259,13 +263,23 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
 
       const socid = await resolveQuoteClient(q, req.body?.socid);
 
+      // Remise auteur : déjà saisie au comptoir (lignes remisées) ou à saisir
+      // maintenant si le client facturé est un auteur. Un taux transmis ici
+      // remplace celui de la proforma sur toutes les lignes.
+      const quoteAuthor = findAuthorForTier(db, socid);
+      const bodyAuthorDiscount = parseAuthorDiscount(req.body?.author_discount);
+      if (quoteAuthor && bodyAuthorDiscount === null && q.author_discount == null) {
+        return res.status(409).json(authorDiscountRequiredBody(quoteAuthor));
+      }
+      const appliedAuthorDiscount = quoteAuthor ? (bodyAuthorDiscount ?? q.author_discount) : null;
+
       const lines = items.map((it) => {
         const qty = Number(it.qty) > 0 ? Number(it.qty) : 1;
         const line = {
           qty,
           subprice: parseInt(it.price_ttc) || 0,
           tva_tx: 0, product_type: 0,
-          remise_percent: Number(it.discount) || 0,
+          remise_percent: bodyAuthorDiscount !== null && quoteAuthor ? bodyAuthorDiscount : (Number(it.discount) || 0),
         };
         if (!it.is_free && it.product_id) line.fk_product = parseInt(it.product_id, 10);
         if (it.label) line.desc = String(it.label).slice(0, 200);
@@ -278,7 +292,8 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
         date: today,
         type: 0,
         module_source: 'proforma',
-        note_private: `Facture générée depuis la proforma ${q.ref} (caisse)`,
+        note_private: `Facture générée depuis la proforma ${q.ref} (caisse)`
+          + (appliedAuthorDiscount !== null ? `\n${authorDiscountNote(appliedAuthorDiscount, bodyAuthorDiscount !== null ? (req.admin?.username || req.admin?.email) : (q.staff_name || 'caisse'))}` : ''),
         lines,
       });
       const invoiceId = invoiceRes.data;
@@ -351,9 +366,11 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
          ORDER BY nom ASC LIMIT 20`,
         [pat, pat, pat]
       );
+      const authors = authorTierIds(db, rows.map(r => r.id));
       res.json({ clients: rows.map(r => ({
         id: r.id, name: r.nom, code: r.code_client, email: r.email,
         address: r.address, zip: r.zip, town: r.town, phone: r.phone,
+        is_author: authors.has(Number(r.id)),
       })) });
     } catch (err) {
       console.error('[PROPALS] clients search error:', err.message);
@@ -397,10 +414,18 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
         return res.status(400).json({ error: 'Au moins une ligne est requise' });
       }
 
+      // Client auteur : taux de remise saisi obligatoire, appliqué à chaque ligne.
+      const author = findAuthorForTier(db, sid);
+      const authorDiscount = parseAuthorDiscount(req.body?.author_discount);
+      if (author && authorDiscount === null) {
+        return res.status(409).json(authorDiscountRequiredBody(author));
+      }
+
       const propalLines = lines.map((l) => {
         const qty = Number(l.qty) > 0 ? Number(l.qty) : 1;
         const subprice = Number(l.subprice) || 0;
         const line = { qty, subprice, tva_tx: 0, product_type: 0 };
+        if (author) line.remise_percent = authorDiscount;
         if (l.product_id) line.fk_product = parseInt(l.product_id, 10);
         if (l.label) line.desc = String(l.label).slice(0, 255);
         return line;
@@ -416,6 +441,7 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
         duree_validite: validity,
         lines: propalLines,
         note_public: note_public ? String(note_public).slice(0, 2000) : '',
+        ...(author ? { note_private: authorDiscountNote(authorDiscount, req.admin?.username || req.admin?.email) } : {}),
       });
       const newId = createRes.data;
 
@@ -449,7 +475,7 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
     if (!id) return res.status(400).json({ error: 'Identifiant de devis invalide' });
     try {
       const [[propal]] = await dolibarrPool.query(
-        'SELECT rowid AS id, ref, fk_statut, fk_soc, note_public FROM llx_propal WHERE rowid = ?', [id]
+        'SELECT rowid AS id, ref, fk_statut, fk_soc, note_public, note_private FROM llx_propal WHERE rowid = ?', [id]
       );
       if (!propal) return res.status(404).json({ error: 'Devis introuvable' });
       if (propal.fk_statut === 4) return res.status(409).json({ error: 'Ce devis est déjà facturé' });
@@ -462,6 +488,16 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
       );
       if (!lines.length) return res.status(409).json({ error: 'Devis sans ligne — facturation impossible' });
 
+      // Client auteur : la remise doit avoir été saisie (à la création du devis,
+      // tracée dans la note privée) ou l'être maintenant — elle remplace alors
+      // la remise de chaque ligne.
+      const author = findAuthorForTier(db, propal.fk_soc);
+      const authorDiscount = parseAuthorDiscount(req.body?.author_discount);
+      if (author && authorDiscount === null && !noteHasAuthorDiscount(propal.note_private)) {
+        return res.status(409).json(authorDiscountRequiredBody(author));
+      }
+      const applyAuthor = author && authorDiscount !== null;
+
       // 1. Valider le devis s'il est encore en brouillon (réf PROV → définitive).
       if (propal.fk_statut === 0) {
         await adminApi.post(`/proposals/${id}/validate`);
@@ -473,12 +509,14 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
         socid: parseInt(propal.fk_soc, 10),
         date: today,
         note_public: propal.note_public || '',
-        note_private: `Facture générée depuis le devis ${propal.ref}`,
+        note_private: `Facture générée depuis le devis ${propal.ref}`
+          + (applyAuthor ? `\n${authorDiscountNote(authorDiscount, req.admin?.username || req.admin?.email)}` : '')
+          + (author && !applyAuthor ? `\n${(String(propal.note_private).match(/\[REMISE AUTEUR\][^\n]*/) || [''])[0]}` : ''),
         lines: lines.map((l) => ({
           fk_product: l.fk_product ? parseInt(l.fk_product, 10) : undefined,
           qty: parseFloat(l.qty),
           subprice: parseFloat(l.subprice),
-          remise_percent: parseFloat(l.remise_percent) || 0,
+          remise_percent: applyAuthor ? authorDiscount : (parseFloat(l.remise_percent) || 0),
           tva_tx: parseFloat(l.tva_tx) || 0,
           product_type: parseInt(l.product_type) || 0,
           description: l.description || undefined,

@@ -34,6 +34,10 @@ export const createSettlement = (data) => api.post('/admin/consignments/settleme
 export const paySettlement = (id, payment_ref, payment_mode) =>
   api.post(`/admin/consignments/settlements/${id}/pay`, { payment_ref, payment_mode });
 export const deleteSettlement = (id) => api.delete(`/admin/consignments/settlements/${id}`);
+// Règlement en une action : facture fournisseur (si absente) + paiement + relevé e-mailé.
+export const settleSettlement = (id, data) => api.post(`/admin/consignments/settlements/${id}/settle`, data);
+// « Reverser maintenant » : brouillon ouvert ou prochaine période jusqu'à aujourd'hui, puis règlement.
+export const settleConsignorNow = (id, data) => api.post(`/admin/consignments/consignors/${id}/settle-now`, data);
 
 // Facture fournisseur du net à reverser (contrepartie comptable de la vente).
 export const createSettlementInvoice = (id) => api.post(`/admin/consignments/settlements/${id}/supplier-invoice`);

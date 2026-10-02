@@ -22,6 +22,11 @@ function genSaleId() {
 const usePosCartStore = create(persist((set, get) => ({
   items: [],
   customer: null,
+  // Remise auteur (%) saisie par le caissier quand le client est un auteur.
+  // null = non saisie. Appliquée à toutes les lignes (existantes et futures).
+  authorDiscount: null,
+  // Ouvre la saisie de la remise auteur (sélection client, refus serveur 409…).
+  authorPromptOpen: false,
   held: [],
   saleId: null,
   selectedItemId: null,
@@ -78,8 +83,8 @@ const usePosCartStore = create(persist((set, get) => ({
             soustitre: product.soustitre || null,
             price_ttc: parseFloat(product.price_ttc),
             qty: 1,
-            discount: 0,
-            line_total: calcLineTotal(parseFloat(product.price_ttc), 1, 0),
+            discount: get().authorDiscount ?? 0,
+            line_total: calcLineTotal(parseFloat(product.price_ttc), 1, get().authorDiscount ?? 0),
             stock: product.stock_reel,
             is_free: product.is_free === true,
           },
@@ -121,17 +126,39 @@ const usePosCartStore = create(persist((set, get) => ({
     });
   },
 
-  setCustomer: (customer) => set({ customer }),
+  // Changer de client invalide la remise auteur précédente : elle est retirée
+  // des lignes qui la portaient encore. Un client auteur déclenche la saisie.
+  setCustomer: (customer) => {
+    const prev = get().authorDiscount;
+    const items = prev == null ? get().items : get().items.map((i) => (
+      i.discount === prev ? { ...i, discount: 0, line_total: calcLineTotal(i.price_ttc, i.qty, 0) } : i
+    ));
+    set({ customer, items, authorDiscount: null, authorPromptOpen: customer?.source === 'author' });
+  },
 
-  clearTicket: () => set({ items: [], customer: null, saleId: null, selectedItemId: null }),
+  // Applique le taux saisi à toutes les lignes du ticket.
+  setAuthorDiscount: (pct) => {
+    const d = Math.max(0, Math.min(100, Number(pct) || 0));
+    set({
+      authorDiscount: d,
+      authorPromptOpen: false,
+      items: get().items.map((i) => ({ ...i, discount: d, line_total: calcLineTotal(i.price_ttc, i.qty, d) })),
+    });
+  },
+
+  requestAuthorDiscount: () => set({ authorPromptOpen: true }),
+  closeAuthorPrompt: () => set({ authorPromptOpen: false }),
+
+  clearTicket: () => set({ items: [], customer: null, authorDiscount: null, authorPromptOpen: false, saleId: null, selectedItemId: null }),
 
   holdTicket: () => {
-    const { items, customer, held, saleId } = get();
+    const { items, customer, authorDiscount, held, saleId } = get();
     if (items.length === 0) return;
     set({
-      held: [...held, { items, customer, saleId, timestamp: Date.now() }],
+      held: [...held, { items, customer, authorDiscount, saleId, timestamp: Date.now() }],
       items: [],
       customer: null,
+      authorDiscount: null,
       saleId: null,
       selectedItemId: null,
     });
@@ -141,7 +168,7 @@ const usePosCartStore = create(persist((set, get) => ({
     const held = [...get().held];
     if (index < 0 || index >= held.length) return;
     const ticket = held.splice(index, 1)[0];
-    set({ items: ticket.items, customer: ticket.customer, saleId: ticket.saleId || null, held });
+    set({ items: ticket.items, customer: ticket.customer, authorDiscount: ticket.authorDiscount ?? null, saleId: ticket.saleId || null, held });
   },
 
   // Garantit un identifiant de vente stable (pour les paniers déjà persistés
@@ -155,6 +182,10 @@ const usePosCartStore = create(persist((set, get) => ({
   getTotal: () => get().items.reduce((sum, i) => sum + i.line_total, 0),
 
   getItemCount: () => get().items.reduce((sum, i) => sum + i.qty, 0),
-}), { name: 'senharmattan-pos-cart' }));
+}), {
+  name: 'senharmattan-pos-cart',
+  // La modale de saisie n'est pas persistée (rouverte à la demande).
+  partialize: ({ authorPromptOpen, ...rest }) => { void authorPromptOpen; return rest; },
+}));
 
 export default usePosCartStore;

@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
 import { posSearchCustomers, posCreateCustomer, posPromoteAuthorToCustomer } from '../../api/pos';
 import usePosCartStore from '../../store/posCartStore';
-import { FiX, FiSearch, FiUser, FiUserPlus, FiBookOpen } from 'react-icons/fi';
+import { FiX, FiSearch, FiUser, FiUserPlus, FiBookOpen, FiAlertTriangle } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import './CustomerSelect.css';
 
@@ -16,6 +16,8 @@ export default function CustomerSelect({ onClose }) {
   const [newPhone, setNewPhone] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [creating, setCreating] = useState(false);
+  // Homonymes détectés par le serveur (409) : { title, similar, onPick(tier), onNew() }
+  const [dupPrompt, setDupPrompt] = useState(null);
   const setCustomer = usePosCartStore((s) => s.setCustomer);
   const timer = useRef(null);
 
@@ -34,21 +36,32 @@ export default function CustomerSelect({ onClose }) {
     timer.current = setTimeout(() => doSearch(e.target.value), 300);
   };
 
-  const handleSelect = async (c) => {
-    // Auteur local sans tier Dolibarr → on le promeut (création + lien)
-    // avant de l'utiliser, sinon la vente repartirait sur le client comptoir.
-    if (c.source === 'author_pending' && c.author_id) {
-      try {
-        const res = await posPromoteAuthorToCustomer(c.author_id);
-        setCustomer({ ...res.data, source: 'author' });
-        toast.success(`${res.data.name} ajouté comme client`);
-        onClose();
-        return;
-      } catch (err) {
-        toast.error(err.response?.data?.error || 'Erreur ajout auteur');
+  // Auteur local sans tier Dolibarr → on le promeut (création + lien) avant de
+  // l'utiliser, sinon la vente repartirait sur le client comptoir. Si un tiers
+  // porte déjà le même nom, le serveur répond 409 : on demande au caissier.
+  const promoteAuthor = async (c, body = {}) => {
+    try {
+      const res = await posPromoteAuthorToCustomer(c.author_id, body);
+      setDupPrompt(null);
+      setCustomer({ ...res.data, source: 'author' });
+      toast.success(body.link_to ? `${c.name} rattaché à « ${res.data.name} »` : `${res.data.name} ajouté comme client`);
+      onClose();
+    } catch (err) {
+      if (err.response?.status === 409 && err.response.data?.similar?.length) {
+        setDupPrompt({
+          title: `« ${c.name} » existe peut-être déjà comme client`,
+          similar: err.response.data.similar,
+          onPick: (t) => promoteAuthor(c, { link_to: t.id }),
+          onNew: () => promoteAuthor(c, { confirm_new: true }),
+        });
         return;
       }
+      toast.error(err.response?.data?.error || 'Erreur ajout auteur');
     }
+  };
+
+  const handleSelect = async (c) => {
+    if (c.source === 'author_pending' && c.author_id) return promoteAuthor(c);
     setCustomer(c);
     onClose();
   };
@@ -58,11 +71,7 @@ export default function CustomerSelect({ onClose }) {
     onClose();
   };
 
-  const handleCreate = async (e) => {
-    e.preventDefault();
-    if (!newName.trim()) return toast.error('Nom requis');
-    if (!isCompany && !newFirstname.trim()) return toast.error('Prénom requis pour un particulier');
-    if (!newPhone.trim() && !newEmail.trim()) return toast.error('Téléphone ou email requis');
+  const createCustomer = async (confirmNew = false) => {
     setCreating(true);
     try {
       const res = await posCreateCustomer({
@@ -71,25 +80,69 @@ export default function CustomerSelect({ onClose }) {
         phone: newPhone,
         email: newEmail,
         is_company: isCompany,
+        ...(confirmNew ? { confirm_new: true } : {}),
       });
+      setDupPrompt(null);
       toast.success(res.data.existing ? `Client existant réutilisé : "${res.data.name}"` : `Client "${res.data.name}" créé`);
       handleSelect(res.data);
     } catch (err) {
+      if (err.response?.status === 409 && err.response.data?.similar?.length) {
+        const label = isCompany ? newName.trim() : `${newFirstname.trim()} ${newName.trim()}`;
+        setDupPrompt({
+          title: `« ${label} » existe peut-être déjà comme client`,
+          similar: err.response.data.similar,
+          onPick: (t) => { setDupPrompt(null); handleSelect({ id: t.id, name: t.name, email: t.email, phone: t.phone, ...(t.source ? { source: t.source } : {}) }); },
+          onNew: () => createCustomer(true),
+        });
+        return;
+      }
       toast.error(err.response?.data?.error || 'Erreur création client');
     } finally {
       setCreating(false);
     }
   };
 
+  const handleCreate = (e) => {
+    e.preventDefault();
+    if (!newName.trim()) return toast.error('Nom requis');
+    if (!isCompany && !newFirstname.trim()) return toast.error('Prénom requis pour un particulier');
+    if (!newPhone.trim() && !newEmail.trim()) return toast.error('Téléphone ou email requis');
+    createCustomer(false);
+  };
+
   return (
     <div className="pos-cust-overlay">
       <div className="pos-cust-panel">
         <div className="pos-cust-header">
-          <h3>{showCreate ? 'Nouveau client' : 'Sélectionner un client'}</h3>
+          <h3>{dupPrompt ? 'Client déjà existant ?' : showCreate ? 'Nouveau client' : 'Sélectionner un client'}</h3>
           <button onClick={onClose}><FiX size={20} /></button>
         </div>
 
-        {!showCreate ? (
+        {dupPrompt ? (
+          <div className="pos-cust-dup">
+            <p className="pos-cust-dup-title"><FiAlertTriangle /> {dupPrompt.title}</p>
+            <p className="pos-cust-hint">Choisissez la bonne fiche pour éviter un doublon. Créez une nouvelle fiche seulement s'il s'agit d'une autre personne (homonyme).</p>
+            <div className="pos-cust-results">
+              {dupPrompt.similar.map((t) => (
+                <button key={t.id} className="pos-cust-result" onClick={() => dupPrompt.onPick(t)}>
+                  <span className="pos-cust-name">
+                    {t.name}{t.name_alias ? ` (${t.name_alias})` : ''}
+                  </span>
+                  <span className="pos-cust-detail">
+                    {[t.code_client, t.phone, t.email, `${t.invoice_count} facture${t.invoice_count > 1 ? 's' : ''}`].filter(Boolean).join(' · ')}
+                  </span>
+                  <span className="pos-cust-dup-use">C'est ce client</span>
+                </button>
+              ))}
+            </div>
+            <div className="pos-cust-form-actions">
+              <button type="button" className="pos-cust-cancel" onClick={() => setDupPrompt(null)}>Retour</button>
+              <button type="button" className="pos-cust-submit" onClick={dupPrompt.onNew} disabled={creating}>
+                Non, c'est une autre personne
+              </button>
+            </div>
+          </div>
+        ) : !showCreate ? (
           <>
             <div className="pos-cust-search">
               <FiSearch />

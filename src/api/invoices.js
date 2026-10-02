@@ -39,6 +39,10 @@ export const createDeposit = (payload) => api.post('/admin/invoices/deposit', pa
 // Imputer un acompte/avoir disponible sur une facture finale
 export const applyCredit = (id, discountid, reason) => api.post(`/admin/invoices/${id}/apply-credit`, { discountid, reason });
 export const createCreditNote = (id, reason) => api.post(`/admin/invoices/${id}/credit-note`, { reason });
+// Reste à créditer, ligne par ligne (retours caisse et avoirs antérieurs déduits).
+export const getCreditNotePreview = (id) => api.get(`/admin/invoices/${id}/credit-note/preview`);
+// Exemplaires encore sortis pour la facture, que l'abandon peut remettre en rayon.
+export const getAbandonPreview = (id) => api.get(`/admin/invoices/${id}/abandon/preview`);
 export const setInvoiceToDraft = (id, reason) => api.post(`/admin/invoices/${id}/settodraft`, { reason });
 export const updateInvoiceLines = (id, lines, reason) => api.put(`/admin/invoices/${id}/lines`, { lines, reason });
 export const reassignInvoiceCustomer = (id, socid, reason) => api.put(`/admin/invoices/${id}/customer`, { socid, reason });
@@ -52,7 +56,9 @@ export const deleteInvoiceDraft = (id, reason) => api.delete(`/admin/invoices/${
 // Neutralise une facture déjà numérotée (validée au moins une fois) : elle ne peut
 // plus être supprimée sans trouer la numérotation. L'abandon la sort des créances
 // et restitue le stock qu'elle avait sorti.
-export const abandonInvoice = (id, reason) => api.post(`/admin/invoices/${id}/abandon`, { reason });
+// restock : true si les livres sont revenus en rayon (doublon, erreur), false si
+// le client les a gardés (impayé) — le stock n'est alors pas touché.
+export const abandonInvoice = (id, reason, restock) => api.post(`/admin/invoices/${id}/abandon`, { reason, restock });
 
 // Annule l'abandon d'une facture classée à tort « abandonnée » : elle repart en
 // créance sous son numéro d'origine, et les exemplaires que l'abandon avait

@@ -205,13 +205,13 @@ export default function AuthorManuscriptDetail() {
             <div className="author-modal" onClick={(e) => e.stopPropagation()}>
               <h3>Déposer la version retravaillée</h3>
               <p style={{ marginTop: 0, fontSize: '0.9rem', color: '#6b7280' }}>
-                Formats acceptés : PDF, DOC, DOCX, ODT, RTF — max 20 Mo.
+                Format accepté : Word uniquement (.doc ou .docx) — max 20 Mo.
               </p>
               <div className="form-group">
                 <label>Fichier *</label>
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx,.odt,.rtf"
+                  accept=".doc,.docx"
                   onChange={(e) => setReworkFile(e.target.files?.[0] || null)}
                 />
                 {reworkFile && (

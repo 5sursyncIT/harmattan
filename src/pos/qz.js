@@ -44,9 +44,11 @@ export async function listQzPrinters() {
 // Trouve automatiquement une imprimante Epson TM-* si aucune n'est pré-configurée
 export async function detectEpsonPrinter() {
   const all = await listQzPrinters();
+  // Pas de repli sur « la première imprimante venue » : envoyer de l'ESC/POS
+  // brut à une imprimante bureau ou PDF imprime des pages de caractères
+  // parasites. Sans correspondance → null → impression navigateur.
   const match = all.find((n) => /tm-?t(20|88)|tm-?t\d|epson.*receipt/i.test(n))
-    || all.find((n) => /receipt|thermal/i.test(n))
-    || all[0];
+    || all.find((n) => /receipt|thermal|pos-?(58|80)|netum|xprinter|rongta|ticket/i.test(n));
   return match || null;
 }
 

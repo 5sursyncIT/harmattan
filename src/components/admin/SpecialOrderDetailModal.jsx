@@ -268,6 +268,9 @@ export default function SpecialOrderDetailModal({ orderId, onClose, onChanged, p
 
             {/* TOTAUX + PROGRESSION */}
             <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: 14, marginBottom: 16 }}>
+              {data.authorDiscount != null && (
+                <div className="so-money-line"><span>Remise auteur (P.U. au prix public, totaux nets)</span><span>{data.authorDiscount} %</span></div>
+              )}
               <div className="so-money-line total"><span>Total</span><span>{formatPrice(t.total)}</span></div>
               <div className="so-progress"><span style={{ width: `${pct}%` }} /></div>
               <div className="so-money-line"><span style={{ color: '#166534' }}>Réglé ({pct}%)</span><span style={{ color: '#166534', fontWeight: 700 }}>{formatPrice(t.paid)}</span></div>

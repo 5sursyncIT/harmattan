@@ -53,6 +53,60 @@ export function buildTierName({ name, firstname, isCompany } = {}) {
   return (!isCompany && prenom) ? `${prenom} ${nom}`.trim() : nom;
 }
 
+// ── Rapprochement par NOM COMPLET — SUGGESTION seulement ─────────────────────
+// Le nom n'est jamais une clé d'identité fiable (homonymes fréquents), donc on
+// ne s'en sert JAMAIS pour relier/fusionner automatiquement : il sert à MONTRER
+// à un humain « ce tiers existe peut-être déjà » avant une création, et à
+// alimenter l'écran des doublons à vérifier.
+//
+// Identité nominale = ENSEMBLE des mots de `nom` + `name_alias`, sans accents ni
+// ponctuation, ordre indifférent : « SIBY » + alias « CHEIKH MOUHAMADOU BAMBA »
+// ≡ « Cheikh Mouhamadou Bamba Siby » ≡ « SIBY (Cheikh Mouhamadou Bamba) ».
+// Au moins 2 mots exigés (un patronyme seul ne suffit pas).
+const NAME_STOPWORDS = new Set(['dr', 'pr', 'mr', 'mme', 'mlle', 'me', 'soeur', 'pere', 'abbe']);
+
+export function nameTokens(...parts) {
+  const words = parts.join(' ')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ')
+    .split(' ')
+    .filter((w) => w.length >= 2 && !NAME_STOPWORDS.has(w));
+  return [...new Set(words)].sort();
+}
+
+export function nameKey(...parts) {
+  const t = nameTokens(...parts);
+  return t.length >= 2 ? t.join(' ') : null;
+}
+
+/**
+ * Tiers ACTIFS dont le nom complet (nom + nom alternatif) a exactement les
+ * mêmes mots que `name`. Lecture seule. Retourne [] si le nom a < 2 mots.
+ */
+export async function findSimilarTiers(pool, { name, excludeIds = [], limit = 5 } = {}) {
+  if (!pool) return [];
+  const tokens = nameTokens(name);
+  if (tokens.length < 2) return [];
+  const key = tokens.join(' ');
+  // Pré-filtre SQL sur le mot le plus long, puis égalité exacte des ensembles en JS.
+  const longest = [...tokens].sort((a, b) => b.length - a.length)[0];
+  const pat = `%${longest}%`;
+  const [rows] = await pool.query(
+    `SELECT s.rowid AS id, s.nom AS name, s.name_alias, s.code_client, s.email, s.phone, s.town,
+            s.datec AS created_at,
+            (SELECT COUNT(*) FROM llx_facture f WHERE f.fk_soc = s.rowid) AS invoice_count
+       FROM llx_societe s
+      WHERE s.status = 1 AND (s.nom LIKE ? OR s.name_alias LIKE ?)
+      LIMIT 200`,
+    [pat, pat],
+  );
+  const excl = new Set(excludeIds.map(Number));
+  return rows
+    .filter((r) => !excl.has(r.id) && (nameKey(r.name, r.name_alias || '') === key || nameKey(r.name) === key))
+    .sort((a, b) => b.invoice_count - a.invoice_count || a.id - b.id)
+    .slice(0, limit);
+}
+
 export async function findExistingTier(pool, { email, phone } = {}) {
   if (!pool) return null;
 

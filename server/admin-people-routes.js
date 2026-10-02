@@ -11,7 +11,8 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { slugify, generateUniqueSlug } from './author-public-routes.js';
-import { findExistingTier, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { findExistingTier, findSimilarTiers, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { ensureTierMergeSchema, findDuplicateClusters, dismissDuplicates, mergeTierPair, revertTierMerge } from './tier-merge.js';
 import { ensureAuthorTier } from './author-tier.js';
 import { buildSocieteReportPdf } from './societe-report.js';
 import { computeRoyaltyBreakdown } from './royalties.js';
@@ -88,6 +89,7 @@ function detectImageFormat(buf) {
 }
 
 export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection, transporter }) {
+  ensureTierMergeSchema(db);
   const router = Router();
 
   function safeLike(q) {
@@ -886,6 +888,77 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
     }
   });
 
+  // ── Doublons de tiers : détection + fusion + annulation ─────────────────
+  // (déclarés AVANT /societes/:id pour ne pas être capturés comme un id)
+  router.get('/societes/duplicates', auth, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const clusters = await findDuplicateClusters({ db, dolibarrPool });
+      res.json({
+        clusters,
+        total: clusters.length,
+        high: clusters.filter((c) => c.confidence === 'high').length,
+        review: clusters.filter((c) => c.confidence === 'review').length,
+      });
+    } catch (err) {
+      console.error('Tier duplicates error:', err.message);
+      res.status(500).json({ error: 'Erreur détection des doublons' });
+    }
+  });
+
+  router.post('/societes/duplicates/dismiss', auth, requireRoles('super_admin', 'admin'), csrfProtection, (req, res) => {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+    if (ids.length < 2) return res.status(400).json({ error: 'Au moins deux tiers requis' });
+    const n = dismissDuplicates(db, ids, req.admin?.username || 'unknown');
+    db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+      .run(req.admin?.username || 'unknown', 'tier_duplicate_dismiss', `Pas des doublons : ${ids.map((i) => '#' + i).join(', ')}`);
+    res.json({ success: true, count: n });
+  });
+
+  router.post('/societes/merge', auth, requireRoles('super_admin', 'admin'), csrfProtection, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    const masterId = parseInt(req.body.master_id);
+    const absorbedIds = (Array.isArray(req.body.absorbed_ids) ? req.body.absorbed_ids : []).map(Number).filter((x) => x && x !== masterId);
+    if (!masterId || !absorbedIds.length) return res.status(400).json({ error: 'Maître et tiers à absorber requis' });
+    const actor = req.admin?.username || 'unknown';
+    const results = [];
+    for (const absorbedId of absorbedIds) {
+      try {
+        const r = await mergeTierPair({ db, dolibarrPool }, { masterId, absorbedId, actor });
+        results.push({ absorbedId, ok: true, ...r });
+        db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+          .run(actor, 'tier_merge', `#${absorbedId} fusionné dans #${masterId} (fusion ${r.mergeId}) ${JSON.stringify(r.moved)}`);
+      } catch (err) {
+        console.error(`Tier merge #${absorbedId}→#${masterId} error:`, err.message);
+        results.push({ absorbedId, ok: false, error: err.message });
+      }
+    }
+    const failed = results.filter((r) => !r.ok);
+    res.status(failed.length === results.length ? 500 : 200).json({ results, merged: results.length - failed.length, failed: failed.length });
+  });
+
+  router.get('/societes/merges', auth, (req, res) => {
+    const rows = db.prepare(
+      `SELECT id, master_id, absorbed_id, master_name, absorbed_name, actor, created_at, reverted_at, reverted_by
+         FROM tier_merges ORDER BY id DESC LIMIT 100`,
+    ).all();
+    res.json({ merges: rows });
+  });
+
+  router.post('/societes/merges/:id/revert', auth, requireRoles('super_admin', 'admin'), csrfProtection, async (req, res) => {
+    if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
+    try {
+      const actor = req.admin?.username || 'unknown';
+      const r = await revertTierMerge({ db, dolibarrPool }, parseInt(req.params.id), actor);
+      db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
+        .run(actor, 'tier_merge_revert', `Fusion ${req.params.id} annulée : #${r.absorbed} restauré (maître #${r.master})`);
+      res.json({ success: true, ...r });
+    } catch (err) {
+      console.error('Tier merge revert error:', err.message);
+      res.status(400).json({ error: err.message });
+    }
+  });
+
   router.get('/societes/:id', auth, async (req, res) => {
     if (!dolibarrPool) return res.status(503).json({ error: 'Dolibarr indisponible' });
     try {
@@ -1163,6 +1236,19 @@ export function createAdminPeopleRouter({ db, dolibarrPool, auth, csrfProtection
 
       // Nom combiné « Prénom NOM » + marquage particulier.
       data.name = buildTierName({ name: data.name, firstname, isCompany });
+
+      // Même nom complet qu'un tiers actif ? On ne décide pas à la place de
+      // l'opérateur (homonymes possibles) : on lui montre les candidats, il
+      // recrée avec confirm_new s'il s'agit bien d'une autre personne.
+      if (!req.body.confirm_new) {
+        const similar = await findSimilarTiers(dolibarrPool, { name: data.name });
+        if (similar.length) {
+          return res.status(409).json({
+            error: `Un tiers portant le même nom existe déjà : « ${similar[0].name}${similar[0].name_alias ? ` (${similar[0].name_alias})` : ''} ».`,
+            similar,
+          });
+        }
+      }
       if (!isCompany) data.typent_id = TYPENT_PARTICULIER;
 
       // Au moins un type doit être renseigné

@@ -51,9 +51,9 @@
   "hero_slides": [
     {
       "id": 1,
-      "image": "/images/slider/slide-1780932522781.jpg",
-      "title": "Bienvenue chez L'Harmattan Sénégal",
-      "subtitle": "Plus de 6 000 ouvrages africains et internationaux à Dakar",
+      "image": "/images/slider/slide-1790599628474.jpg",
+      "title": "_",
+      "subtitle": "-",
       "link": "/catalogue",
       "btnPrimary": "Découvrir le catalogue",
       "isBanner": false
@@ -147,12 +147,18 @@
   ],
   "payment_methods": [
     {
-      "id": "paytech",
-      "label": "Paiement en ligne",
-      "subtitle": "Wave • Orange Money • Free Money • Carte bancaire",
-      "icon": "💳",
+      "id": "wave",
+      "label": "Wave",
+      "icon": "📱",
       "enabled": true,
-      "instructions": "Vous serez redirigé vers la plateforme sécurisée de paiement."
+      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nMentionnez votre nom comme référence"
+    },
+    {
+      "id": "orange_money",
+      "label": "Orange Money",
+      "icon": "📱",
+      "enabled": true,
+      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nCode marchand OM : **413513**\nMentionnez votre nom comme référence"
     },
     {
       "id": "virement",
@@ -170,18 +176,12 @@
       "instructions": "Réglez votre commande directement à la librairie L'Harmattan Sénégal. Votre ouvrage vous sera remis sur place."
     },
     {
-      "id": "orange_money",
-      "label": "Orange Money (manuel)",
-      "icon": "📱",
+      "id": "paytech",
+      "label": "Paiement en ligne",
+      "subtitle": "Wave • Orange Money • Free Money • Carte bancaire",
+      "icon": "💳",
       "enabled": false,
-      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nCode marchand OM : **413513**\nMentionnez votre nom comme référence"
-    },
-    {
-      "id": "wave",
-      "label": "Wave (manuel)",
-      "icon": "📱",
-      "enabled": false,
-      "instructions": "Envoyez le montant au **+221 77 242 25 08**\nMentionnez votre nom comme référence"
+      "instructions": "Vous serez redirigé vers la plateforme sécurisée de paiement."
     },
     {
       "id": "cb",

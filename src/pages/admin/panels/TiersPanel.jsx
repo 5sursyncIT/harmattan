@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { FiSearch, FiRefreshCw, FiEye, FiMail, FiPhone, FiUsers, FiBriefcase, FiUserCheck, FiPlus, FiEdit3, FiTrash2 } from 'react-icons/fi';
+import { FiSearch, FiRefreshCw, FiEye, FiMail, FiPhone, FiUsers, FiBriefcase, FiUserCheck, FiPlus, FiEdit3, FiTrash2, FiCopy } from 'react-icons/fi';
 import toast from 'react-hot-toast';
-import { getAdminSocietes, deleteAdminSociete } from '../../../api/admin';
+import { getAdminSocietes, deleteAdminSociete, getSocieteDuplicates } from '../../../api/admin';
 import TiersFormModal from '../../../components/admin/TiersFormModal';
 
 function TypeBadge({ client, fournisseur }) {
@@ -33,6 +33,11 @@ export default function TiersPanel() {
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [editing, setEditing] = useState(null); // null = caché, {} = nouveau, {id, ...} = édition
+  const [dupCount, setDupCount] = useState(null);
+
+  useEffect(() => {
+    getSocieteDuplicates().then(r => setDupCount(r.data.total)).catch(() => {});
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -69,6 +74,9 @@ export default function TiersPanel() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          <Link to="/admin/tiers/doublons" className="btn btn-outline" title="Tiers en double à vérifier / fusionner">
+            <FiCopy /> Doublons{dupCount ? ` (${dupCount})` : ''}
+          </Link>
           <button className="btn btn-outline" onClick={load}><FiRefreshCw /> Actualiser</button>
           <button className="btn btn-primary" onClick={() => setEditing({})}><FiPlus /> Nouveau tiers</button>
         </div>

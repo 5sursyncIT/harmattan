@@ -6,6 +6,8 @@ import './POSCart.css';
 export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCatalog, showBackButton = false, isProMode = false }) {
   const items = usePosCartStore((s) => s.items);
   const customer = usePosCartStore((s) => s.customer);
+  const authorDiscount = usePosCartStore((s) => s.authorDiscount);
+  const requestAuthorDiscount = usePosCartStore((s) => s.requestAuthorDiscount);
   const held = usePosCartStore((s) => s.held);
   const updateQty = usePosCartStore((s) => s.updateQty);
   const removeItem = usePosCartStore((s) => s.removeItem);
@@ -169,6 +171,20 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
         </span>
         <FiChevronRight size={16} />
       </button>
+      {customer?.source === 'author' && (
+        <button
+          type="button"
+          className="pos-cart-customer"
+          onClick={requestAuthorDiscount}
+          style={authorDiscount == null ? { borderColor: 'var(--color-orange)', background: 'color-mix(in srgb, var(--color-orange) 8%, var(--color-white))' } : undefined}
+        >
+          <span className="pos-cart-customer-copy">
+            <strong>{authorDiscount == null ? 'Remise auteur à saisir' : `Remise auteur : ${authorDiscount} %`}</strong>
+            <small>{authorDiscount == null ? 'Obligatoire avant l’encaissement' : 'Appliquée à toutes les lignes — toucher pour modifier'}</small>
+          </span>
+          <FiChevronRight size={16} />
+        </button>
+      )}
 
       <div className={`pos-cart-workspace ${isProMode ? 'pro-mode' : ''}`}>
         <section className="pos-cart-main-panel">

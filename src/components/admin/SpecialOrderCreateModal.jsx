@@ -5,6 +5,8 @@ import { formatPrice } from '../../utils/formatters';
 import {
   createSpecialOrder, searchSpecialOrderCustomers, searchSpecialOrderProducts,
 } from '../../api/specialOrders';
+import { AuthorDiscountField } from './AuthorDiscountField';
+import { parseAuthorDiscount, isAuthorDiscountRequired, netLine } from '../../utils/authorDiscount';
 
 const METHOD_LABELS = {
   cash: 'Espèces', wave: 'Wave', orange_money: 'Orange Money',
@@ -24,6 +26,9 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
   const [errors, setErrors] = useState({});
   // Mode de règlement à la commande : aucun | acompte (partiel) | full (intégral).
   const [paymentMode, setPaymentMode] = useState('none');
+  // Client auteur : remise (%) à saisir obligatoirement (plusieurs niveaux existent).
+  const [isAuthor, setIsAuthor] = useState(false);
+  const [authorDiscount, setAuthorDiscount] = useState('');
 
   // Recherche client
   const [custQuery, setCustQuery] = useState('');
@@ -52,6 +57,8 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
       customer_email: c.email || f.customer_email, customer_phone: c.phone || f.customer_phone,
       customer_address: c.address || f.customer_address,
     }));
+    setIsAuthor(!!c.is_author);
+    setAuthorDiscount('');
     setCustResults([]); setCustQuery('');
   };
 
@@ -76,7 +83,8 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
   const removeLine = (i) => setLines((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
 
   const validLines = lines.filter((l) => l.title.trim());
-  const total = validLines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unit_price) || 0), 0);
+  const authorPct = isAuthor ? (parseAuthorDiscount(authorDiscount) ?? 0) : 0;
+  const total = validLines.reduce((s, l) => s + netLine(l.unit_price, l.quantity, authorPct), 0);
   const initialPaid = Number(form.initial_payment) || 0;
   const remainingAfter = Math.max(0, total - initialPaid);
 
@@ -92,6 +100,7 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
     if (!form.customer_name.trim()) e.customer_name = 'Nom du client requis';
     if (form.customer_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.customer_email)) e.customer_email = 'Email invalide';
     if (validLines.length === 0) e.lines = 'Ajoutez au moins un livre (titre requis)';
+    if (isAuthor && parseAuthorDiscount(authorDiscount) === null) e.author_discount = 'Saisissez la remise auteur (0 à 100 %)';
     const init = Number(form.initial_payment) || 0;
     if (init < 0) e.initial_payment = 'Montant invalide';
     if (init > total + 0.01) e.initial_payment = 'Le règlement dépasse le total';
@@ -119,11 +128,15 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
         initial_payment: Number(form.initial_payment) || 0,
         payment_method: form.payment_method,
         payment_reference: form.payment_reference.trim() || null,
+        ...(isAuthor ? { author_discount: parseAuthorDiscount(authorDiscount) } : {}),
       };
       const r = await createSpecialOrder(payload);
       toast.success(`Commande ${r.data.ref} créée`);
       onCreated?.(r.data);
     } catch (err) {
+      // Le serveur a reconnu un auteur (tiers retrouvé par email/téléphone) :
+      // on affiche le champ de saisie.
+      if (isAuthorDiscountRequired(err)) setIsAuthor(true);
       toast.error(err.response?.data?.error || 'Erreur création');
     } finally {
       setSubmitting(false);
@@ -152,7 +165,7 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
                 {custResults.map((c) => (
                   <div key={c.id} className="so-ac-item" onClick={() => pickCustomer(c)}>
                     <FiUser size={12} style={{ verticalAlign: -1, marginRight: 6, color: '#10531a' }} />
-                    <strong>{c.name}</strong> {c.phone ? <small>· {c.phone}</small> : ''} {c.email ? <small>· {c.email}</small> : ''}
+                    <strong>{c.name}</strong>{c.is_author && <small style={{ marginLeft: 6, fontWeight: 700, color: 'var(--color-orange)' }}>AUTEUR</small>} {c.phone ? <small>· {c.phone}</small> : ''} {c.email ? <small>· {c.email}</small> : ''}
                   </div>
                 ))}
               </div>
@@ -180,6 +193,13 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
             </div>
           </div>
         </div>
+
+        {isAuthor && (
+          <div className="so-section">
+            <AuthorDiscountField value={authorDiscount} onChange={setAuthorDiscount} authorName={form.customer_name.trim()} />
+            {errors.author_discount && <div className="so-err">{errors.author_discount}</div>}
+          </div>
+        )}
 
         {/* LIVRES */}
         <div className="so-section">
@@ -226,8 +246,8 @@ export default function SpecialOrderCreateModal({ onClose, onCreated, paymentMet
                     value={l.unit_price} onChange={(e) => updateLine(i, 'unit_price', e.target.value)} />
                 </div>
                 <div style={{ textAlign: 'right' }}>
-                  <label style={{ fontSize: '0.74rem', color: '#64748b', display: 'block' }}>Sous-total</label>
-                  <span style={{ fontWeight: 700 }}>{formatPrice((Number(l.quantity) || 0) * (Number(l.unit_price) || 0))}</span>
+                  <label style={{ fontSize: '0.74rem', color: '#64748b', display: 'block' }}>Sous-total{authorPct > 0 ? ` (−${authorPct} %)` : ''}</label>
+                  <span style={{ fontWeight: 700 }}>{formatPrice(netLine(l.unit_price, l.quantity, authorPct))}</span>
                 </div>
               </div>
             </div>

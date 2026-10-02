@@ -8,7 +8,7 @@ import { revokeFileTokens } from './manuscript-file-tokens.js';
 import { addManuscriptVersion, getFinalVersion, createDepositToken, getActiveDepositToken, revokeDepositTokens } from './manuscript-versions.js';
 import { createManuscriptMulter } from './author-routes.js';
 import { ensureIntervenantsSchema, seedIntervenants, INTERVENANT_METIERS, intervenantIdsForAdmin } from './intervenants.js';
-import { listDuplicateGroups, ensureDuplicateSchema, normalizePerson, duplicateDeletionBlockers, deleteDuplicateManuscript } from './manuscript-duplicates.js';
+import { listDuplicateGroups, ensureDuplicateSchema, normalizePerson, manuscriptDeletionBlockers, deleteManuscript, ensureDeletionSchema } from './manuscript-duplicates.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MANUSCRIPTS_DIR = join(__dirname, '..', 'manuscripts');
@@ -67,6 +67,16 @@ const PRODUCTION_FILE_KINDS = {
 // largement dedans ; au-delà, l'admin envoie une archive zip ou un second lot).
 const PRODUCTION_UPLOAD_MAX_FILES = 15;
 
+// ─── PIÈCES JOINTES DU MANUSCRIT ──────────────────────────────
+// Demande direction (02/10/2026) : rattacher au manuscrit quelques documents
+// annexes (lettre de l'auteur, préface, photos, biographie…) à toute étape,
+// sans les mêler à la chaîne de versions du texte. Plafond de 5 par manuscrit :
+// au-delà, c'est un dossier de production (écran Corrections) ou une archive zip.
+const ATTACHMENT_KIND = 'attachment';
+const ATTACHMENT_MAX = 5;
+const ATTACHMENT_SIZE_MB = 20;
+const ATTACHMENT_EXT = ['pdf', 'doc', 'docx', 'odt', 'rtf', 'txt', 'xls', 'xlsx', 'jpg', 'jpeg', 'png', 'zip'];
+
 function extPattern(ext) {
   return new RegExp(`\\.(${ext.join('|')})$`, 'i');
 }
@@ -77,6 +87,7 @@ function fileKindLabel(kind) {
   return {
     correction: 'Document corrigé',
     original: 'Manuscrit original',
+    attachment: 'Pièce jointe',
     author_review: "Retour de l'auteur",
   }[kind] || kind;
 }
@@ -141,7 +152,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     seedIntervenants(db);
   } catch (err) { console.warn('[INTERVENANTS] init warning:', err.message); }
   // Colonnes de marquage des doublons (idempotent, également posé par admin-routes).
-  try { ensureDuplicateSchema(db); } catch (err) { console.warn('[DOUBLONS] init warning:', err.message); }
+  try { ensureDuplicateSchema(db); ensureDeletionSchema(db); } catch (err) { console.warn('[DOUBLONS] init warning:', err.message); }
   const auth = adminAuth;
 
   // Garde-fou : routes carnet/affectation réservées au pilote éditorial.
@@ -479,12 +490,16 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
   }
 
   function orderByFor(query) {
-    const sort = MANUSCRIPT_SORTS[query.sort] ? query.sort : 'created';
+    // Tri par défaut : l'étape du workflow — la vue globale se lit comme un
+    // tableau de bord (ce qui vient d'arriver, puis ce qui est en évaluation…).
+    const sort = MANUSCRIPT_SORTS[query.sort] ? query.sort : 'stage';
     const asked = String(query.order || '').toUpperCase();
     const dir = asked === 'ASC' || asked === 'DESC' ? asked : MANUSCRIPT_SORT_DIR[sort];
-    // m.id en second critère : ordre stable d'une page à l'autre quand deux
+    // Au sein d'une même étape, les plus récemment reçus d'abord.
+    const within = sort === 'stage' ? 'm.created_at DESC, ' : '';
+    // m.id en dernier critère : ordre stable d'une page à l'autre quand deux
     // manuscrits partagent la même date (import du même jour).
-    return `${MANUSCRIPT_SORTS[sort].map((c) => `${c} ${dir}`).join(', ')}, m.id DESC`;
+    return `${MANUSCRIPT_SORTS[sort].map((c) => `${c} ${dir}`).join(', ')}, ${within}m.id DESC`;
   }
 
   router.get('/manuscripts/v2', auth, (req, res) => {
@@ -653,29 +668,45 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     res.json({ success: true });
   });
 
-  // Suppression définitive d'un doublon marqué (voir deleteDuplicateManuscript
-  // pour les garde-fous). Motif facultatif, repris dans la frise de l'original.
+  // Suppression définitive d'un manuscrit (garde-fous : manuscriptDeletionBlockers).
+  //  - doublon marqué : rôles éditoriaux (editorOnly), motif facultatif ;
+  //  - tout autre manuscrit : direction seulement (super_admin/admin), motif
+  //    obligatoire — il n'y a plus d'original pour porter la trace.
   router.delete('/manuscripts/v2/:id', auth, editorOnly, csrfProtection, (req, res) => {
     const target = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
     if (!target) return res.status(404).json({ error: 'Manuscrit introuvable' });
-    const blockers = duplicateDeletionBlockers(db, target);
+    const asDuplicate = !!target.duplicate_of;
+    const isDirection = ['super_admin', 'admin'].includes(req.admin.role);
+    if (!asDuplicate && !isDirection) {
+      return res.status(403).json({ error: 'Suppression réservée à la direction (seuls les doublons marqués sont supprimables par l\'éditeur)' });
+    }
+    const reason = String(req.body?.reason || '').trim().slice(0, 500);
+    if (!asDuplicate && reason.length < 5) {
+      return res.status(400).json({ error: 'Motif de la suppression obligatoire' });
+    }
+    const blockers = manuscriptDeletionBlockers(db, target);
     if (blockers.length) {
       return res.status(409).json({ error: `Suppression impossible : ${blockers.join(' ; ')}.`, blockers });
     }
     const actor = { role: req.admin.role, id: req.admin.id, label: req.admin.username };
     try {
-      const result = deleteDuplicateManuscript(db, target, {
-        manuscriptsDir: MANUSCRIPTS_DIR,
-        actor,
-        reason: String(req.body?.reason || '').trim().slice(0, 200),
+      const result = deleteManuscript(db, target, {
+        manuscriptsDir: MANUSCRIPTS_DIR, actor, reason,
+        kind: asDuplicate ? 'duplicate' : 'direction',
         logEvent: logManuscriptEvent,
       });
-      console.log(`[DOUBLONS] ${target.ref} supprimé par ${req.admin.username} (original ${result.original?.ref}) → ${result.trashDir}`);
-      res.json({ success: true, ref: target.ref, original_id: result.original?.id, original_ref: result.original?.ref });
+      console.log(`[MANUSCRITS] ${target.ref} supprimé par ${req.admin.username} (${asDuplicate ? `doublon de ${result.original?.ref}` : 'direction'}) → ${result.trashDir}`);
+      res.json({ success: true, ref: target.ref, original_id: result.original?.id || null, original_ref: result.original?.ref || null });
     } catch (err) {
-      console.error('[DOUBLONS] suppression échouée:', err.message);
+      console.error('[MANUSCRITS] suppression échouée:', err.message);
       res.status(500).json({ error: 'La suppression a échoué — rien n\'a été effacé en base' });
     }
+  });
+
+  // Registre des suppressions (la direction doit pouvoir répondre à « où est
+  // passé MS-… ? »).
+  router.get('/manuscripts/v2/deletions', auth, editorOnly, (req, res) => {
+    res.json({ deletions: db.prepare('SELECT * FROM manuscript_deletions ORDER BY deleted_at DESC LIMIT 500').all() });
   });
 
   router.get('/manuscripts/v2/stages', auth, (req, res) => {
@@ -826,6 +857,7 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
       manuscript: describeManuscript(manuscript),
       // kind_label : la fiche affichait le code brut (« production_cover »).
       files: files.map((f) => ({ ...f, kind_label: fileKindLabel(f.kind) })),
+      attachment_limits: { max: ATTACHMENT_MAX, size_mb: ATTACHMENT_SIZE_MB, accept: ATTACHMENT_EXT.map((e) => `.${e}`).join(',') },
       stages: stages.map((s) => ({
         ...s,
         stage_label: s.event
@@ -1312,6 +1344,85 @@ export function createManuscriptRouter({ db, csrfProtection, adminAuth, transpor
     logManuscriptEvent(db, file.manuscript_id, 'file_milestone',
       { role: req.admin.role, id: req.admin.id, label: req.admin.username },
       `v${file.version} ${flag ? 'marquée jalon (protégée de la purge)' : 'retirée des jalons'} — ${file.file_name}`);
+    res.json({ success: true });
+  });
+
+  // Pièces jointes : plusieurs fichiers en un envoi, dans la limite des places
+  // restantes. Le plafond est vérifié après réception (multer écrit avant que la
+  // route ne voie la requête) ; les fichiers en trop sont alors supprimés.
+  router.post('/manuscripts/v2/:id/attachments',
+    auth, editorOnly, csrfProtection,
+    (req, res, next) => {
+      const upload = createManuscriptMulter(ATTACHMENT_KIND, ATTACHMENT_SIZE_MB, extPattern(ATTACHMENT_EXT))
+        .array('files', ATTACHMENT_MAX);
+      upload(req, res, (err) => {
+        if (!err) return next();
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: `Fichier trop volumineux (max ${ATTACHMENT_SIZE_MB} Mo par fichier)` });
+        }
+        if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+          return res.status(400).json({ error: `Maximum ${ATTACHMENT_MAX} pièces jointes par manuscrit` });
+        }
+        return res.status(400).json({ error: err.message || 'Fichier invalide' });
+      });
+    },
+    (req, res) => {
+      const files = req.files || [];
+      const cleanup = () => files.forEach((f) => { try { unlinkSync(f.path); } catch (e) { void e; } });
+      if (!files.length) {
+        return res.status(400).json({
+          error: req.fileFormatRejected
+            ? `Format non accepté (${ATTACHMENT_EXT.join(', ').toUpperCase()})`
+            : 'Aucun fichier reçu',
+        });
+      }
+      const manuscript = db.prepare('SELECT * FROM manuscripts WHERE id = ?').get(req.params.id);
+      if (!manuscript) { cleanup(); return res.status(404).json({ error: 'Manuscrit introuvable' }); }
+
+      const existing = db.prepare(
+        'SELECT COUNT(*) AS n FROM manuscript_files WHERE manuscript_id = ? AND kind = ?'
+      ).get(manuscript.id, ATTACHMENT_KIND).n;
+      const remaining = ATTACHMENT_MAX - existing;
+      if (files.length > remaining) {
+        cleanup();
+        return res.status(400).json({
+          error: remaining > 0
+            ? `Il reste ${remaining} place${remaining > 1 ? 's' : ''} sur ${ATTACHMENT_MAX} : retirez une pièce jointe ou envoyez moins de fichiers`
+            : `Le manuscrit a déjà ${ATTACHMENT_MAX} pièces jointes : retirez-en une avant d'en ajouter`,
+        });
+      }
+
+      const note = String(req.body?.note || '').trim().slice(0, 500) || null;
+      const last = db.prepare(
+        'SELECT MAX(version) AS v FROM manuscript_files WHERE manuscript_id = ? AND kind = ?'
+      ).get(manuscript.id, ATTACHMENT_KIND);
+      let version = last?.v || 0;
+      const insert = db.prepare(
+        `INSERT INTO manuscript_files (manuscript_id, kind, version, file_path, file_name, file_size, mime_type, uploaded_by_role, uploaded_by_id, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      db.transaction(() => files.forEach((f) => {
+        version += 1;
+        insert.run(manuscript.id, ATTACHMENT_KIND, version, f.path, f.originalname,
+          f.size || null, f.mimetype || null, req.admin.role, req.admin.id, note);
+      }))();
+
+      logManuscriptEvent(db, manuscript.id, 'file_uploaded',
+        { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+        `Pièce${files.length > 1 ? 's' : ''} jointe${files.length > 1 ? 's' : ''} : ${files.map((f) => f.originalname).join(', ')}${note ? ` · ${note}` : ''}`);
+      res.json({ success: true, uploaded: files.length, remaining: remaining - files.length });
+    });
+
+  // Retrait d'une pièce jointe. Le binaire reste sur disque : la frise référence
+  // le dépôt (même règle que le dossier de production).
+  router.delete('/manuscripts/v2/:id/attachments/:fileId', auth, editorOnly, csrfProtection, (req, res) => {
+    const file = db.prepare('SELECT * FROM manuscript_files WHERE id = ? AND manuscript_id = ? AND kind = ?')
+      .get(req.params.fileId, req.params.id, ATTACHMENT_KIND);
+    if (!file) return res.status(404).json({ error: 'Pièce jointe introuvable' });
+    db.prepare('DELETE FROM manuscript_files WHERE id = ?').run(file.id);
+    logManuscriptEvent(db, file.manuscript_id, 'file_uploaded',
+      { role: req.admin.role, id: req.admin.id, label: req.admin.username },
+      `Pièce jointe retirée : ${file.file_name}`);
     res.json({ success: true });
   });
 

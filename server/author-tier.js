@@ -16,7 +16,7 @@
  * les doublons. Idempotent : un auteur déjà lié n'est jamais retouché.
  */
 import { adminApi } from './dolibarr-admin-client.js';
-import { findExistingTier } from './tier-dedup.js';
+import { findExistingTier, findSimilarTiers } from './tier-dedup.js';
 
 const FAKE_EMAIL_DOMAIN = '@senharmattan.local';
 
@@ -73,6 +73,14 @@ export async function ensureAuthorTier({ db, dolibarrPool }, authorId, opts = {}
     }
 
     if (dryRun) return { ...base, thirdpartyId: null, created: true };
+
+    // Homonyme sans email/téléphone commun : on crée quand même (invariant
+    // auteur = tiers, pas d'humain pour trancher ici) mais on le signale ;
+    // la paire ressort dans Tiers › Doublons pour arbitrage.
+    const similar = await findSimilarTiers(dolibarrPool, { name }).catch(() => []);
+    if (similar.length) {
+      console.warn(`[AUTHOR-TIER] auteur #${authorId} « ${name} » : tiers homonyme(s) ${similar.map((s) => '#' + s.id).join(', ')} — à vérifier dans Tiers › Doublons`);
+    }
 
     // Écriture sensible → clé admin (DOLIBARR_ADMIN_API_KEY). code_client:-1 =
     // référence auto-générée. Email factice non transmis (on préfère vide).

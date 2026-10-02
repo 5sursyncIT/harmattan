@@ -22,6 +22,7 @@ import { adminApi } from './dolibarr-admin-client.js';
 import { recordEcommerceInvoicePayment } from './dolibarr-payments.js';
 import { fetchOrderDetail } from './order-detail.js';
 import { ensureAuthorTier } from './author-tier.js';
+import { findAuthorForTier, authorTierIds, parseAuthorDiscount, authorDiscountRequiredBody, authorDiscountNote } from './author-discount.js';
 import { cache, getSyncStatus, syncProducts, syncCategories, syncStock, getProductDocuments, invalidateProductDocuments } from './sync.js';
 import { EXCLUDED_CATEGORIES_SET, excludedCategorySqlList } from '../src/utils/excludedCategories.js';
 import {
@@ -1442,9 +1443,33 @@ setInterval(async () => {
 
 // ─── PAYMENT CONFIRMATION (admin confirms payment → invoice created) ────
 const confirmPaymentAuth = adminAuth(db);
+// Moyen réellement reçu, choisi par l'agent à la confirmation : le choix fait
+// par le client au checkout (payment_method) ne dit pas comment il a vraiment
+// payé, et c'est lui qui décide du compte de trésorerie crédité dans Dolibarr.
+const CONFIRM_RECEIVED_METHODS = {
+  wave: 'Wave',
+  orange_money: 'Orange Money',
+  cheque: 'Chèque',
+};
+try {
+  const cols = db.prepare('PRAGMA table_info(order_payments)').all().map((c) => c.name);
+  if (cols.length && !cols.includes('received_method')) db.exec('ALTER TABLE order_payments ADD COLUMN received_method TEXT');
+  if (cols.length && !cols.includes('received_ref')) db.exec('ALTER TABLE order_payments ADD COLUMN received_ref TEXT');
+} catch (err) { console.warn('[CONFIRM-PAYMENT] migration received_method:', err.message); }
+
 app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtection, async (req, res) => {
   try {
     const orderId = req.params.id;
+    const receivedMethod = String(req.body?.method || '');
+    if (!CONFIRM_RECEIVED_METHODS[receivedMethod]) {
+      return res.status(400).json({ error: 'Indiquez le moyen de paiement reçu : Wave, Orange Money ou Chèque' });
+    }
+    const receivedRef = String(req.body?.reference || '').trim().slice(0, 100);
+    const chequeIssuer = String(req.body?.cheque_issuer || '').trim().slice(0, 100);
+    const chequeBank = String(req.body?.cheque_bank || '').trim().slice(0, 100);
+    if (receivedMethod === 'cheque' && (!receivedRef || !chequeIssuer)) {
+      return res.status(400).json({ error: 'Chèque : numéro du chèque et émetteur obligatoires' });
+    }
 
     // Fetch the order from Dolibarr
     const orderDetail = await dolibarrApi.get(`/orders/${orderId}`);
@@ -1467,6 +1492,15 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
         return res.status(400).json({ error: `Facture ${existingLinks[0].ref} déjà créée pour cette commande` });
       }
     } catch { /* continue — table may not exist or link not found */ }
+
+    // ── Remise auteur ── client auteur : l'agent saisit le taux (plusieurs
+    // niveaux existent) ; appliqué à toutes les lignes de la facture, donc au
+    // montant encaissé (amountReceived = total facture).
+    const orderAuthor = findAuthorForTier(db, order.socid);
+    const authorDiscount = parseAuthorDiscount(req.body?.author_discount);
+    if (orderAuthor && authorDiscount === null) {
+      return res.status(409).json(authorDiscountRequiredBody(orderAuthor));
+    }
 
     // ── Revalidation stock juste avant création facture ──
     // Entre la commande et la confirmation paiement, le POS peut avoir vendu les
@@ -1526,9 +1560,11 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
         tva_tx: parseFloat(line.tva_tx || 0),
         product_type: parseInt(line.product_type || 0),
         desc: line.description || line.product_label || '',
+        ...(orderAuthor ? { remise_percent: authorDiscount } : {}),
       })),
       linked_objects: { commande: orderId },
-      note_private: `Paiement confirmé par ${req.admin.username} — ${order.note_private || ''}`,
+      note_private: `Paiement confirmé par ${req.admin.username} — ${order.note_private || ''}`
+        + (orderAuthor ? `\n${authorDiscountNote(authorDiscount, req.admin.username)}` : ''),
       mode_reglement_id: order.mode_reglement_id || 0,
     });
 
@@ -1536,7 +1572,22 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
 
     // Validate the invoice — idwarehouse:4 (Rayon) déclenche le décrément stock
     // sur le même dépôt que le POS, source de vérité pour la disponibilité physique.
-    await dolibarrApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
+    // Échec (stock vendu au POS entre-temps, STOCK_MUST_BE_ENOUGH_FOR_INVOICE=1) :
+    // le brouillon PROV n'a bougé aucun stock, on le supprime — sinon chaque
+    // nouvelle tentative laissait un brouillon orphelin de plus.
+    try {
+      await dolibarrApi.post(`/invoices/${invoiceId}/validate`, { idwarehouse: 4 });
+    } catch (validateErr) {
+      const detail = validateErr.response?.data?.error?.message || validateErr.message;
+      try { await adminApi.delete(`/invoices/${invoiceId}`); } catch (delErr) {
+        console.error(`[CONFIRM-PAYMENT] brouillon ${invoiceId} non supprimé:`, delErr.response?.data || delErr.message);
+      }
+      console.error(`[CONFIRM-PAYMENT] validation facture refusée (commande ${order.ref}):`, detail);
+      return res.status(409).json({
+        error: 'Facture non émise : Dolibarr a refusé la validation (stock du Rayon insuffisant ?) — commande non confirmée',
+        detail,
+      });
+    }
     const invoice = await dolibarrApi.get(`/invoices/${invoiceId}`);
 
     // Mettre à jour le suivi de paiement local. La confirmation manuelle vaut
@@ -1547,15 +1598,17 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
     // Sans ce paiement, la facture reste paye=0 → « Impayée » et l'encaissement
     // n'atterrit dans aucune trésorerie. On l'impute sur le compte du moyen
     // de paiement déclaré pour la commande (paytech/wave/om/…). Best-effort.
-    const opRow = db.prepare('SELECT payment_method FROM order_payments WHERE dolibarr_order_id = ?').get(String(orderId));
     if (amountReceived > 0) {
       try {
         await recordEcommerceInvoicePayment(adminApi, dolibarrPool, {
           invoiceId,
           amount: amountReceived,
-          method: opRow?.payment_method || 'paytech',
+          method: receivedMethod,
           datepaye: Math.floor(Date.now() / 1000),
-          comment: `Encaissement web confirmé par ${req.admin.username} — commande ${order.ref}`,
+          numPayment: receivedRef || undefined,
+          chqemetteur: chequeIssuer || undefined,
+          chqbank: chequeBank || undefined,
+          comment: `Encaissement web (${CONFIRM_RECEIVED_METHODS[receivedMethod]}) confirmé par ${req.admin.username} — commande ${order.ref}`,
         });
       } catch (payErr) {
         console.error(`[CONFIRM-PAYMENT] enregistrement paiement Dolibarr échoué (facture ${invoice.data.ref}):`, payErr.response?.data || payErr.message);
@@ -1563,12 +1616,12 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
     }
 
     db.prepare(
-      'UPDATE order_payments SET payment_status = ?, invoice_ref = ?, amount_received = ?, confirmed_by = ?, confirmed_at = datetime(?) WHERE dolibarr_order_id = ?'
-    ).run('confirmed', invoice.data.ref, amountReceived, req.admin.username, new Date().toISOString(), String(orderId));
+      'UPDATE order_payments SET payment_status = ?, invoice_ref = ?, amount_received = ?, confirmed_by = ?, confirmed_at = datetime(?), received_method = ?, received_ref = ? WHERE dolibarr_order_id = ?'
+    ).run('confirmed', invoice.data.ref, amountReceived, req.admin.username, new Date().toISOString(), receivedMethod, receivedRef || null, String(orderId));
 
     // Log activity
     db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-      .run(req.admin.username, 'confirm_payment', `Paiement confirmé : commande ${order.ref} → facture ${invoice.data.ref}`);
+      .run(req.admin.username, 'confirm_payment', `Paiement confirmé (${CONFIRM_RECEIVED_METHODS[receivedMethod]}${receivedRef ? ` réf. ${receivedRef}` : ''}) : commande ${order.ref} → facture ${invoice.data.ref}${orderAuthor ? ` — remise auteur ${authorDiscount} %` : ''}`);
 
     // Invalidate customer caches
     cache.keys().filter((k) => k.startsWith('customer-orders:') || k.startsWith('customer-invoices:')).forEach((k) => cache.del(k));
@@ -1591,7 +1644,7 @@ app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtec
 const paymentMgmtAuth = adminAuth(db);
 
 // Liste des paiements web avec filtres
-app.get('/api/admin/payments', paymentMgmtAuth, (req, res) => {
+app.get('/api/admin/payments', paymentMgmtAuth, async (req, res) => {
   const { status, method, page = 1, limit = 30 } = req.query;
   const limitInt = Math.min(parseInt(limit) || 30, 100);
   const offset = (Math.max(1, parseInt(page)) - 1) * limitInt;
@@ -1607,6 +1660,19 @@ app.get('/api/admin/payments', paymentMgmtAuth, (req, res) => {
      CASE payment_status WHEN 'pending' THEN 1 WHEN 'confirmed' THEN 2 WHEN 'rejected' THEN 3 ELSE 4 END,
      created_at DESC LIMIT ? OFFSET ?`
   ).all(...params, limitInt, offset);
+
+  // Commandes d'un client auteur : la confirmation exigera la remise auteur.
+  try {
+    const orderIds = payments.map((p) => parseInt(p.dolibarr_order_id)).filter(Boolean);
+    if (orderIds.length) {
+      const [rows] = await dolibarrPool.query(
+        `SELECT rowid, fk_soc FROM llx_commande WHERE rowid IN (${orderIds.map(() => '?').join(',')})`, orderIds,
+      );
+      const socByOrder = new Map(rows.map((r) => [Number(r.rowid), Number(r.fk_soc)]));
+      const authors = authorTierIds(db, rows.map((r) => r.fk_soc));
+      for (const p of payments) p.is_author = authors.has(socByOrder.get(parseInt(p.dolibarr_order_id)));
+    }
+  } catch (err) { console.warn('[PAYMENTS] annotation auteur:', err.message); }
 
   res.json({ payments, total, page: Math.max(1, parseInt(page)), pages: Math.ceil(total / limitInt) });
 });
@@ -1815,7 +1881,7 @@ try {
 import { createConsignmentRouter } from './consignment-routes.js';
 try {
   const consignmentAuth = adminAuth(db);
-  app.use('/api/admin/consignments', createConsignmentRouter({ db, dolibarrPool, auth: consignmentAuth, csrfProtection }));
+  app.use('/api/admin/consignments', createConsignmentRouter({ db, dolibarrPool, auth: consignmentAuth, csrfProtection, transporter, siteUrl: SITE_URL }));
   console.log('[CONSIGNMENT] Consignment (dépôt-vente) routes mounted');
 } catch (err) {
   console.error('[CONSIGNMENT] Failed to mount consignment routes:', err);

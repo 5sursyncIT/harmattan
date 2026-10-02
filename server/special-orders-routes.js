@@ -27,6 +27,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { adminApi } from './dolibarr-admin-client.js';
 import { recordInvoicePayment, resolvePaymentId } from './dolibarr-payments.js';
 import { findExistingTier, TYPENT_PARTICULIER } from './tier-dedup.js';
+import { findAuthorForTier, authorTierIds, parseAuthorDiscount, authorDiscountRequiredBody, netAmount } from './author-discount.js';
 
 const EDITOR_NAME = process.env.CONTRACT_EDITOR_SIGNATORY_NAME || "L'Harmattan Sénégal";
 const FOOTER_LEGAL = "L'HARMATTAN SENEGAL SARL – 10 VDN Sicap amitié 3, Lotissement Cité Police, BP 45034 Dakar Fann, RC : SN DKR 2009-B-11.042 NINEA : 004067155";
@@ -216,6 +217,9 @@ function ensureTables(db) {
   try { db.exec('ALTER TABLE special_orders ADD COLUMN dolibarr_invoice_id INTEGER'); } catch { /* déjà présente */ }
   try { db.exec('ALTER TABLE special_orders ADD COLUMN invoice_ref TEXT'); } catch { /* déjà présente */ }
   try { db.exec('ALTER TABLE special_orders ADD COLUMN delivered_at DATETIME'); } catch { /* déjà présente */ }
+  // Remise auteur (%) saisie par l'agent quand le client est un auteur (null sinon).
+  // unit_price reste le prix public ; line_total / total_amount sont nets de remise.
+  try { db.exec('ALTER TABLE special_orders ADD COLUMN author_discount REAL'); } catch { /* déjà présente */ }
   // Chaque règlement pointe vers son paiement Dolibarr. NULL = pas encore au livre
   // comptable (Dolibarr indisponible au moment de l'encaissement) → alerte + rejeu.
   try { db.exec('ALTER TABLE special_order_payments ADD COLUMN dolibarr_payment_id INTEGER'); } catch { /* déjà présente */ }
@@ -363,8 +367,10 @@ export function createSpecialOrdersRouter({
     return { key, label: s.label, color: s.color, bg: s.bg };
   }
 
-  // Lignes commande → normalisation depuis le body.
-  function sanitizeLines(input) {
+  // Lignes commande → normalisation depuis le body. `discountPct` = remise
+  // auteur éventuelle, appliquée au total de ligne (arrondi au franc, comme
+  // Dolibarr avec MAIN_MAX_DECIMALS_TOT=0).
+  function sanitizeLines(input, discountPct = 0) {
     if (!Array.isArray(input)) return [];
     return input
       .map((l) => {
@@ -377,7 +383,9 @@ export function createSpecialOrdersRouter({
           author: String(l.author || '').trim().slice(0, 200) || null,
           quantity,
           unit_price,
-          line_total: Math.round(quantity * unit_price * 100) / 100,
+          line_total: discountPct > 0
+            ? netAmount(unit_price, quantity, discountPct)
+            : Math.round(quantity * unit_price * 100) / 100,
         };
       })
       .filter((l) => l.title);
@@ -399,6 +407,7 @@ export function createSpecialOrdersRouter({
       delayEstimate: row.delay_estimate,
       status: row.status,
       statusInfo: statusDto(row.status),
+      authorDiscount: row.author_discount ?? null,
       totals,
       notes: row.notes,
       createdBy: row.created_by,
@@ -497,6 +506,7 @@ export function createSpecialOrdersRouter({
         qty: Number(l.quantity) || 1,
         tva_tx: 0,
         product_type: 1,
+        remise_percent: Number(row.author_discount) || 0,
       })),
     });
     const invoiceId = Number(createRes.data);   // le POST renvoie l'ID brut, pas un objet
@@ -604,7 +614,12 @@ export function createSpecialOrdersRouter({
     const payload = {
       ref: orderRow.ref,
       customer: { name: orderRow.customer_name, firstname, email: orderRow.customer_email, phone: orderRow.customer_phone },
-      items: dto.lines.map((l) => ({ label: l.title + (l.author ? ` — ${l.author}` : ''), quantity: l.quantity, price_ttc: l.unit_price })),
+      // Prix unitaire NET (remise auteur déduite) : cohérent avec le total annoncé.
+      items: dto.lines.map((l) => ({
+        label: l.title + (l.author ? ` — ${l.author}` : ''),
+        quantity: l.quantity,
+        price_ttc: l.quantity ? Math.round(l.line_total / l.quantity) : l.unit_price,
+      })),
       total: dto.totals.total,
       paid: dto.totals.paid,
       balance: dto.totals.balance,
@@ -684,9 +699,11 @@ export function createSpecialOrdersRouter({
          ORDER BY nom ASC LIMIT 20`,
         [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`]
       );
+      const authors = authorTierIds(db, rows.map((r) => r.id));
       res.json({ customers: rows.map((r) => ({
         id: r.id, name: r.nom, code: r.code_client, email: r.email, phone: r.phone,
         address: [r.address, [r.zip, r.town].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+        is_author: authors.has(Number(r.id)),
       })) });
     } catch (err) {
       console.error('[SPECIAL-ORDERS] customers search error:', err.message);
@@ -854,7 +871,20 @@ export function createSpecialOrdersRouter({
       const b = req.body || {};
       const customerName = String(b.customer_name || '').trim().slice(0, 200);
       if (!customerName) return res.status(400).json({ error: 'Client requis' });
-      const lines = sanitizeLines(b.lines);
+
+      // Client auteur → remise saisie obligatoire. Le tiers est soit choisi
+      // (fk_soc), soit celui que ensureOrderTier retrouvera plus tard par
+      // email/téléphone : on fait la même recherche ici, en lecture seule.
+      let author = findAuthorForTier(db, b.fk_soc);
+      if (!author && !b.fk_soc && (b.customer_email || b.customer_phone)) {
+        const tier = await findExistingTier(dolibarrPool, { email: b.customer_email, phone: b.customer_phone }).catch(() => null);
+        author = tier ? findAuthorForTier(db, tier.rowid || tier.id) : null;
+      }
+      const authorDiscount = parseAuthorDiscount(b.author_discount);
+      if (author && authorDiscount === null) return res.status(409).json(authorDiscountRequiredBody(author));
+      const orderDiscount = author ? authorDiscount : null;
+
+      const lines = sanitizeLines(b.lines, orderDiscount || 0);
       if (lines.length === 0) return res.status(400).json({ error: 'Au moins un livre demandé' });
 
       const totalAmount = Math.round(lines.reduce((s, l) => s + l.line_total, 0) * 100) / 100;
@@ -868,8 +898,8 @@ export function createSpecialOrdersRouter({
         const ref = generateRef();
         const r = db.prepare(`INSERT INTO special_orders (
           ref, fk_soc, customer_name, customer_email, customer_phone, customer_address,
-          expected_date, delay_estimate, status, total_amount, notes, created_by
-        ) VALUES (?,?,?,?,?,?,?,?, 'registered', ?, ?, ?)`).run(
+          expected_date, delay_estimate, status, total_amount, notes, created_by, author_discount
+        ) VALUES (?,?,?,?,?,?,?,?, 'registered', ?, ?, ?, ?)`).run(
           ref,
           b.fk_soc ? parseInt(b.fk_soc, 10) : null,
           customerName,
@@ -881,6 +911,7 @@ export function createSpecialOrdersRouter({
           totalAmount,
           String(b.notes || '').trim().slice(0, 2000) || null,
           username,
+          orderDiscount,
         );
         const orderId = r.lastInsertRowid;
         const insLine = db.prepare(`INSERT INTO special_order_lines
@@ -900,7 +931,10 @@ export function createSpecialOrdersRouter({
       });
 
       const { orderId, ref, paymentRowId } = create();
-      logActivity(username, 'special_order_created', { id: orderId, ref, total: totalAmount, lines: lines.length });
+      logActivity(username, 'special_order_created', {
+        id: orderId, ref, total: totalAmount, lines: lines.length,
+        ...(orderDiscount !== null ? { author_discount: orderDiscount } : {}),
+      });
 
       // Le règlement à la commande (acompte) entre au livre comptable : c'est là que
       // naissent le tiers et la facture de la commande.
@@ -965,7 +999,7 @@ export function createSpecialOrdersRouter({
         if (!['registered', 'pending_validation'].includes(row.status)) {
           return res.status(409).json({ error: "Les livres ne sont plus modifiables après l'envoi à l'approvisionnement" });
         }
-        newLines = sanitizeLines(b.lines);
+        newLines = sanitizeLines(b.lines, Number(row.author_discount) || 0);
         if (newLines.length === 0) return res.status(400).json({ error: 'Au moins un livre demandé' });
         setField('total_amount', Math.round(newLines.reduce((s, l) => s + l.line_total, 0) * 100) / 100);
       }
@@ -1442,6 +1476,7 @@ export function buildSoContent(dto) {
    </table:table-row>${rows}
   </table:table>
 
+  ${dto.authorDiscount > 0 ? `<text:p text:style-name="Muted">Remise auteur de ${escXml(String(dto.authorDiscount))} % appliquée (P.U. au prix public, totaux nets de remise).</text:p>` : ''}
   <text:p text:style-name="TotalStrong">Total : ${escXml(fmtMoney(dto.totals.total))}</text:p>
   ${paidLine}
   ${dueLine}

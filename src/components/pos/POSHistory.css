@@ -389,7 +389,7 @@
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.pos-history-action:hover {
+.pos-history-action:hover:not(:disabled) {
   background: #f1f5f9;
   border-color: #94a3b8;
 }
@@ -433,4 +433,9 @@
     padding: 7px 10px;
     font-size: 0.78rem;
   }
+}
+
+.pos-history-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }

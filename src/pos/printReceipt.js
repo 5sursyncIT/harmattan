@@ -4,7 +4,7 @@
 import toast from 'react-hot-toast';
 import usePosPrinterStore from '../store/posPrinterStore';
 import { connectQz, isQzConnected, detectEpsonPrinter, printRaw } from './qz';
-import { buildSaleReceipt } from './escpos';
+import { buildSaleReceipt, amountDue } from './escpos';
 
 async function ensurePrinter() {
   const { printerName } = usePosPrinterStore.getState();
@@ -50,6 +50,12 @@ export async function printSaleReceipt(sale, { silent = false } = {}) {
     if (!silent) toast.error(`Échec impression thermique : ${err?.message || err}`);
     return false;
   }
+}
+
+// Réimpression d'un ticket passé (historique) : thermique, sinon navigateur.
+export async function reprintSaleReceipt(sale) {
+  const ok = await printSaleReceipt(sale);
+  if (!ok) htmlPrintFallback(sale);
 }
 
 // Impression de test (sans passer par une vente réelle)
@@ -244,7 +250,8 @@ function buildReceiptHtml(sale) {
   const totalPaid = (sale.payments || []).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
   const change = totalPaid - (sale.total_ttc || 0);
   const itemCount = (sale.items || []).reduce((s, i) => s + (i.qty || 0), 0);
-  const now = new Date();
+  const now = sale.date ? new Date(sale.date) : new Date();
+  const due = amountDue(sale);
   const fmt = (n) => (parseInt(n) || 0).toLocaleString('fr-FR');
   const escape = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -256,9 +263,13 @@ function buildReceiptHtml(sale) {
     `;
   }).join('');
 
-  const paymentRows = (sale.payments || []).map((p) =>
-    `<div class="pos-receipt-payment-line"><span>${escape(PAYMENT_LABELS[p.code] || p.code)}</span><span>${fmt(p.amount)} F</span></div>`,
-  ).join('');
+  const paymentRows = sale.service_presse
+    ? `<div class="pos-receipt-payment-line"><strong>SERVICE DE PRESSE${sale.press_organ ? ` — ${escape(sale.press_organ)}` : ''}</strong><span>0 F</span></div>`
+    : (sale.payments || []).map((p) =>
+      `<div class="pos-receipt-payment-line"><span>${escape(PAYMENT_LABELS[p.code] || p.code)}</span><span>${fmt(p.amount)} F</span></div>`,
+    ).join('') + (due > 0
+      ? `<div class="pos-receipt-payment-line"><strong>${totalPaid > 0 ? 'RESTE À RÉGLER' : 'À RÉGLER (facture impayée)'}</strong><strong>${fmt(due)} F</strong></div>`
+      : '');
 
   return `
 <div class="pos-receipt-ticket" id="pos-receipt-printable">
@@ -268,6 +279,7 @@ function buildReceiptHtml(sale) {
     <p>10 VDN, Sicap Karak 45034, Dakar</p>
     <p>Tel: +221 33 825 98 58 / +221 70 953 02 40</p>
     <p>NINEA: 004067155 — RC: SN DKR 2009-B-11.042</p>
+    ${sale.duplicate ? '<p style="font-weight:700;font-size:11px;margin-top:4px">*** DUPLICATA ***</p>' : ''}
   </div>
   <div class="pos-receipt-divider"></div>
   <div class="pos-receipt-meta">
@@ -290,7 +302,7 @@ function buildReceiptHtml(sale) {
   <div class="pos-receipt-divider"></div>
   <div class="pos-receipt-payments-section">
     ${paymentRows}
-    ${change > 0 ? `<div class="pos-receipt-payment-line pos-receipt-change"><span>Rendu monnaie</span><span>${fmt(change)} F</span></div>` : ''}
+    ${change > 0 && due === 0 && !sale.service_presse ? `<div class="pos-receipt-payment-line pos-receipt-change"><span>Rendu monnaie</span><span>${fmt(change)} F</span></div>` : ''}
   </div>
   <div class="pos-receipt-divider"></div>
   <div class="pos-receipt-footer">

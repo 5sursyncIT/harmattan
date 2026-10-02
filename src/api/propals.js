@@ -8,7 +8,7 @@ export const getPropal = (id) => api.get(`/admin/propals/${id}`);
 export const createPropal = (data) => api.post('/admin/propals', data);
 
 // Valider un devis et le transformer en facture (facture validée / impayée).
-export const invoicePropal = (id) => api.post(`/admin/propals/${id}/invoice`);
+export const invoicePropal = (id, body = {}) => api.post(`/admin/propals/${id}/invoice`, body);
 // Refuser / invalider un devis (statut « Non signé »).
 export const refusePropal = (id, reason) => api.post(`/admin/propals/${id}/refuse`, { reason });
 export const searchPropalClients = (q) => api.get('/admin/propals/clients/search', { params: { q } });
@@ -22,5 +22,5 @@ export const listPosQuotes = (params = {}) => api.get('/admin/propals/pos-quotes
 export const getPosQuote = (ref) => api.get(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}`);
 export const deletePosQuote = (ref) => api.delete(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}`);
 // Transformer une proforma POS en facture / la refuser.
-export const invoicePosQuote = (ref, socid) => api.post(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}/invoice`, socid ? { socid } : {});
+export const invoicePosQuote = (ref, socid, extra = {}) => api.post(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}/invoice`, { ...(socid ? { socid } : {}), ...extra });
 export const refusePosQuote = (ref) => api.post(`/admin/propals/pos-quotes/${encodeURIComponent(ref)}/refuse`, {});

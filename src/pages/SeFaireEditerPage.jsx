@@ -23,7 +23,7 @@ const formStepConfig = [
     key: 'file',
     label: 'Fichier',
     title: 'Joindre votre manuscrit',
-    description: 'Ajoutez votre manuscrit en PDF ou Word. Si vous n’avez pas encore le fichier final, vous pouvez envoyer votre demande et compléter plus tard.',
+    description: 'Ajoutez votre manuscrit au format Word (.doc ou .docx) — les PDF ne sont plus acceptés. Si vous n’avez pas encore le fichier final, vous pouvez envoyer votre demande et compléter plus tard.',
   },
 ];
 
@@ -45,9 +45,9 @@ const steps = [
     number: '01',
     title: 'Envoi du manuscrit',
     description:
-      'Déposez votre manuscrit au format Word ou PDF avec un synopsis clair et vos coordonnées. Nous acceptons tous les genres littéraires.',
+      'Déposez votre manuscrit au format Word avec un synopsis clair et vos coordonnées. Nous acceptons tous les genres littéraires.',
     details: [
-      'Formats acceptés : Word (.doc, .docx) ou PDF',
+      'Format accepté : Word uniquement (.doc, .docx) — pas de PDF',
       'Synopsis recommandé pour accélérer l’étude',
       'Manuscrit complet préférable, version avancée acceptée',
     ],
@@ -92,14 +92,14 @@ const steps = [
 
 const heroHighlights = [
   { icon: <FiClock />, value: '12 semaines max', label: 'pour une première réponse éditoriale' },
-  { icon: <FiFileText />, value: 'PDF, DOC, DOCX', label: 'formats acceptés pour le dépôt' },
+  { icon: <FiFileText />, value: 'Word (.doc, .docx)', label: 'seul format accepté pour le dépôt' },
   { icon: <FiShield />, value: 'Accompagnement éditorial', label: 'de la soumission jusqu’à la publication' },
 ];
 
 const preparationChecklist = [
   'Préparez le titre de votre manuscrit et son genre principal.',
   'Ajoutez un synopsis clair pour accélérer l’analyse.',
-  'Prévoyez un fichier PDF ou Word de moins de 20 Mo (au-delà, un lien de téléchargement est accepté).',
+  'Prévoyez un fichier Word (.doc ou .docx) de moins de 20 Mo (au-delà, un lien de téléchargement est accepté). Les PDF ne sont pas acceptés.',
   'Rassemblez, si possible, votre biographie et la présentation du projet.',
 ];
 
@@ -227,9 +227,9 @@ function getValidationErrors(form, file, linkMode = false, fileUrl = '') {
       nextErrors.file = 'Le lien est trop long.';
     }
   } else if (!file) {
-    nextErrors.file = 'Veuillez joindre votre manuscrit (PDF, DOC ou DOCX).';
-  } else if (!/\.(pdf|doc|docx)$/i.test(file.name)) {
-    nextErrors.file = 'Format accepté : PDF, DOC ou DOCX.';
+    nextErrors.file = 'Veuillez joindre votre manuscrit au format Word (.doc ou .docx).';
+  } else if (!/\.(doc|docx)$/i.test(file.name)) {
+    nextErrors.file = 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).';
   }
 
   return nextErrors;
@@ -246,8 +246,8 @@ function getTomeError(tome) {
     if (!/^https?:\/\/.+/i.test(url)) return 'Le lien doit commencer par http:// ou https://.';
     if (url.length > 2000) return 'Le lien est trop long.';
   } else {
-    if (!tome.file) return 'Veuillez joindre le fichier de ce tome (PDF, DOC ou DOCX).';
-    if (!/\.(pdf|doc|docx)$/i.test(tome.file.name)) return 'Format accepté : PDF, DOC ou DOCX.';
+    if (!tome.file) return 'Veuillez joindre le fichier de ce tome au format Word (.doc ou .docx).';
+    if (!/\.(doc|docx)$/i.test(tome.file.name)) return 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).';
   }
   return null;
 }
@@ -337,9 +337,9 @@ function ManuscriptForm() {
       toast('Fichier supérieur à 20 Mo : fournissez un lien pour ce tome', { icon: 'ℹ️' });
       return;
     }
-    if (!/\.(pdf|doc|docx)$/i.test(selectedFile.name)) {
-      patchTome(key, { file: null, error: 'Format accepté : PDF, DOC ou DOCX.' });
-      toast.error('Format accepté : PDF, DOC ou DOCX');
+    if (!/\.(doc|docx)$/i.test(selectedFile.name)) {
+      patchTome(key, { file: null, error: 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).' });
+      toast.error('Seul le format Word (.doc ou .docx) est accepté');
       return;
     }
     patchTome(key, { file: selectedFile, error: '' });
@@ -432,11 +432,11 @@ function ManuscriptForm() {
         return;
       }
       markFieldAsTouched('file');
-      if (!/\.(pdf|doc|docx)$/i.test(selectedFile.name)) {
-        setErrors((current) => ({ ...current, file: 'Format accepté : PDF, DOC ou DOCX.' }));
+      if (!/\.(doc|docx)$/i.test(selectedFile.name)) {
+        setErrors((current) => ({ ...current, file: 'Format non accepté : le manuscrit doit être un fichier Word (.doc ou .docx).' }));
         setFile(null);
         setStatusMessage('Le format du fichier n’est pas pris en charge.');
-        toast.error('Format accepté : PDF, DOC ou DOCX');
+        toast.error('Seul le format Word (.doc ou .docx) est accepté');
         return;
       }
       setFile(selectedFile);
@@ -864,13 +864,13 @@ function ManuscriptForm() {
           {!useLink ? (
             <>
               <label htmlFor="manuscript-file">
-                <FiUpload size={14} /> {multiTome ? 'Fichier du tome 1' : 'Manuscrit'} (PDF, DOC, DOCX — max 20 Mo) <span className="editer-required" aria-label="champ obligatoire">*</span>
+                <FiUpload size={14} /> {multiTome ? 'Fichier du tome 1' : 'Manuscrit'} (Word .doc/.docx — max 20 Mo) <span className="editer-required" aria-label="champ obligatoire">*</span>
               </label>
               <div className="editer-file-input">
                 <input
                   type="file"
                   id="manuscript-file"
-                  accept=".pdf,.doc,.docx"
+                  accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                   onChange={handleFile}
                   aria-required="true"
                   aria-invalid={isVisibleError('file') ? 'true' : 'false'}
@@ -882,7 +882,7 @@ function ManuscriptForm() {
                 </label>
                 <div className="editer-file-meta">
                   <strong>{file ? file.name : 'Aucun fichier sélectionné'}</strong>
-                  <span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} Mo` : 'Formats acceptés : PDF, DOC, DOCX'}</span>
+                  <span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} Mo` : 'Format accepté : Word (.doc, .docx)'}</span>
                 </div>
               </div>
             </>
@@ -918,7 +918,7 @@ function ManuscriptForm() {
 
           <p className="editer-field-help" id="file-help">
             {useLink
-              ? 'Collez un lien Google Drive, WeTransfer, Dropbox… Vérifiez qu’il reste accessible (sans expiration ni mot de passe, ou précisez-le dans le message complémentaire).'
+              ? 'Collez un lien Google Drive, WeTransfer, Dropbox… vers votre fichier Word (.doc ou .docx). Vérifiez qu’il reste accessible (sans expiration ni mot de passe, ou précisez-le dans le message complémentaire).'
               : 'Le dépôt du manuscrit est obligatoire pour permettre l’évaluation par le comité éditorial. Fichier supérieur à 20 Mo ? Cochez l’option ci-dessus pour envoyer un lien.'}
           </p>
           {isVisibleError('file') && <p className="editer-field-error" id="file-error" role="alert"><FiAlertCircle /> {errors.file}</p>}
@@ -947,7 +947,7 @@ function ManuscriptForm() {
                     <input
                       type="file"
                       id={`tome-file-${tome.key}`}
-                      accept=".pdf,.doc,.docx"
+                      accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                       onChange={(e) => handleTomeFile(tome.key, e)}
                     />
                     <label htmlFor={`tome-file-${tome.key}`} className="editer-file-label">
@@ -956,7 +956,7 @@ function ManuscriptForm() {
                     </label>
                     <div className="editer-file-meta">
                       <strong>{tome.file ? tome.file.name : 'Aucun fichier sélectionné'}</strong>
-                      <span>{tome.file ? `${(tome.file.size / 1024 / 1024).toFixed(1)} Mo` : 'Formats acceptés : PDF, DOC, DOCX'}</span>
+                      <span>{tome.file ? `${(tome.file.size / 1024 / 1024).toFixed(1)} Mo` : 'Format accepté : Word (.doc, .docx)'}</span>
                     </div>
                   </div>
                 ) : (
@@ -1180,7 +1180,7 @@ export default function SeFaireEditerPage() {
                 <ul>
                   <li><FiCheckCircle /> Coordonnées et titre du manuscrit</li>
                   <li><FiCheckCircle /> Synopsis pour accélérer l’évaluation</li>
-                  <li><FiCheckCircle /> Fichier PDF ou Word recommandé</li>
+                  <li><FiCheckCircle /> Fichier Word (.doc ou .docx) obligatoire</li>
                 </ul>
               </div>
               <div className="editer-sidebar-card editer-sidebar-card-accent">

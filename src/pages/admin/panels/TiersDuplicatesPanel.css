@@ -1,0 +1,47 @@
+/* Doublons de tiers — namespace tdup-* */
+.tdup-back { display: inline-flex; align-items: center; gap: 4px; color: #6b7280; font-size: 13px; text-decoration: none; }
+.tdup-back:hover { color: #10531a; }
+.tdup-empty { padding: 40px; text-align: center; color: #6b7280; }
+
+.tdup-card {
+  background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #d1d5db;
+  border-radius: 12px; margin-bottom: 16px; overflow: hidden;
+}
+.tdup-card.is-high { border-left-color: #10531a; }
+.tdup-card.is-review { border-left-color: #f59e0b; }
+
+.tdup-card-head {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid #f1f5f9;
+}
+.tdup-reasons { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tdup-reason {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 10px;
+  font-size: 12px; font-weight: 700; background: #fef3c7; color: #92400e;
+}
+.tdup-reason.is-strong { background: #dcfce7; color: #10531a; }
+.tdup-hint { font-size: 12px; color: #92400e; }
+.tdup-warn { font-size: 12px; font-weight: 600; color: #7c3aed; }
+
+.tdup-table-wrap { overflow-x: auto; }
+.tdup-table td, .tdup-table th { vertical-align: top; }
+.tdup-table tr.is-master { background: #f0fdf4; }
+.tdup-table tr.is-excluded { opacity: 0.5; }
+.tdup-name { display: inline-flex; align-items: center; gap: 4px; color: #10531a; font-weight: 700; text-decoration: none; }
+.tdup-sub { font-size: 12px; color: #6b7280; }
+.tdup-contact { font-size: 13px; word-break: break-all; min-width: 160px; }
+.tdup-master-badge {
+  display: inline-block; margin-top: 4px; padding: 1px 8px; border-radius: 10px;
+  background: #10531a; color: #fff; font-size: 11px; font-weight: 700;
+}
+.tdup-reverted { color: #6b7280; font-style: italic; }
+
+.tdup-actions {
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;
+  padding: 12px 16px; border-top: 1px solid #f1f5f9; background: #f9fafb;
+}
+
+@media (max-width: 640px) {
+  .tdup-actions { flex-direction: column-reverse; }
+  .tdup-actions .btn { width: 100%; justify-content: center; }
+}

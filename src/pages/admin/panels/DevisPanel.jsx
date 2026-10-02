@@ -19,6 +19,8 @@ import { createAdminSociete } from '../../../api/admin';
 import POSQuoteReceipt from '../../../components/pos/POSQuoteReceipt';
 import ConfirmModal from '../../../components/common/ConfirmModal';
 import useAdminRole from '../../../hooks/useAdminRole';
+import { AuthorDiscountField, AuthorDiscountPromptModal } from '../../../components/admin/AuthorDiscountField';
+import { parseAuthorDiscount, isAuthorDiscountRequired, netLine } from '../../../utils/authorDiscount';
 import './Contracts.css';
 
 // Suppression d'une proforma POS réservée aux administrateurs.
@@ -48,6 +50,8 @@ function PropalDetailModal({ id, onClose, onChanged }) {
   const [action, setAction] = useState(null);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  // Refus serveur « remise auteur à saisir » → message de la modale de saisie.
+  const [authorPrompt, setAuthorPrompt] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,15 +63,17 @@ function PropalDetailModal({ id, onClose, onChanged }) {
     return () => { cancelled = true; };
   }, [id]);
 
-  const doInvoice = async () => {
+  const doInvoice = async (authorDiscount) => {
     setBusy(true);
     try {
-      const r = await invoicePropal(id);
+      const r = await invoicePropal(id, authorDiscount != null ? { author_discount: authorDiscount } : {});
+      setAuthorPrompt(null);
       toast.success(`Facture ${r.data.invoice_ref || ''} créée depuis le devis`.trim());
       onChanged?.();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Erreur lors de la facturation');
       setBusy(false);
+      if (isAuthorDiscountRequired(err)) { setAuthorPrompt(err.response.data.error); return; }
+      toast.error(err.response?.data?.error || 'Erreur lors de la facturation');
     }
   };
 
@@ -170,7 +176,7 @@ function PropalDetailModal({ id, onClose, onChanged }) {
                 </p>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
                   <button className="ct-btn ct-btn-outline" onClick={() => setAction(null)} disabled={busy}>Annuler</button>
-                  <button className="ct-btn ct-btn-primary" onClick={doInvoice} disabled={busy}>
+                  <button className="ct-btn ct-btn-primary" onClick={() => doInvoice()} disabled={busy}>
                     <FiCheckCircle size={14} /> {busy ? 'Facturation...' : 'Confirmer la facturation'}
                   </button>
                 </div>
@@ -208,6 +214,14 @@ function PropalDetailModal({ id, onClose, onChanged }) {
             </div>
           </>
         )}
+        {authorPrompt && (
+          <AuthorDiscountPromptModal
+            message={authorPrompt}
+            busy={busy}
+            onSubmit={(pct) => doInvoice(pct)}
+            onCancel={() => setAuthorPrompt(null)}
+          />
+        )}
       </div>
     </div>
   );
@@ -220,6 +234,8 @@ function CreatePropalModal({ onClose, onCreated }) {
   const [productQuery, setProductQuery] = useState('');
   const [productResults, setProductResults] = useState([]);
   const [lines, setLines] = useState([]); // { product_id, ref, label, qty, subprice, _k }
+  // Remise auteur (%) saisie à la main quand le client est un auteur.
+  const [authorDiscount, setAuthorDiscount] = useState('');
   const [note, setNote] = useState('');
   const [validity, setValidity] = useState(30);
   const [saving, setSaving] = useState(false);
@@ -246,7 +262,7 @@ function CreatePropalModal({ onClose, onCreated }) {
     if (q.trim().length < 2) { setClientResults([]); return; }
     debounce('client', () => searchPropalClients(q).then(r => setClientResults(r.data.clients || [])).catch(() => {}));
   };
-  const pickClient = (c) => { setClient(c); setClientResults([]); setClientQuery(''); };
+  const pickClient = (c) => { setClient(c); setAuthorDiscount(''); setClientResults([]); setClientQuery(''); };
 
   const ncSet = (k, v) => setNc(prev => ({ ...prev, [k]: v }));
   const createClient = async () => {
@@ -299,15 +315,19 @@ function CreatePropalModal({ onClose, onCreated }) {
   const updateLine = (k, field, value) => setLines(prev => prev.map(l => l._k === k ? { ...l, [field]: value } : l));
   const removeLine = (k) => setLines(prev => prev.filter(l => l._k !== k));
 
-  const total = lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.subprice) || 0), 0);
+  const authorPct = client?.is_author ? (parseAuthorDiscount(authorDiscount) ?? 0) : 0;
+  const total = lines.reduce((s, l) => s + netLine(l.subprice, l.qty, authorPct), 0);
 
   const submit = async () => {
     if (!client?.id) return toast.error('Sélectionnez un client');
     if (lines.length === 0) return toast.error('Ajoutez au moins un article');
+    const pct = parseAuthorDiscount(authorDiscount);
+    if (client.is_author && pct === null) return toast.error('Saisissez la remise auteur (0 à 100 %)');
     setSaving(true);
     try {
       const res = await createPropal({
         socid: client.id,
+        ...(client.is_author ? { author_discount: pct } : {}),
         duree_validite: validity,
         note_public: note,
         lines: lines.map(l => ({ product_id: l.product_id, label: l.label, qty: Number(l.qty) || 1, subprice: Number(l.subprice) || 0 })),
@@ -315,6 +335,9 @@ function CreatePropalModal({ onClose, onCreated }) {
       toast.success(`Devis ${res.data.ref || ''} créé en brouillon`);
       onCreated?.(res.data.id);
     } catch (err) {
+      // Client reconnu comme auteur par le serveur (ex. fiche créée à la volée) :
+      // on affiche le champ de saisie au lieu d'un simple message.
+      if (isAuthorDiscountRequired(err)) setClient((c) => ({ ...c, is_author: true }));
       toast.error(err.response?.data?.error || 'Erreur lors de la création');
     } finally {
       setSaving(false);
@@ -393,7 +416,7 @@ function CreatePropalModal({ onClose, onCreated }) {
               <ResultsBox>
                 {clientResults.map(c => (
                   <div key={c.id} onClick={() => pickClient(c)} style={{ padding: '9px 12px', cursor: 'pointer', borderBottom: '1px solid #f1f5f9' }}>
-                    <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>{c.name}</div>
+                    <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>{c.name}{c.is_author && <span style={{ marginLeft: 6, fontSize: '0.7rem', fontWeight: 700, color: 'var(--color-orange)' }}>AUTEUR</span>}</div>
                     <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{[c.code, c.town, c.email].filter(Boolean).join(' · ')}</div>
                   </div>
                 ))}
@@ -404,6 +427,10 @@ function CreatePropalModal({ onClose, onCreated }) {
               <FiUserPlus size={15} /> Nouveau client
             </button>
           </div>
+        )}
+
+        {client?.is_author && (
+          <AuthorDiscountField value={authorDiscount} onChange={setAuthorDiscount} style={{ marginBottom: 14 }} />
         )}
 
         {/* Produit */}
@@ -439,7 +466,7 @@ function CreatePropalModal({ onClose, onCreated }) {
                       <input type="number" min={0} value={l.subprice} onChange={e => updateLine(l._k, 'subprice', Math.max(0, parseFloat(e.target.value) || 0))}
                         style={{ width: 100, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 6, textAlign: 'right' }} />
                     </td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatPrice((Number(l.qty) || 0) * (Number(l.subprice) || 0))}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatPrice(netLine(l.subprice, l.qty, authorPct))}</td>
                     <td style={{ textAlign: 'center' }}><button className="ct-btn-ghost" onClick={() => removeLine(l._k)} title="Retirer"><FiTrash2 size={15} /></button></td>
                   </tr>
                 ))}
@@ -487,6 +514,8 @@ export default function DevisPanel() {
   // Confirmation facturer / refuser d'une proforma POS : { type, quote }.
   const [posAction, setPosAction] = useState(null);
   const [posBusy, setPosBusy] = useState(false);
+  // Proforma d'un client auteur sans remise saisie : { quote, message }.
+  const [posAuthorPrompt, setPosAuthorPrompt] = useState(null);
   const role = useAdminRole();
   const canDeletePos = POS_QUOTE_DELETE_ROLES.includes(role);
   const canInvoicePos = POS_QUOTE_INVOICE_ROLES.includes(role);
@@ -506,18 +535,34 @@ export default function DevisPanel() {
   // Ouvre la confirmation (ferme la vue proforma si ouverte pour éviter la superposition).
   const askPosAction = (type, q) => { setPosQuote(null); setPosAction({ type, quote: q }); };
 
+  const invoicePos = async (quote, authorDiscount) => {
+    setPosBusy(true);
+    try {
+      const r = await invoicePosQuote(quote.ref, null, authorDiscount != null ? { author_discount: authorDiscount } : {});
+      toast.success(`Facture ${r.data.invoice_ref || ''} créée depuis la proforma`.trim());
+      setPosAction(null);
+      setPosAuthorPrompt(null);
+      reload();
+    } catch (err) {
+      if (isAuthorDiscountRequired(err)) {
+        setPosAction(null);
+        setPosAuthorPrompt({ quote, message: err.response.data.error });
+      } else {
+        toast.error(err.response?.data?.error || 'Une erreur est survenue');
+      }
+    } finally {
+      setPosBusy(false);
+    }
+  };
+
   const confirmPosAction = async () => {
     if (!posAction) return;
     const { type, quote } = posAction;
+    if (type === 'invoice') return invoicePos(quote);
     setPosBusy(true);
     try {
-      if (type === 'invoice') {
-        const r = await invoicePosQuote(quote.ref);
-        toast.success(`Facture ${r.data.invoice_ref || ''} créée depuis la proforma`.trim());
-      } else {
-        await refusePosQuote(quote.ref);
-        toast.success(`Proforma ${quote.ref} refusée`);
-      }
+      await refusePosQuote(quote.ref);
+      toast.success(`Proforma ${quote.ref} refusée`);
       setPosAction(null);
       reload();
     } catch (err) {
@@ -708,6 +753,14 @@ export default function DevisPanel() {
           loading={posBusy}
           onConfirm={confirmPosAction}
           onCancel={() => { if (!posBusy) setPosAction(null); }}
+        />
+      )}
+      {posAuthorPrompt && (
+        <AuthorDiscountPromptModal
+          message={posAuthorPrompt.message}
+          busy={posBusy}
+          onSubmit={(pct) => invoicePos(posAuthorPrompt.quote, pct)}
+          onCancel={() => setPosAuthorPrompt(null)}
         />
       )}
       {creating && (
