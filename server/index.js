@@ -1455,6 +1455,9 @@ try {
   const cols = db.prepare('PRAGMA table_info(order_payments)').all().map((c) => c.name);
   if (cols.length && !cols.includes('received_method')) db.exec('ALTER TABLE order_payments ADD COLUMN received_method TEXT');
   if (cols.length && !cols.includes('received_ref')) db.exec('ALTER TABLE order_payments ADD COLUMN received_ref TEXT');
+  // Archivage : commandes antérieures au démarrage réel des commandes web (03/10/2026),
+  // masquées des écrans admin (cf. scripts/purge-web-orders-before.mjs).
+  if (cols.length && !cols.includes('archived_at')) db.exec('ALTER TABLE order_payments ADD COLUMN archived_at DATETIME');
 } catch (err) { console.warn('[CONFIRM-PAYMENT] migration received_method:', err.message); }
 
 app.post('/api/admin/orders/:id/confirm-payment', confirmPaymentAuth, csrfProtection, async (req, res) => {
@@ -1649,7 +1652,7 @@ app.get('/api/admin/payments', paymentMgmtAuth, async (req, res) => {
   const limitInt = Math.min(parseInt(limit) || 30, 100);
   const offset = (Math.max(1, parseInt(page)) - 1) * limitInt;
 
-  let where = 'WHERE 1=1';
+  let where = 'WHERE archived_at IS NULL';
   const params = [];
   if (status) { where += ' AND payment_status = ?'; params.push(status); }
   if (method) { where += ' AND payment_method = ?'; params.push(method); }
@@ -1684,7 +1687,7 @@ app.get('/api/admin/payments', paymentMgmtAuth, async (req, res) => {
 app.get('/api/admin/payments/orphans', paymentMgmtAuth, (req, res) => {
   const rows = db.prepare(
     `SELECT * FROM order_payments
-     WHERE payment_status = 'confirmed' AND (invoice_ref IS NULL OR invoice_ref = '')
+     WHERE payment_status = 'confirmed' AND (invoice_ref IS NULL OR invoice_ref = '') AND archived_at IS NULL
      ORDER BY confirmed_at DESC, created_at DESC
      LIMIT 200`
   ).all();

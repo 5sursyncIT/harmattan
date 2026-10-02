@@ -33,7 +33,9 @@ export function createOrdersRouter({ db, dolibarrPool }) {
       // s'applique qu'à la liste — sinon les cartes de répartition (en attente /
       // payées / rejetées), qui sont une navigation par facette, s'annuleraient
       // mutuellement (filtrer « en attente » ramènerait confirmées/rejetées à 0).
-      const baseWhere = [];
+      // Commandes archivées (purge du 02/10/2026 : seules les facturées sont
+      // conservées) masquées par défaut ; ?archived=1 les affiche seules.
+      const baseWhere = [req.query.archived === '1' ? 'archived_at IS NOT NULL' : 'archived_at IS NULL'];
       const baseParams = [];
       if (req.query.method) { baseWhere.push('payment_method = ?'); baseParams.push(req.query.method); }
       if (req.query.search) {

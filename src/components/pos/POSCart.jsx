@@ -7,6 +7,8 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
   const items = usePosCartStore((s) => s.items);
   const customer = usePosCartStore((s) => s.customer);
   const authorDiscount = usePosCartStore((s) => s.authorDiscount);
+  const authorNegotiated = usePosCartStore((s) => s.authorNegotiated);
+  const authorPending = authorDiscount == null && !authorNegotiated;
   const requestAuthorDiscount = usePosCartStore((s) => s.requestAuthorDiscount);
   const held = usePosCartStore((s) => s.held);
   const updateQty = usePosCartStore((s) => s.updateQty);
@@ -176,11 +178,11 @@ export default function POSCart({ onPay, onQuote, onSelectCustomer, onBackToCata
           type="button"
           className="pos-cart-customer"
           onClick={requestAuthorDiscount}
-          style={authorDiscount == null ? { borderColor: 'var(--color-orange)', background: 'color-mix(in srgb, var(--color-orange) 8%, var(--color-white))' } : undefined}
+          style={authorPending ? { borderColor: 'var(--color-orange)', background: 'color-mix(in srgb, var(--color-orange) 8%, var(--color-white))' } : undefined}
         >
           <span className="pos-cart-customer-copy">
-            <strong>{authorDiscount == null ? 'Remise auteur à saisir' : `Remise auteur : ${authorDiscount} %`}</strong>
-            <small>{authorDiscount == null ? 'Obligatoire avant l’encaissement' : 'Appliquée à toutes les lignes — toucher pour modifier'}</small>
+            <strong>{authorPending ? 'Remise auteur à saisir' : authorNegotiated ? 'Remise auteur : prix négociés' : `Remise auteur : ${authorDiscount} %`}</strong>
+            <small>{authorPending ? 'Remise en % ou prix négocié — obligatoire avant l’encaissement' : authorNegotiated ? 'Prix saisis par livre — toucher pour modifier ou en ajouter' : 'Appliquée à toutes les lignes — toucher pour modifier'}</small>
           </span>
           <FiChevronRight size={16} />
         </button>

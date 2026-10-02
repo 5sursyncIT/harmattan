@@ -14,7 +14,7 @@ import axios from 'axios';
 import { findExistingTier } from './tier-dedup.js';
 import {
   findAuthorForTier, authorTierIds, parseAuthorDiscount, authorDiscountRequiredBody,
-  authorDiscountNote, noteHasAuthorDiscount,
+  authorDiscountNote, authorNegotiatedNote, noteHasAuthorDiscount,
 } from './author-discount.js';
 
 // Statuts Dolibarr d'une proposition commerciale.
@@ -268,7 +268,8 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
       // remplace celui de la proforma sur toutes les lignes.
       const quoteAuthor = findAuthorForTier(db, socid);
       const bodyAuthorDiscount = parseAuthorDiscount(req.body?.author_discount);
-      if (quoteAuthor && bodyAuthorDiscount === null && q.author_discount == null) {
+      // Prix négociés au comptoir (author_negotiated) : la remise est déjà dans les prix.
+      if (quoteAuthor && bodyAuthorDiscount === null && q.author_discount == null && !q.author_negotiated) {
         return res.status(409).json(authorDiscountRequiredBody(quoteAuthor));
       }
       const appliedAuthorDiscount = quoteAuthor ? (bodyAuthorDiscount ?? q.author_discount) : null;
@@ -293,7 +294,8 @@ export function createPropalsRouter({ dolibarrPool, csrfProtection, db }) {
         type: 0,
         module_source: 'proforma',
         note_private: `Facture générée depuis la proforma ${q.ref} (caisse)`
-          + (appliedAuthorDiscount !== null ? `\n${authorDiscountNote(appliedAuthorDiscount, bodyAuthorDiscount !== null ? (req.admin?.username || req.admin?.email) : (q.staff_name || 'caisse'))}` : ''),
+          + (appliedAuthorDiscount !== null ? `\n${authorDiscountNote(appliedAuthorDiscount, bodyAuthorDiscount !== null ? (req.admin?.username || req.admin?.email) : (q.staff_name || 'caisse'))}` : '')
+          + (quoteAuthor && appliedAuthorDiscount === null && q.author_negotiated ? `\n${authorNegotiatedNote(q.staff_name || 'caisse')}` : ''),
         lines,
       });
       const invoiceId = invoiceRes.data;

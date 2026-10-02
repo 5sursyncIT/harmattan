@@ -78,6 +78,11 @@ export function authorDiscountNote(pct, by) {
   return `[REMISE AUTEUR] ${pct} % saisie par ${by || 'agent'}`;
 }
 
+/** Mention de traçabilité quand le caissier a saisi des prix négociés ligne à ligne. */
+export function authorNegotiatedNote(by) {
+  return `[REMISE AUTEUR] prix négociés saisis par ${by || 'agent'}`;
+}
+
 /** Vrai si la note porte déjà une remise auteur saisie (devis → facture). */
 export function noteHasAuthorDiscount(note) {
   return /\[REMISE AUTEUR\]/.test(String(note || ''));

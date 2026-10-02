@@ -7,7 +7,7 @@ import { dolibarrApi } from './dolibarr-client.js';
 import { recordInvoicePayment } from './dolibarr-payments.js';
 import { findExistingTier, findSimilarTiers, validateTierIdentity, buildTierName, TYPENT_PARTICULIER } from './tier-dedup.js';
 import { ensureAuthorTier } from './author-tier.js';
-import { findAuthorForTier, parseAuthorDiscount, authorDiscountRequiredBody, authorDiscountNote, authorTierIds } from './author-discount.js';
+import { findAuthorForTier, parseAuthorDiscount, authorDiscountRequiredBody, authorDiscountNote, authorNegotiatedNote, authorTierIds } from './author-discount.js';
 import { EXCLUDED_CATEGORIES_SET } from '../src/utils/excludedCategories.js';
 import {
   ensureExpenseTables, createExpenseRecord, notifyAdminsExpense,
@@ -1281,9 +1281,13 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       //         existent, aucun taux n'est appliqué d'office). Le panier applique
       //         ce taux à chaque ligne (item.discount) ; ici on exige la saisie
       //         et on la trace. Service de presse exclu (tout est à 0 F).
+      //         Alternative au taux : des prix NÉGOCIÉS ligne à ligne
+      //         (author_negotiated) — ils passent par l'override de prix
+      //         existant (motif obligatoire, tracé dans la note de facture).
       const saleAuthor = isPresse ? null : findAuthorForTier(db, customer_id);
       const authorDiscount = parseAuthorDiscount(req.body.author_discount);
-      if (saleAuthor && authorDiscount === null) {
+      const authorNegotiated = req.body.author_negotiated === true && authorDiscount === null;
+      if (saleAuthor && authorDiscount === null && !authorNegotiated) {
         return res.status(409).json(authorDiscountRequiredBody(saleAuthor));
       }
 
@@ -1414,10 +1418,11 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         const roleLabel = req.posStaff.role === 'manager' ? 'manager' : 'libraire';
         let invoiceNote = `POS Terminal ${terminal} | Caissier: ${req.posStaff.name} (${roleLabel})${isPresse ? ` | SERVICE DE PRESSE → ${pressOrgan} (exemplaires gratuits)` : ''}${note ? ' | ' + note : ''}`;
         if (saleAuthor) {
-          invoiceNote += '\n' + authorDiscountNote(authorDiscount, `${req.posStaff.name}/${roleLabel}`);
+          const by = `${req.posStaff.name}/${roleLabel}`;
+          invoiceNote += '\n' + (authorNegotiated ? authorNegotiatedNote(by) : authorDiscountNote(authorDiscount, by));
           try {
             db.prepare('INSERT INTO admin_activity_log (admin_username, action, details) VALUES (?, ?, ?)')
-              .run(req.posStaff.name || 'pos', 'pos_author_discount', `T${terminal} | ${roleLabel} | client auteur #${socid} : remise ${authorDiscount} %`);
+              .run(req.posStaff.name || 'pos', 'pos_author_discount', `T${terminal} | ${roleLabel} | client auteur #${socid} : ${authorNegotiated ? 'prix négociés' : `remise ${authorDiscount} %`}`);
           } catch { /* ignore */ }
         }
         if (priceOverrides.length > 0) {
@@ -2865,6 +2870,8 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
 
   // Remise auteur saisie au comptoir (null = client non auteur / non saisie).
   try { db.exec('ALTER TABLE pos_quotes ADD COLUMN author_discount REAL'); } catch { /* déjà présente */ }
+  // 1 = prix négociés ligne à ligne pour un client auteur (au lieu d'un taux).
+  try { db.exec('ALTER TABLE pos_quotes ADD COLUMN author_negotiated INTEGER DEFAULT 0'); } catch { /* déjà présente */ }
 
   // Échappe les caractères réservés XML — toute valeur dynamique insérée dans
   // content.xml doit y passer (sinon injection / document ODT corrompu).
@@ -2909,12 +2916,13 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
       // Client auteur : le taux de remise doit avoir été saisi (cf. /sales).
       const quoteAuthor = findAuthorForTier(db, customer?.id);
       const quoteAuthorDiscount = parseAuthorDiscount(req.body.author_discount);
-      if (quoteAuthor && quoteAuthorDiscount === null) {
+      const quoteNegotiated = req.body.author_negotiated === true && quoteAuthorDiscount === null;
+      if (quoteAuthor && quoteAuthorDiscount === null && !quoteNegotiated) {
         return res.status(409).json(authorDiscountRequiredBody(quoteAuthor));
       }
 
-      const stmt = db.prepare(`INSERT INTO pos_quotes (ref, customer_name, customer_phone, customer_email, items, total_ttc, staff_name, terminal, author_discount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const stmt = db.prepare(`INSERT INTO pos_quotes (ref, customer_name, customer_phone, customer_email, items, total_ttc, staff_name, terminal, author_discount, author_negotiated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       stmt.run(
         ref,
@@ -2926,6 +2934,7 @@ export function createPosRouter({ db, dolibarrPool, csrfProtection, safeSqlFilte
         req.posStaff.name,
         terminal,
         quoteAuthor ? quoteAuthorDiscount : null,
+        quoteAuthor && quoteNegotiated ? 1 : 0,
       );
 
       res.json({

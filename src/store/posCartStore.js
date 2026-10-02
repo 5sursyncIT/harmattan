@@ -19,12 +19,25 @@ function genSaleId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+// Motif d'override posé sur les lignes à prix négocié pour un auteur (≥ 3
+// caractères, exigé par le serveur ; repris dans la note de facture).
+export const NEGOTIATED_REASON = 'Prix négocié auteur';
+
+// Rétablit le prix catalogue des lignes à prix négocié auteur.
+function stripNegotiated(items) {
+  return items.map((i) => (i.price_override_reason === NEGOTIATED_REASON
+    ? { ...i, price_ttc: i.price_original ?? i.price_ttc, price_override_reason: null, line_total: calcLineTotal(i.price_original ?? i.price_ttc, i.qty, i.discount) }
+    : i));
+}
+
 const usePosCartStore = create(persist((set, get) => ({
   items: [],
   customer: null,
   // Remise auteur (%) saisie par le caissier quand le client est un auteur.
   // null = non saisie. Appliquée à toutes les lignes (existantes et futures).
   authorDiscount: null,
+  // Alternative au taux : prix négociés ligne à ligne pour le client auteur.
+  authorNegotiated: false,
   // Ouvre la saisie de la remise auteur (sélection client, refus serveur 409…).
   authorPromptOpen: false,
   held: [],
@@ -130,35 +143,60 @@ const usePosCartStore = create(persist((set, get) => ({
   // des lignes qui la portaient encore. Un client auteur déclenche la saisie.
   setCustomer: (customer) => {
     const prev = get().authorDiscount;
-    const items = prev == null ? get().items : get().items.map((i) => (
-      i.discount === prev ? { ...i, discount: 0, line_total: calcLineTotal(i.price_ttc, i.qty, 0) } : i
+    const items = stripNegotiated(get().items).map((i) => (
+      prev != null && i.discount === prev ? { ...i, discount: 0, line_total: calcLineTotal(i.price_ttc, i.qty, 0) } : i
     ));
-    set({ customer, items, authorDiscount: null, authorPromptOpen: customer?.source === 'author' });
+    set({ customer, items, authorDiscount: null, authorNegotiated: false, authorPromptOpen: customer?.source === 'author' });
   },
 
-  // Applique le taux saisi à toutes les lignes du ticket.
+  // Applique le taux saisi à toutes les lignes du ticket (annule d'éventuels prix négociés).
   setAuthorDiscount: (pct) => {
     const d = Math.max(0, Math.min(100, Number(pct) || 0));
     set({
       authorDiscount: d,
+      authorNegotiated: false,
       authorPromptOpen: false,
-      items: get().items.map((i) => ({ ...i, discount: d, line_total: calcLineTotal(i.price_ttc, i.qty, d) })),
+      items: stripNegotiated(get().items).map((i) => ({ ...i, discount: d, line_total: calcLineTotal(i.price_ttc, i.qty, d) })),
+    });
+  },
+
+  // Prix négociés : { [product_id]: prix unitaire }. Passe par l'override de
+  // prix (motif tracé côté serveur) ; la remise % des lignes est remise à 0.
+  setAuthorNegotiatedPrices: (prices) => {
+    set({
+      authorDiscount: null,
+      authorNegotiated: true,
+      authorPromptOpen: false,
+      items: get().items.map((i) => {
+        const original = i.price_original ?? i.price_ttc;
+        const p = prices[i.product_id] != null ? Math.max(0, parseInt(prices[i.product_id], 10) || 0) : i.price_ttc;
+        const overridden = !i.is_free && p !== Math.round(original);
+        return {
+          ...i,
+          discount: 0,
+          price_ttc: p,
+          price_original: i.is_free ? null : original,
+          price_override_reason: overridden ? NEGOTIATED_REASON : null,
+          line_total: calcLineTotal(p, i.qty, 0),
+        };
+      }),
     });
   },
 
   requestAuthorDiscount: () => set({ authorPromptOpen: true }),
   closeAuthorPrompt: () => set({ authorPromptOpen: false }),
 
-  clearTicket: () => set({ items: [], customer: null, authorDiscount: null, authorPromptOpen: false, saleId: null, selectedItemId: null }),
+  clearTicket: () => set({ items: [], customer: null, authorDiscount: null, authorNegotiated: false, authorPromptOpen: false, saleId: null, selectedItemId: null }),
 
   holdTicket: () => {
-    const { items, customer, authorDiscount, held, saleId } = get();
+    const { items, customer, authorDiscount, authorNegotiated, held, saleId } = get();
     if (items.length === 0) return;
     set({
-      held: [...held, { items, customer, authorDiscount, saleId, timestamp: Date.now() }],
+      held: [...held, { items, customer, authorDiscount, authorNegotiated, saleId, timestamp: Date.now() }],
       items: [],
       customer: null,
       authorDiscount: null,
+      authorNegotiated: false,
       saleId: null,
       selectedItemId: null,
     });
@@ -168,7 +206,7 @@ const usePosCartStore = create(persist((set, get) => ({
     const held = [...get().held];
     if (index < 0 || index >= held.length) return;
     const ticket = held.splice(index, 1)[0];
-    set({ items: ticket.items, customer: ticket.customer, authorDiscount: ticket.authorDiscount ?? null, saleId: ticket.saleId || null, held });
+    set({ items: ticket.items, customer: ticket.customer, authorDiscount: ticket.authorDiscount ?? null, authorNegotiated: !!ticket.authorNegotiated, saleId: ticket.saleId || null, held });
   },
 
   // Garantit un identifiant de vente stable (pour les paniers déjà persistés

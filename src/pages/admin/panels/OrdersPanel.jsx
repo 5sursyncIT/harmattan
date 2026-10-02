@@ -169,6 +169,11 @@ export default function OrdersPanel() {
           <option value="confirmed">Payées</option>
           <option value="rejected">Rejetées</option>
         </select>
+        {/* Commandes antérieures au 03/10/2026 (facturées, conservées pour la compta). */}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.85rem', color: 'var(--color-text-muted)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={filters.archived === '1'} onChange={e => update('archived', e.target.checked ? '1' : '')} />
+          Archives
+        </label>
       </div>
 
       {loading ? <Loader /> : error ? (

@@ -30,6 +30,7 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
   const items = usePosCartStore((s) => s.items);
   const customer = usePosCartStore((s) => s.customer);
   const authorDiscount = usePosCartStore((s) => s.authorDiscount);
+  const authorNegotiated = usePosCartStore((s) => s.authorNegotiated);
   const requestAuthorDiscount = usePosCartStore((s) => s.requestAuthorDiscount);
   const getTotal = usePosCartStore((s) => s.getTotal);
   const ensureSaleId = usePosCartStore((s) => s.ensureSaleId);
@@ -100,7 +101,10 @@ export default function PaymentPanel({ onClose, onComplete, splitMode = false })
   }));
 
   // Remise auteur transmise au serveur (exigée quand le client est un auteur).
-  const authorField = authorDiscount != null ? { author_discount: authorDiscount } : {};
+  // Prix négociés : les prix modifiés voyagent dans les lignes (override + motif).
+  const authorField = authorDiscount != null
+    ? { author_discount: authorDiscount }
+    : (authorNegotiated ? { author_negotiated: true } : {});
 
   // Refus serveur « remise auteur à saisir » : le total va changer, on ferme
   // l'encaissement et on ouvre la saisie — le caissier relance ensuite.

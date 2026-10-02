@@ -1905,7 +1905,7 @@ function setupAdminRoutes(appRef, { app: appFromOpts, db, csrfProtection, saniti
       const unreadMessages = db.prepare("SELECT COUNT(*) AS c FROM contact_messages WHERE read = 0").get()?.c || 0;
 
       let pendingPayments = 0;
-      try { pendingPayments = db.prepare("SELECT COUNT(*) AS c FROM order_payments WHERE payment_status = 'pending'").get()?.c || 0; } catch { /* table may not exist */ }
+      try { pendingPayments = db.prepare("SELECT COUNT(*) AS c FROM order_payments WHERE payment_status = 'pending' AND archived_at IS NULL").get()?.c || 0; } catch { /* table may not exist */ }
 
       let openAlerts = 0;
       try { openAlerts = db.prepare("SELECT COUNT(*) AS c FROM stock_alerts WHERE status = 'open' AND severity IN ('critique', 'haute')").get()?.c || 0; } catch { /* table may not exist */ }

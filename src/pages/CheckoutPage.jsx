@@ -23,6 +23,15 @@ function isAllowedPaytechRedirect(url) {
   }
 }
 
+// QR codes marchands à scanner depuis l'application du client (fichiers dans
+// public/images). Rattachés à l'id du moyen de paiement, pas à la config
+// éditable, pour qu'une sauvegarde de la config ne les fasse pas disparaître.
+const PAYMENT_QR = {
+  wave: { src: '/images/wave_marchand.jpeg', alt: 'QR code marchand Wave — L\'Harmattan Sénégal', app: 'Wave' },
+  orange_money: { src: '/images/orange_money.jpeg', alt: 'QR code marchand Orange Money 413513 — Harmattan Sénégal SARL', app: 'Orange Money' },
+};
+const OM_MERCHANT_CODE = '413513';
+
 export default function CheckoutPage() {
   const navigate = useNavigate();
   const { items, getTotal, clearCart } = useCartStore();
@@ -147,6 +156,19 @@ export default function CheckoutPage() {
           {method?.instructions && (
             <div className="payment-instructions">
               <h3>{method.icon} Payez par {method.label}</h3>
+              {PAYMENT_QR[method.id] && (
+                <div className="payment-qr">
+                  <p className="payment-qr-step"><strong>Scannez ce QR code</strong> avec l'application {PAYMENT_QR[method.id].app}, puis saisissez le montant ci-dessous.</p>
+                  <img src={PAYMENT_QR[method.id].src} alt={PAYMENT_QR[method.id].alt} width="260" loading="eager" />
+                  <a href={PAYMENT_QR[method.id].src} download className="payment-qr-download">Enregistrer le QR code</a>
+                  <p className="payment-qr-hint">
+                    Vous êtes sur votre téléphone ? Enregistrez l'image ou faites une capture d'écran, puis importez-la depuis l'application si elle le permet.
+                    {method.id === 'orange_money'
+                      ? <> Vous pouvez aussi composer <strong>#144#5*{OM_MERCHANT_CODE}*{Math.round(Number(orderResult?.total) || 0)}*votre code secret#</strong>.</>
+                      : <> Vous pouvez aussi utiliser l'envoi au numéro indiqué ci-dessous.</>}
+                  </p>
+                </div>
+              )}
               {method.instructions.split('\n').map((line, i) => {
                 // Échapper tout HTML de la config (éditable admin/libraire) AVANT de
                 // ré-introduire uniquement le **gras** — sinon XSS stocké possible.

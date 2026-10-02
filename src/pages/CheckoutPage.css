@@ -265,6 +265,41 @@
   margin-bottom: 4px;
 }
 
+.payment-qr {
+  text-align: center;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.payment-qr img {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  height: auto;
+  margin: 8px auto;
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+}
+
+.payment-qr .payment-qr-step {
+  color: var(--color-text);
+}
+
+.payment-qr-download {
+  display: inline-block;
+  margin: 4px 0 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-green);
+}
+
+.payment-qr .payment-qr-hint {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  text-align: left;
+}
+
 @media (max-width: 768px) {
   .checkout-layout {
     grid-template-columns: 1fr;

@@ -163,8 +163,8 @@ export default function POSPage() {
 
   // Client auteur sans remise saisie → on ouvre la saisie au lieu de continuer.
   const needsAuthorDiscount = () => {
-    const { customer, authorDiscount, requestAuthorDiscount } = usePosCartStore.getState();
-    if (customer?.source === 'author' && authorDiscount == null) {
+    const { customer, authorDiscount, authorNegotiated, requestAuthorDiscount } = usePosCartStore.getState();
+    if (customer?.source === 'author' && authorDiscount == null && !authorNegotiated) {
       requestAuthorDiscount();
       return true;
     }
@@ -179,11 +179,14 @@ export default function POSPage() {
   };
 
   const handleQuote = async () => {
-    const { items: currentItems, customer, authorDiscount } = usePosCartStore.getState();
+    const { items: currentItems, customer, authorDiscount, authorNegotiated } = usePosCartStore.getState();
     if (!currentItems.length) return;
     if (needsAuthorDiscount()) return;
     try {
-      const res = await posCreateQuote({ items: currentItems, customer, author_discount: authorDiscount });
+      const res = await posCreateQuote({
+        items: currentItems, customer,
+        ...(authorNegotiated ? { author_negotiated: true } : { author_discount: authorDiscount }),
+      });
       setCompletedQuote(res.data);
       clearTicket();
       toast.success(`Facture proforma ${res.data.ref} créée`);
